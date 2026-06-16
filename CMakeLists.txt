@@ -11,10 +11,18 @@ add_executable(midi-ble-rtd
     src/midi-ble-rtd.c
 )
 
+add_executable(midi-ble-rtctl
+    src/midi-ble-rtctl.c
+)
+
 target_include_directories(midi-ble-rtd PRIVATE ${DEPS_INCLUDE_DIRS})
 target_link_libraries(midi-ble-rtd PRIVATE ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rtd PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
-install(TARGETS midi-ble-rtd DESTINATION bin)
+target_include_directories(midi-ble-rtctl PRIVATE ${DEPS_INCLUDE_DIRS})
+target_link_libraries(midi-ble-rtctl PRIVATE ${DEPS_LIBRARIES})
+target_compile_options(midi-ble-rtctl PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
+
+install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION bin)
 install(FILES config/roland-gokeys.ini.example DESTINATION share/midi-ble-rt)
 install(FILES systemd/midi-ble-rtd.service DESTINATION lib/systemd/system)
