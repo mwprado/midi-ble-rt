@@ -1,0 +1,8 @@
+build/
+*.o
+*.a
+*.so
+*.swp
+.cache/
+compile_commands.json
+.DS_Store

@@ -1,0 +1,19 @@
+[Unit]
+Description=Low-latency BLE-MIDI to ALSA bridge
+After=bluetooth.service sound.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/midi-ble-rtd --config /etc/midi-ble-rt/roland-gokeys.ini
+Restart=on-failure
+RestartSec=2
+
+# Reserved for future RT path.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK
+
+[Install]
+WantedBy=multi-user.target

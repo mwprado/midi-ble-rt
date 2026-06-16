@@ -1,0 +1,31 @@
+[device]
+# Address observed for GO:KEYS MIDI.
+address = CB:81:F4:62:FF:07
+
+# Diagnostic only. Do not rely on name/alias as the final routing criterion.
+name = GO:KEYS MIDI
+
+# Roland manual / observed operational rule:
+# connect BLE-MIDI first, then connect Audio/A2DP if needed.
+connect_order = midi-first
+
+# This daemon can set Trusted=true. Pairing still may require an external/default BlueZ Agent
+# until Agent1 support is implemented in midi-ble-rtd.
+pair = no
+trust = yes
+auto_reconnect = yes
+
+[gatt]
+service_uuid = 03b80e5a-ede8-4b33-a751-6ce34ec4c700
+io_uuid = 7772e5db-3868-4112-a1a9-f2669d106bf3
+io_uuid_alias = 00006bf3-0000-1000-8000-00805f9b34fb
+require_notify = yes
+require_write_without_response = yes
+
+[alsa]
+client_name = midi-ble-rt
+port_name = Roland GO:KEYS BLE-MIDI
+
+[debug]
+print_ble_packets = yes
+print_midi_events = no

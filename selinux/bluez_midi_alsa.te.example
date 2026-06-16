@@ -1,0 +1,15 @@
+# Example only. Generate and verify from real AVC logs before use.
+#
+# This is for the native BlueZ MIDI profile case, where bluetoothd tries
+# to create/use an ALSA Sequencer MIDI port and SELinux denies access
+# to /dev/snd/seq or another sound_device_t node.
+
+module bluez_midi_alsa 1.0;
+
+require {
+    type bluetooth_t;
+    type sound_device_t;
+    class chr_file { getattr open read write ioctl };
+}
+
+allow bluetooth_t sound_device_t:chr_file { getattr open read write ioctl };
