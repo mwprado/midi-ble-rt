@@ -64,6 +64,24 @@ cmake -S . -B build
 cmake --build build
 ```
 
+## Control CLI
+
+Phase 1 adds `midi-ble-rtctl`, a BlueZ-oriented inspection tool for BLE-MIDI devices. It does not create ALSA ports; that remains the job of `midi-ble-rtd`.
+
+Useful commands:
+
+```bash
+./build/midi-ble-rtctl list
+./build/midi-ble-rtctl list --midi-only
+./build/midi-ble-rtctl scan --timeout 10 --midi-only
+./build/midi-ble-rtctl info CB:81:F4:62:FF:07
+./build/midi-ble-rtctl probe CB:81:F4:62:FF:07
+```
+
+`scan` starts BlueZ discovery and then prints known devices with address, RSSI, name, alias, paired/trusted/connected state, BLE-MIDI UUID hints and profile guesses.
+
+`probe` may call `Device1.Connect()` temporarily to let BlueZ resolve GATT services. It then enumerates the BLE-MIDI service and scores candidate MIDI I/O characteristics, including the Roland GO:KEYS `00006bf3...` alias.
+
 ## Run
 
 Create a config file:
@@ -116,6 +134,8 @@ If the native BlueZ MIDI profile fails only with SELinux enforcing, capture the 
 - [x] Roland GO:KEYS `00006bf3...` characteristic alias
 - [x] ALSA Sequencer source port
 - [x] BLE-MIDI note decoding proof
+- [x] initial `midi-ble-rtctl list/scan/info/probe`
+- [ ] profile-aware `midi-ble-rtctl connect/disconnect/forget`
 - [ ] BlueZ Agent1 integration for automatic pair/authorize
 - [ ] automatic reconnect loop
 - [ ] `AcquireNotify()` fast path
