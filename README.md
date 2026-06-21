@@ -4,6 +4,8 @@
 
 The first validated target is the Roland GO:KEYS family. The daemon does not depend on BlueZ's `profiles/midi` plugin. It uses BlueZ as a generic BLE/GATT transport, finds the BLE-MIDI service/characteristic directly, subscribes to notifications, decodes BLE-MIDI packets, and publishes an ALSA Sequencer source port for DAWs and softsynths.
 
+The primary interface is ALSA Sequencer. PipeWire/JACK/DAWs may consume or display the ALSA MIDI port, but they are not dependencies of the project.
+
 ## Current status
 
 Validated proof of concept:
@@ -66,9 +68,9 @@ cmake --build build
 
 ## Control CLI
 
-Phase 1 adds `midi-ble-rtctl`, a BlueZ-oriented inspection tool for BLE-MIDI devices. It does not create ALSA ports; that remains the job of `midi-ble-rtd`.
+`midi-ble-rtctl` is the BlueZ control-plane tool. It helps discover, inspect and prepare BLE-MIDI devices without manually driving `bluetoothctl` for every step.
 
-Useful commands:
+Inspection commands:
 
 ```bash
 ./build/midi-ble-rtctl list
@@ -78,11 +80,35 @@ Useful commands:
 ./build/midi-ble-rtctl probe CB:81:F4:62:FF:07
 ```
 
+BlueZ control commands:
+
+```bash
+./build/midi-ble-rtctl pair CB:81:F4:62:FF:07
+./build/midi-ble-rtctl trust CB:81:F4:62:FF:07
+./build/midi-ble-rtctl untrust CB:81:F4:62:FF:07
+./build/midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys
+./build/midi-ble-rtctl disconnect CB:81:F4:62:FF:07
+./build/midi-ble-rtctl forget CB:81:F4:62:FF:07 --yes
+```
+
+For `--profile roland_gokeys`, `connect` applies the current Roland policy:
+
+```text
+Pair if needed
+Trusted=true
+Device1.Connect()
+wait ServicesResolved=true
+validate BLE-MIDI service
+accept official MIDI I/O UUID or Roland 00006bf3... alias
+```
+
+`connect` does not yet start the streaming daemon automatically. For now, the data plane is still started with `midi-ble-rtd --config <file>`.
+
 `scan` starts BlueZ discovery and then prints known devices with address, RSSI, name, alias, paired/trusted/connected state, BLE-MIDI UUID hints and profile guesses.
 
 `probe` may call `Device1.Connect()` temporarily to let BlueZ resolve GATT services. It then enumerates the BLE-MIDI service and scores candidate MIDI I/O characteristics, including the Roland GO:KEYS `00006bf3...` alias.
 
-## Run
+## Run data plane
 
 Create a config file:
 
@@ -110,6 +136,16 @@ Connect MIDI first, then Audio/A2DP if needed.
 
 When the GO:KEYS is connected as Audio, it behaves as a Bluetooth speaker/receptor. That is not the MIDI path. The daemon validates the target by GATT, not by the BlueZ `Name` or `Alias`.
 
+## ALSA, not PipeWire
+
+The project creates ALSA Sequencer ports. See:
+
+```text
+docs/ALSA.md
+```
+
+PipeWire may expose ALSA MIDI ports in some environments, but PipeWire is not part of the core dependency chain.
+
 ## SELinux
 
 SELinux can block the ALSA Sequencer side of the integration. Do not solve this by globally disabling SELinux. See:
@@ -135,7 +171,9 @@ If the native BlueZ MIDI profile fails only with SELinux enforcing, capture the 
 - [x] ALSA Sequencer source port
 - [x] BLE-MIDI note decoding proof
 - [x] initial `midi-ble-rtctl list/scan/info/probe`
-- [ ] profile-aware `midi-ble-rtctl connect/disconnect/forget`
+- [x] basic `midi-ble-rtctl pair/trust/connect/disconnect/forget`
+- [ ] profile-aware local config and multiple device ids
+- [ ] daemon control from `midi-ble-rtctl connect`
 - [ ] BlueZ Agent1 integration for automatic pair/authorize
 - [ ] automatic reconnect loop
 - [ ] `AcquireNotify()` fast path
