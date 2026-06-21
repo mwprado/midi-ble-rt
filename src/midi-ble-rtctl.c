@@ -1,13 +1,14 @@
 /*
  * midi-ble-rtctl
  *
- * Phase 1 control-plane CLI for BLE-MIDI devices on BlueZ.
+ * Control-plane CLI for BLE-MIDI devices on BlueZ.
  *
- * Scope:
+ * Current scope:
  *   - list known BlueZ devices
  *   - scan nearby devices
  *   - show device info
  *   - probe BLE-MIDI GATT service/characteristic candidates
+ *   - pair/trust/connect/disconnect/forget devices through BlueZ
  *
  * The data plane remains midi-ble-rtd.
  */
@@ -41,6 +42,20 @@ typedef struct {
     bool connected_only;
 } ListOptions;
 
+typedef enum {
+    PROFILE_UNKNOWN = 0,
+    PROFILE_STANDARD_BLE_MIDI,
+    PROFILE_ROLAND_GOKEYS,
+} ProfileKind;
+
+typedef struct {
+    ProfileKind profile;
+    bool force_pair;
+    bool no_pair;
+    bool no_trust;
+    bool no_probe;
+} ConnectOptions;
+
 static void usage(const char *argv0) {
     g_printerr(
         "Usage:\n"
@@ -48,10 +63,16 @@ static void usage(const char *argv0) {
         "  %s scan [--timeout SECONDS] [--midi-only]\n"
         "  %s info DEVICE\n"
         "  %s probe DEVICE\n"
+        "  %s pair DEVICE\n"
+        "  %s trust DEVICE\n"
+        "  %s untrust DEVICE\n"
+        "  %s connect DEVICE [--profile roland_gokeys|standard_ble_midi] [--pair|--no-pair] [--no-trust] [--no-probe]\n"
+        "  %s disconnect DEVICE\n"
+        "  %s forget DEVICE --yes\n"
         "\n"
         "DEVICE may be a Bluetooth address, BlueZ object path, or a case-insensitive\n"
         "substring of the BlueZ Name/Alias.\n",
-        argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static const char *yesno(bool v) {
@@ -76,6 +97,31 @@ static bool contains_casefold(const char *haystack, const char *needle) {
 
 static bool path_has_prefix(const char *path, const char *prefix) {
     return path && prefix && g_str_has_prefix(path, prefix);
+}
+
+static const char *profile_name(ProfileKind profile) {
+    switch (profile) {
+        case PROFILE_STANDARD_BLE_MIDI:
+            return "standard_ble_midi";
+        case PROFILE_ROLAND_GOKEYS:
+            return "roland_gokeys";
+        case PROFILE_UNKNOWN:
+        default:
+            return "-";
+    }
+}
+
+static ProfileKind profile_from_string(const char *s) {
+    if (!s || !*s)
+        return PROFILE_UNKNOWN;
+    if (g_ascii_strcasecmp(s, "standard_ble_midi") == 0 ||
+        g_ascii_strcasecmp(s, "standard") == 0)
+        return PROFILE_STANDARD_BLE_MIDI;
+    if (g_ascii_strcasecmp(s, "roland_gokeys") == 0 ||
+        g_ascii_strcasecmp(s, "go_keys") == 0 ||
+        g_ascii_strcasecmp(s, "gokeys") == 0)
+        return PROFILE_ROLAND_GOKEYS;
+    return PROFILE_UNKNOWN;
 }
 
 static GVariant *get_managed_objects(Ctl *ctl) {
@@ -149,13 +195,21 @@ static void print_string_array(GVariant *array, const char *indent) {
         g_print("%s(none)\n", indent);
 }
 
-static const char *guess_profile(const char *name, const char *alias, GVariant *uuids) {
+static ProfileKind guess_profile_kind(const char *name, const char *alias, GVariant *uuids) {
     if (contains_casefold(name, "go:keys") || contains_casefold(alias, "go:keys") ||
         contains_casefold(name, "go keys") || contains_casefold(alias, "go keys"))
-        return "roland_gokeys";
+        return PROFILE_ROLAND_GOKEYS;
 
     if (string_array_contains_uuid(uuids, BLE_MIDI_SERVICE_UUID))
-        return "standard_ble_midi";
+        return PROFILE_STANDARD_BLE_MIDI;
+
+    return PROFILE_UNKNOWN;
+}
+
+static const char *guess_profile(const char *name, const char *alias, GVariant *uuids) {
+    ProfileKind p = guess_profile_kind(name, alias, uuids);
+    if (p != PROFILE_UNKNOWN)
+        return profile_name(p);
 
     if (contains_casefold(name, "midi") || contains_casefold(alias, "midi"))
         return "unknown_midi";
@@ -480,14 +534,87 @@ static bool get_device_bool(Ctl *ctl, const char *path, const char *property, bo
     return true;
 }
 
-static bool connect_for_probe(Ctl *ctl, const char *path) {
-    bool connected = false;
-    if (get_device_bool(ctl, path, "Connected", &connected) && connected)
-        return true;
+static char *get_device_object_path_property(Ctl *ctl, const char *path, const char *property) {
+    GError *error = NULL;
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus, BLUEZ_BUS, path, PROPERTIES_IFACE, "Get",
+        g_variant_new("(ss)", DEVICE_IFACE, property), G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
 
-    g_print("Device not connected; calling Device1.Connect() for probe...\n");
+    if (!ret) {
+        g_clear_error(&error);
+        return NULL;
+    }
+
+    GVariant *value = NULL;
+    g_variant_get(ret, "(v)", &value);
+    char *out = g_strdup(g_variant_get_string(value, NULL));
+    g_variant_unref(value);
+    g_variant_unref(ret);
+    return out;
+}
+
+static bool set_device_trusted(Ctl *ctl, const char *path, bool trusted) {
+    GError *error = NULL;
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus, BLUEZ_BUS, path, PROPERTIES_IFACE, "Set",
+        g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(trusted)),
+        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+
+    if (!ret) {
+        g_printerr("Set Device1.Trusted=%s failed: %s\n", yesno(trusted), error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Trusted=%s set for %s\n", yesno(trusted), path);
+    return true;
+}
+
+static bool pair_device(Ctl *ctl, const char *path) {
+    bool paired = false;
+    if (get_device_bool(ctl, path, "Paired", &paired) && paired) {
+        g_print("Device already paired.\n");
+        return true;
+    }
 
     GError *error = NULL;
+    g_print("Calling Device1.Pair()...\n");
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Pair",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
+
+    if (!ret) {
+        const char *remote = g_dbus_error_get_remote_error(error);
+        if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
+            g_clear_error(&error);
+            g_print("Device is already paired according to BlueZ.\n");
+            return true;
+        }
+
+        g_printerr("Device1.Pair failed: %s\n", error->message);
+        g_printerr("If BlueZ asks for authorization, Agent1 support is the next implementation step.\n");
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Pair ok.\n");
+    return true;
+}
+
+static bool connect_device(Ctl *ctl, const char *path) {
+    bool connected = false;
+    if (get_device_bool(ctl, path, "Connected", &connected) && connected) {
+        g_print("Device already connected.\n");
+        return true;
+    }
+
+    GError *error = NULL;
+    g_print("Calling Device1.Connect()...\n");
+
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Connect",
         NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
@@ -498,16 +625,49 @@ static bool connect_for_probe(Ctl *ctl, const char *path) {
             (g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0 ||
              g_strcmp0(remote, "org.bluez.Error.InProgress") == 0)) {
             g_clear_error(&error);
+            g_print("Device already connected or connection in progress.\n");
             return true;
         }
 
         g_printerr("Device1.Connect failed: %s\n", error->message);
-        g_printerr("If authorization is required, use bluetoothctl for now; profile-aware connect comes next.\n");
         g_clear_error(&error);
         return false;
     }
 
     g_variant_unref(ret);
+    g_print("Connect ok.\n");
+    return true;
+}
+
+static bool disconnect_device(Ctl *ctl, const char *path) {
+    bool connected = false;
+    if (get_device_bool(ctl, path, "Connected", &connected) && !connected) {
+        g_print("Device already disconnected.\n");
+        return true;
+    }
+
+    GError *error = NULL;
+    g_print("Calling Device1.Disconnect()...\n");
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Disconnect",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
+
+    if (!ret) {
+        const char *remote = g_dbus_error_get_remote_error(error);
+        if (remote && g_strcmp0(remote, "org.bluez.Error.NotConnected") == 0) {
+            g_clear_error(&error);
+            g_print("Device not connected.\n");
+            return true;
+        }
+
+        g_printerr("Device1.Disconnect failed: %s\n", error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Disconnect ok.\n");
     return true;
 }
 
@@ -521,6 +681,37 @@ static bool wait_services_resolved(Ctl *ctl, const char *path, int timeout_ms) {
         elapsed += 100;
     }
     return false;
+}
+
+static bool remove_device(Ctl *ctl, const char *path) {
+    char *adapter = get_device_object_path_property(ctl, path, "Adapter");
+    if (!adapter)
+        adapter = first_adapter_path(ctl);
+
+    if (!adapter) {
+        g_printerr("Cannot find adapter for device %s\n", path);
+        return false;
+    }
+
+    GError *error = NULL;
+    g_print("Calling Adapter1.RemoveDevice(%s) on %s...\n", path, adapter);
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus, BLUEZ_BUS, adapter, ADAPTER_IFACE, "RemoveDevice",
+        g_variant_new("(o)", path), NULL,
+        G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
+
+    if (!ret) {
+        g_printerr("Adapter1.RemoveDevice failed: %s\n", error->message);
+        g_clear_error(&error);
+        g_free(adapter);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_free(adapter);
+    g_print("RemoveDevice ok.\n");
+    return true;
 }
 
 static char *find_ble_midi_service(Ctl *ctl, const char *device_path, bool print_all) {
@@ -650,6 +841,38 @@ static char *find_best_midi_characteristic(Ctl *ctl, const char *device_path, co
     return best;
 }
 
+static bool validate_ble_midi_gatt(Ctl *ctl, const char *device_path, bool print_services) {
+    if (!wait_services_resolved(ctl, device_path, 15000)) {
+        g_printerr("Timed out waiting for ServicesResolved=true.\n");
+        return false;
+    }
+
+    g_print("ServicesResolved=true\n");
+    if (print_services)
+        g_print("GATT services under device:\n");
+
+    char *service_path = find_ble_midi_service(ctl, device_path, print_services);
+    if (!service_path) {
+        g_printerr("BLE-MIDI service not found. For Roland GO:KEYS, connect MIDI before Audio/A2DP.\n");
+        return false;
+    }
+
+    g_print("Selected BLE-MIDI service: %s\n", service_path);
+    g_print("GATT characteristics under BLE-MIDI service:\n");
+
+    char *char_path = find_best_midi_characteristic(ctl, device_path, service_path);
+    if (!char_path) {
+        g_printerr("No usable BLE-MIDI I/O characteristic found.\n");
+        g_free(service_path);
+        return false;
+    }
+
+    g_print("Selected BLE-MIDI I/O characteristic: %s\n", char_path);
+    g_free(char_path);
+    g_free(service_path);
+    return true;
+}
+
 static int cmd_probe(Ctl *ctl, const char *selector) {
     char *device_path = find_device_path(ctl, selector);
     if (!device_path) {
@@ -660,45 +883,17 @@ static int cmd_probe(Ctl *ctl, const char *selector) {
 
     g_print("Probe device: %s\n", device_path);
 
-    if (!connect_for_probe(ctl, device_path)) {
+    if (!connect_device(ctl, device_path)) {
         g_free(device_path);
         return 1;
     }
 
-    if (!wait_services_resolved(ctl, device_path, 15000)) {
-        g_printerr("Timed out waiting for ServicesResolved=true.\n");
-        g_free(device_path);
-        return 1;
-    }
+    bool ok = validate_ble_midi_gatt(ctl, device_path, true);
+    if (ok)
+        g_print("Status: usable for midi-ble-rtd StartNotify path.\n");
 
-    g_print("ServicesResolved=true\n");
-    g_print("GATT services under device:\n");
-
-    char *service_path = find_ble_midi_service(ctl, device_path, true);
-    if (!service_path) {
-        g_printerr("BLE-MIDI service not found. For Roland GO:KEYS, connect MIDI before Audio/A2DP.\n");
-        g_free(device_path);
-        return 1;
-    }
-
-    g_print("Selected BLE-MIDI service: %s\n", service_path);
-    g_print("GATT characteristics under BLE-MIDI service:\n");
-
-    char *char_path = find_best_midi_characteristic(ctl, device_path, service_path);
-    if (!char_path) {
-        g_printerr("No usable BLE-MIDI I/O characteristic found.\n");
-        g_free(service_path);
-        g_free(device_path);
-        return 1;
-    }
-
-    g_print("Selected BLE-MIDI I/O characteristic: %s\n", char_path);
-    g_print("Status: usable for midi-ble-rtd StartNotify path.\n");
-
-    g_free(char_path);
-    g_free(service_path);
     g_free(device_path);
-    return 0;
+    return ok ? 0 : 1;
 }
 
 static int cmd_scan(Ctl *ctl, int timeout_s, const ListOptions *opts) {
@@ -723,6 +918,127 @@ static int cmd_scan(Ctl *ctl, int timeout_s, const ListOptions *opts) {
     g_free(adapter);
 
     return cmd_list(ctl, opts);
+}
+
+static int cmd_pair(Ctl *ctl, const char *selector) {
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        return 1;
+    }
+    bool ok = pair_device(ctl, path);
+    g_free(path);
+    return ok ? 0 : 1;
+}
+
+static int cmd_trust(Ctl *ctl, const char *selector, bool trusted) {
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        return 1;
+    }
+    bool ok = set_device_trusted(ctl, path, trusted);
+    g_free(path);
+    return ok ? 0 : 1;
+}
+
+static int cmd_disconnect(Ctl *ctl, const char *selector) {
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        return 1;
+    }
+    bool ok = disconnect_device(ctl, path);
+    g_free(path);
+    return ok ? 0 : 1;
+}
+
+static int cmd_forget(Ctl *ctl, const char *selector, bool yes) {
+    if (!yes) {
+        g_printerr("Refusing to forget without --yes. This removes the device from BlueZ.\n");
+        return 2;
+    }
+
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        return 1;
+    }
+
+    disconnect_device(ctl, path);
+    bool ok = remove_device(ctl, path);
+    g_free(path);
+    return ok ? 0 : 1;
+}
+
+static ProfileKind infer_device_profile(Ctl *ctl, const char *path) {
+    GVariant *props = device_props(ctl, path);
+    if (!props)
+        return PROFILE_UNKNOWN;
+
+    GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
+    GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
+    GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
+
+    const char *name = v_name ? g_variant_get_string(v_name, NULL) : "";
+    const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : "";
+    ProfileKind p = guess_profile_kind(name, alias, v_uuids);
+
+    if (v_name) g_variant_unref(v_name);
+    if (v_alias) g_variant_unref(v_alias);
+    if (v_uuids) g_variant_unref(v_uuids);
+    g_variant_unref(props);
+    return p;
+}
+
+static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opts) {
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        g_printerr("Run `midi-ble-rtctl scan --midi-only` first.\n");
+        return 1;
+    }
+
+    ProfileKind profile = opts->profile != PROFILE_UNKNOWN ? opts->profile : infer_device_profile(ctl, path);
+    g_print("Connect device: %s\n", path);
+    g_print("Profile: %s\n", profile_name(profile));
+
+    bool should_pair = opts->force_pair;
+    if (profile == PROFILE_ROLAND_GOKEYS)
+        should_pair = true;
+    if (opts->no_pair)
+        should_pair = false;
+
+    bool should_trust = !opts->no_trust;
+    if (profile == PROFILE_UNKNOWN && !opts->force_pair)
+        g_print("Profile unknown; connect will avoid forced pair unless --pair is given.\n");
+
+    if (should_pair && !pair_device(ctl, path)) {
+        g_free(path);
+        return 1;
+    }
+
+    if (should_trust && !set_device_trusted(ctl, path, true)) {
+        g_free(path);
+        return 1;
+    }
+
+    if (!connect_device(ctl, path)) {
+        g_free(path);
+        return 1;
+    }
+
+    bool ok = true;
+    if (!opts->no_probe)
+        ok = validate_ble_midi_gatt(ctl, path, false);
+
+    if (ok) {
+        g_print("BlueZ connection ready.\n");
+        g_print("Data plane is still started separately, for now: midi-ble-rtd --config <file>\n");
+    }
+
+    g_free(path);
+    return ok ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
@@ -790,6 +1106,74 @@ int main(int argc, char **argv) {
             goto out;
         }
         rc = cmd_probe(&ctl, argv[2]);
+    } else if (g_strcmp0(cmd, "pair") == 0) {
+        if (argc != 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        rc = cmd_pair(&ctl, argv[2]);
+    } else if (g_strcmp0(cmd, "trust") == 0 || g_strcmp0(cmd, "untrust") == 0) {
+        if (argc != 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        rc = cmd_trust(&ctl, argv[2], g_strcmp0(cmd, "trust") == 0);
+    } else if (g_strcmp0(cmd, "connect") == 0) {
+        if (argc < 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        ConnectOptions opts = {0};
+        for (int i = 3; i < argc; i++) {
+            if (g_strcmp0(argv[i], "--profile") == 0 && i + 1 < argc) {
+                opts.profile = profile_from_string(argv[++i]);
+                if (opts.profile == PROFILE_UNKNOWN) {
+                    g_printerr("Unknown profile: %s\n", argv[i]);
+                    rc = 2;
+                    goto out;
+                }
+            } else if (g_strcmp0(argv[i], "--pair") == 0) {
+                opts.force_pair = true;
+            } else if (g_strcmp0(argv[i], "--no-pair") == 0) {
+                opts.no_pair = true;
+            } else if (g_strcmp0(argv[i], "--no-trust") == 0) {
+                opts.no_trust = true;
+            } else if (g_strcmp0(argv[i], "--no-probe") == 0) {
+                opts.no_probe = true;
+            } else {
+                usage(argv[0]);
+                rc = 2;
+                goto out;
+            }
+        }
+        rc = cmd_connect(&ctl, argv[2], &opts);
+    } else if (g_strcmp0(cmd, "disconnect") == 0) {
+        if (argc != 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        rc = cmd_disconnect(&ctl, argv[2]);
+    } else if (g_strcmp0(cmd, "forget") == 0) {
+        if (argc < 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        bool yes = false;
+        for (int i = 3; i < argc; i++) {
+            if (g_strcmp0(argv[i], "--yes") == 0)
+                yes = true;
+            else {
+                usage(argv[0]);
+                rc = 2;
+                goto out;
+            }
+        }
+        rc = cmd_forget(&ctl, argv[2], yes);
     } else {
         usage(argv[0]);
         rc = 2;
