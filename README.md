@@ -2,13 +2,13 @@
 
 `midi-ble-rt` is a Linux BLE-MIDI/GATT to ALSA Sequencer bridge.
 
-The first validated target is the Roland GO:KEYS family. The daemon does not depend on BlueZ's `profiles/midi` plugin. It uses BlueZ as a generic BLE/GATT transport, finds the BLE-MIDI service/characteristic directly, subscribes to notifications, decodes BLE-MIDI packets, and publishes an ALSA Sequencer source port for DAWs and softsynths.
+The first validated target is the Roland GO:KEYS family. The daemon does not depend on BlueZ's `profiles/midi` plugin. It uses BlueZ as a generic BLE/GATT transport, finds the BLE-MIDI service/characteristic directly, subscribes to notifications, decodes BLE-MIDI packets, publishes an ALSA Sequencer port, and can write short MIDI messages back to the keyboard through GATT `WriteValue`.
 
 The primary interface is ALSA Sequencer. PipeWire/JACK/DAWs may consume or display the ALSA MIDI port, but they are not dependencies of the project.
 
 ## Current status
 
-Validated proof of concept:
+Validated receive path:
 
 ```text
 Roland GO:KEYS MIDI
@@ -19,6 +19,16 @@ Roland GO:KEYS MIDI
 → midi-ble-rtd
 → ALSA Sequencer
 → aseqdump / DAW
+```
+
+Initial transmit path:
+
+```text
+aplaymidi / DAW / ALSA Sequencer client
+→ midi-ble-rtd duplex ALSA port
+→ BLE-MIDI packet encoder
+→ GATT WriteValue
+→ Roland GO:KEYS
 ```
 
 Observed ALSA events:
@@ -68,7 +78,7 @@ cmake --build build
 
 ## Control CLI
 
-`midi-ble-rtctl` is the BlueZ control-plane tool. It helps discover, inspect and prepare BLE-MIDI devices without manually driving `bluetoothctl` for every step.
+`midi-ble-rtctl` is the BlueZ control-plane tool. It helps discover, inspect, prepare and configure BLE-MIDI devices without manually driving `bluetoothctl` for every step.
 
 Help commands:
 
@@ -76,8 +86,9 @@ Help commands:
 ./build/midi-ble-rtctl --help
 ./build/midi-ble-rtctl help
 ./build/midi-ble-rtctl help connect
+./build/midi-ble-rtctl help configure
 ./build/midi-ble-rtctl connect --help
-./build/midi-ble-rtctl scan --help
+./build/midi-ble-rtctl configure --help
 ```
 
 Inspection commands:
@@ -101,6 +112,15 @@ BlueZ control commands:
 ./build/midi-ble-rtctl forget CB:81:F4:62:FF:07 --yes
 ```
 
+Configuration commands:
+
+```bash
+./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys
+./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --print
+./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
+./build/midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config
+```
+
 For `--profile roland_gokeys`, `connect` applies the current Roland policy:
 
 ```text
@@ -112,6 +132,12 @@ validate BLE-MIDI service
 accept official MIDI I/O UUID or Roland 00006bf3... alias
 ```
 
+`connect --write-config` writes the local config after a successful BlueZ connection/GATT validation. The default GO:KEYS config path is:
+
+```text
+~/.config/midi-ble-rt/roland-gokeys.ini
+```
+
 `connect` does not yet start the streaming daemon automatically. For now, the data plane is still started with `midi-ble-rtd --config <file>`.
 
 `scan` starts BlueZ discovery and then prints known devices with address, RSSI, name, alias, paired/trusted/connected state, BLE-MIDI UUID hints and profile guesses.
@@ -120,14 +146,13 @@ accept official MIDI I/O UUID or Roland 00006bf3... alias
 
 ## Run data plane
 
-Create a config file:
+Create or update the config file automatically:
 
 ```bash
-mkdir -p ~/.config/midi-ble-rt
-cp config/roland-gokeys.ini.example ~/.config/midi-ble-rt/roland-gokeys.ini
+./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
 ```
 
-Edit the address if needed, then run:
+Then run:
 
 ```bash
 ./build/midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
@@ -137,7 +162,38 @@ Check the ALSA port:
 
 ```bash
 aconnect -l
-aseqdump -p "midi-ble-rt"
+aseqdump -p CLIENT:PORT
+```
+
+Use the numeric `CLIENT:PORT` shown by `aconnect -l`, for example `128:0`.
+
+## Receive MIDI from GO:KEYS
+
+```bash
+aseqdump -p 128:0
+```
+
+or record a MIDI file:
+
+```bash
+arecordmidi -p 128:0 gokeys-input.mid
+```
+
+## Send MIDI to GO:KEYS
+
+The daemon creates a duplex ALSA Sequencer port. After the daemon is running, send a MIDI file into the same `CLIENT:PORT`:
+
+```bash
+aplaymidi -p 128:0 test.mid
+```
+
+For a minimal smoke test, create a one-note MIDI file with any DAW or sequencer and play it through the port. With debug enabled, the daemon prints outgoing MIDI bytes and BLE packets.
+
+Transmit can be disabled in the config:
+
+```ini
+[midi]
+enable_tx = no
 ```
 
 ## Operational rule for Roland GO:KEYS
@@ -178,17 +234,19 @@ If the native BlueZ MIDI profile fails only with SELinux enforcing, capture the 
 
 - [x] GATT discovery by service UUID
 - [x] Roland GO:KEYS `00006bf3...` characteristic alias
-- [x] ALSA Sequencer source port
+- [x] ALSA Sequencer duplex port
 - [x] BLE-MIDI note decoding proof
 - [x] initial `midi-ble-rtctl list/scan/info/probe`
 - [x] basic `midi-ble-rtctl pair/trust/connect/disconnect/forget`
 - [x] detailed `midi-ble-rtctl --help` and per-command help
-- [ ] profile-aware local config and multiple device ids
+- [x] profile-aware local config for GO:KEYS
+- [x] initial ALSA -> BLE-MIDI write path
+- [ ] multiple device ids and config directory loading
 - [ ] daemon control from `midi-ble-rtctl connect`
 - [ ] BlueZ Agent1 integration for automatic pair/authorize
 - [ ] automatic reconnect loop
 - [ ] `AcquireNotify()` fast path
-- [ ] bidirectional MIDI write path
+- [ ] robust bidirectional MIDI write path for long SysEx/segmentation edge cases
 - [ ] RT thread, `mlockall()`, jitter metrics
 - [ ] profiles for Korg/Yamaha/CME/Kawai and standard BLE-MIDI devices
 
