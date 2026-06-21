@@ -70,6 +70,16 @@ cmake --build build
 
 `midi-ble-rtctl` is the BlueZ control-plane tool. It helps discover, inspect and prepare BLE-MIDI devices without manually driving `bluetoothctl` for every step.
 
+Help commands:
+
+```bash
+./build/midi-ble-rtctl --help
+./build/midi-ble-rtctl help
+./build/midi-ble-rtctl help connect
+./build/midi-ble-rtctl connect --help
+./build/midi-ble-rtctl scan --help
+```
+
 Inspection commands:
 
 ```bash
@@ -172,6 +182,7 @@ If the native BlueZ MIDI profile fails only with SELinux enforcing, capture the 
 - [x] BLE-MIDI note decoding proof
 - [x] initial `midi-ble-rtctl list/scan/info/probe`
 - [x] basic `midi-ble-rtctl pair/trust/connect/disconnect/forget`
+- [x] detailed `midi-ble-rtctl --help` and per-command help
 - [ ] profile-aware local config and multiple device ids
 - [ ] daemon control from `midi-ble-rtctl connect`
 - [ ] BlueZ Agent1 integration for automatic pair/authorize
