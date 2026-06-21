@@ -26,6 +26,11 @@ require_write_without_response = yes
 client_name = midi-ble-rt
 port_name = Roland GO:KEYS BLE-MIDI
 
+[midi]
+# Enable ALSA Sequencer -> BLE-MIDI WriteValue path.
+# This allows aplaymidi/DAWs to send short MIDI messages to the keyboard.
+enable_tx = yes
+
 [debug]
 print_ble_packets = yes
 print_midi_events = no
