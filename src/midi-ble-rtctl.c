@@ -9,6 +9,7 @@
  *   - show device info
  *   - probe BLE-MIDI GATT service/characteristic candidates
  *   - pair/trust/connect/disconnect/forget devices through BlueZ
+ *   - write local midi-ble-rtd config files
  *
  * The data plane remains midi-ble-rtd.
  */
@@ -54,7 +55,16 @@ typedef struct {
     bool no_pair;
     bool no_trust;
     bool no_probe;
+    bool write_config;
+    char *output_path;
 } ConnectOptions;
+
+typedef struct {
+    ProfileKind profile;
+    char *output_path;
+    bool print_only;
+    bool force;
+} ConfigureOptions;
 
 static const char *yesno(bool v) {
     return v ? "yes" : "no";
@@ -62,6 +72,31 @@ static const char *yesno(bool v) {
 
 static bool is_help_arg(const char *s) {
     return g_strcmp0(s, "--help") == 0 || g_strcmp0(s, "-h") == 0;
+}
+
+static const char *profile_name(ProfileKind profile) {
+    switch (profile) {
+        case PROFILE_STANDARD_BLE_MIDI:
+            return "standard_ble_midi";
+        case PROFILE_ROLAND_GOKEYS:
+            return "roland_gokeys";
+        case PROFILE_UNKNOWN:
+        default:
+            return "-";
+    }
+}
+
+static ProfileKind profile_from_string(const char *s) {
+    if (!s || !*s)
+        return PROFILE_UNKNOWN;
+    if (g_ascii_strcasecmp(s, "standard_ble_midi") == 0 ||
+        g_ascii_strcasecmp(s, "standard") == 0)
+        return PROFILE_STANDARD_BLE_MIDI;
+    if (g_ascii_strcasecmp(s, "roland_gokeys") == 0 ||
+        g_ascii_strcasecmp(s, "go_keys") == 0 ||
+        g_ascii_strcasecmp(s, "gokeys") == 0)
+        return PROFILE_ROLAND_GOKEYS;
+    return PROFILE_UNKNOWN;
 }
 
 static void help_device_selector(void) {
@@ -95,17 +130,19 @@ static void help_global(const char *argv0) {
         "  trust        Set BlueZ Device1.Trusted=true\n"
         "  untrust      Set BlueZ Device1.Trusted=false\n"
         "  connect      Prepare a BLE-MIDI device using BlueZ\n"
+        "  configure    Write a local midi-ble-rtd config file\n"
         "  disconnect   Disconnect a BlueZ device\n"
         "  forget       Remove a device from BlueZ cache/pairing records\n"
         "\n"
         "Help:\n"
-        "  %s help list\n"
+        "  %s help configure\n"
         "  %s connect --help\n"
         "\n"
         "Typical GO:KEYS flow:\n"
         "  %s scan --timeout 10 --midi-only\n"
-        "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys\n"
+        "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config\n"
         "  %s probe CB:81:F4:62:FF:07\n"
+        "  ./build/midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
         "\n",
         argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
@@ -175,7 +212,8 @@ static bool help_command(const char *argv0, const char *cmd) {
             "Description:\n"
             "  Shows one BlueZ Device1 object's Address, Name, Alias, RSSI, Paired,\n"
             "  Trusted, Connected, ServicesResolved, guessed profile, and advertised UUIDs.\n"
-            "\n");
+            "\n",
+            argv0);
         help_device_selector();
         g_print(
             "Examples:\n"
@@ -222,7 +260,8 @@ static bool help_command(const char *argv0, const char *cmd) {
             "  Calls BlueZ Device1.Pair() unless the device is already paired.\n"
             "  If BlueZ requires user authorization and no Agent1 is available, this may fail.\n"
             "  Agent1 support is planned for a later phase.\n"
-            "\n");
+            "\n",
+            argv0);
         help_device_selector();
         return true;
     }
@@ -281,14 +320,59 @@ static bool help_command(const char *argv0, const char *cmd) {
             "  --no-probe\n"
             "      Skip ServicesResolved wait and BLE-MIDI GATT validation after connect.\n"
             "      Useful only for debugging connection problems.\n"
+            "\n"
+            "  --write-config\n"
+            "      After successful connect/probe, write a midi-ble-rtd config file.\n"
+            "      Default path for roland_gokeys: ~/.config/midi-ble-rt/roland-gokeys.ini.\n"
+            "\n"
+            "  --output PATH\n"
+            "      Config path used by --write-config.\n"
             "\n",
             argv0, ROLAND_GOKEYS_IO_ALIAS);
         help_device_selector();
         g_print(
             "Examples:\n"
             "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys\n"
-            "  %s connect gokeys --profile roland_gokeys --no-pair\n"
+            "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config\n"
             "  %s connect CB:81:F4:62:FF:07 --profile standard_ble_midi\n"
+            "\n",
+            argv0, argv0, argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "configure") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s configure DEVICE --profile PROFILE [OPTIONS]\n"
+            "\n"
+            "Description:\n"
+            "  Writes a local midi-ble-rtd config file for an already known BlueZ device.\n"
+            "  This command does not start the daemon and does not create an ALSA port.\n"
+            "\n"
+            "Options:\n"
+            "  --profile PROFILE\n"
+            "      Required unless the device can be inferred. Supported values:\n"
+            "        roland_gokeys\n"
+            "        standard_ble_midi\n"
+            "\n"
+            "  --output PATH\n"
+            "      Config file path. Default for roland_gokeys:\n"
+            "      ~/.config/midi-ble-rt/roland-gokeys.ini\n"
+            "\n"
+            "  --print\n"
+            "      Print the config to stdout instead of writing a file.\n"
+            "\n"
+            "  --force\n"
+            "      Overwrite an existing config file. Without --force the command refuses\n"
+            "      to overwrite an existing file.\n"
+            "\n",
+            argv0);
+        help_device_selector();
+        g_print(
+            "Examples:\n"
+            "  %s configure CB:81:F4:62:FF:07 --profile roland_gokeys\n"
+            "  %s configure gokeys --profile roland_gokeys --print\n"
+            "  %s configure CB:81:F4:62:FF:07 --profile roland_gokeys --force\n"
             "\n",
             argv0, argv0, argv0);
         return true;
@@ -302,7 +386,8 @@ static bool help_command(const char *argv0, const char *cmd) {
             "Description:\n"
             "  Calls BlueZ Device1.Disconnect(). This disconnects the BlueZ device.\n"
             "  It does not yet coordinate with a running midi-ble-rtd session.\n"
-            "\n");
+            "\n",
+            argv0);
         help_device_selector();
         return true;
     }
@@ -319,7 +404,8 @@ static bool help_command(const char *argv0, const char *cmd) {
             "Required option:\n"
             "  --yes\n"
             "      Required safety flag. Without it the command refuses to run.\n"
-            "\n");
+            "\n",
+            argv0);
         help_device_selector();
         g_print(
             "Example:\n"
@@ -356,31 +442,6 @@ static bool contains_casefold(const char *haystack, const char *needle) {
 
 static bool path_has_prefix(const char *path, const char *prefix) {
     return path && prefix && g_str_has_prefix(path, prefix);
-}
-
-static const char *profile_name(ProfileKind profile) {
-    switch (profile) {
-        case PROFILE_STANDARD_BLE_MIDI:
-            return "standard_ble_midi";
-        case PROFILE_ROLAND_GOKEYS:
-            return "roland_gokeys";
-        case PROFILE_UNKNOWN:
-        default:
-            return "-";
-    }
-}
-
-static ProfileKind profile_from_string(const char *s) {
-    if (!s || !*s)
-        return PROFILE_UNKNOWN;
-    if (g_ascii_strcasecmp(s, "standard_ble_midi") == 0 ||
-        g_ascii_strcasecmp(s, "standard") == 0)
-        return PROFILE_STANDARD_BLE_MIDI;
-    if (g_ascii_strcasecmp(s, "roland_gokeys") == 0 ||
-        g_ascii_strcasecmp(s, "go_keys") == 0 ||
-        g_ascii_strcasecmp(s, "gokeys") == 0)
-        return PROFILE_ROLAND_GOKEYS;
-    return PROFILE_UNKNOWN;
 }
 
 static GVariant *get_managed_objects(Ctl *ctl) {
@@ -530,10 +591,16 @@ static bool adapter_call(Ctl *ctl, const char *adapter_path, const char *method)
     return true;
 }
 
+static char *props_dup_string(GVariant *props, const char *key) {
+    GVariant *v = g_variant_lookup_value(props, key, G_VARIANT_TYPE_STRING);
+    if (!v)
+        return NULL;
+    char *s = g_strdup(g_variant_get_string(v, NULL));
+    g_variant_unref(v);
+    return s;
+}
+
 static void print_device_row(GVariant *props) {
-    GVariant *v_address = g_variant_lookup_value(props, "Address", G_VARIANT_TYPE_STRING);
-    GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
-    GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
     GVariant *v_rssi = g_variant_lookup_value(props, "RSSI", G_VARIANT_TYPE_INT16);
     GVariant *v_paired = g_variant_lookup_value(props, "Paired", G_VARIANT_TYPE_BOOLEAN);
     GVariant *v_trusted = g_variant_lookup_value(props, "Trusted", G_VARIANT_TYPE_BOOLEAN);
@@ -541,15 +608,16 @@ static void print_device_row(GVariant *props) {
     GVariant *v_resolved = g_variant_lookup_value(props, "ServicesResolved", G_VARIANT_TYPE_BOOLEAN);
     GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
 
-    const char *address = v_address ? g_variant_get_string(v_address, NULL) : "-";
-    const char *name = v_name ? g_variant_get_string(v_name, NULL) : "-";
-    const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : "-";
+    char *address = props_dup_string(props, "Address");
+    char *name = props_dup_string(props, "Name");
+    char *alias = props_dup_string(props, "Alias");
+
     bool paired = v_paired ? g_variant_get_boolean(v_paired) : false;
     bool trusted = v_trusted ? g_variant_get_boolean(v_trusted) : false;
     bool connected = v_connected ? g_variant_get_boolean(v_connected) : false;
     bool resolved = v_resolved ? g_variant_get_boolean(v_resolved) : false;
     const char *uuid_hint = string_array_contains_uuid(v_uuids, BLE_MIDI_SERVICE_UUID) ? "ble-midi" : "-";
-    const char *profile = guess_profile(name, alias, v_uuids);
+    const char *profile = guess_profile(name ? name : "", alias ? alias : "", v_uuids);
 
     char rssi_buf[16];
     if (v_rssi)
@@ -558,12 +626,13 @@ static void print_device_row(GVariant *props) {
         g_snprintf(rssi_buf, sizeof(rssi_buf), "-");
 
     g_print("%-17s %-5s %-24.24s %-24.24s %-6s %-7s %-9s %-8s %-9s %s\n",
-            address, rssi_buf, name, alias, yesno(paired), yesno(trusted),
-            yesno(connected), yesno(resolved), uuid_hint, profile);
+            address ? address : "-", rssi_buf, name ? name : "-", alias ? alias : "-",
+            yesno(paired), yesno(trusted), yesno(connected), yesno(resolved),
+            uuid_hint, profile);
 
-    if (v_address) g_variant_unref(v_address);
-    if (v_name) g_variant_unref(v_name);
-    if (v_alias) g_variant_unref(v_alias);
+    g_free(address);
+    g_free(name);
+    g_free(alias);
     if (v_rssi) g_variant_unref(v_rssi);
     if (v_paired) g_variant_unref(v_paired);
     if (v_trusted) g_variant_unref(v_trusted);
@@ -594,17 +663,15 @@ static int cmd_list(Ctl *ctl, const ListOptions *opts) {
             continue;
         }
 
-        GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
-        GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
+        char *name = props_dup_string(props, "Name");
+        char *alias = props_dup_string(props, "Alias");
         GVariant *v_connected = g_variant_lookup_value(props, "Connected", G_VARIANT_TYPE_BOOLEAN);
         GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
 
-        const char *name = v_name ? g_variant_get_string(v_name, NULL) : "";
-        const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : "";
         bool connected = v_connected ? g_variant_get_boolean(v_connected) : false;
         bool show = true;
 
-        if (opts->midi_only && !has_midi_hint(name, alias, v_uuids))
+        if (opts->midi_only && !has_midi_hint(name ? name : "", alias ? alias : "", v_uuids))
             show = false;
         if (opts->connected_only && !connected)
             show = false;
@@ -614,8 +681,8 @@ static int cmd_list(Ctl *ctl, const ListOptions *opts) {
             count++;
         }
 
-        if (v_name) g_variant_unref(v_name);
-        if (v_alias) g_variant_unref(v_alias);
+        g_free(name);
+        g_free(alias);
         if (v_connected) g_variant_unref(v_connected);
         if (v_uuids) g_variant_unref(v_uuids);
         g_variant_unref(props);
@@ -650,14 +717,10 @@ static char *find_device_path(Ctl *ctl, const char *selector) {
             continue;
         }
 
-        GVariant *v_address = g_variant_lookup_value(props, "Address", G_VARIANT_TYPE_STRING);
-        GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
-        GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
+        char *address = props_dup_string(props, "Address");
+        char *name = props_dup_string(props, "Name");
+        char *alias = props_dup_string(props, "Alias");
         GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
-
-        const char *address = v_address ? g_variant_get_string(v_address, NULL) : NULL;
-        const char *name = v_name ? g_variant_get_string(v_name, NULL) : NULL;
-        const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : NULL;
 
         int score = -1;
         if (g_strcmp0(path, selector) == 0)
@@ -678,9 +741,9 @@ static char *find_device_path(Ctl *ctl, const char *selector) {
             best_score = score;
         }
 
-        if (v_address) g_variant_unref(v_address);
-        if (v_name) g_variant_unref(v_name);
-        if (v_alias) g_variant_unref(v_alias);
+        g_free(address);
+        g_free(name);
+        g_free(alias);
         if (v_uuids) g_variant_unref(v_uuids);
         g_variant_unref(props);
         g_variant_unref(ifaces);
@@ -728,9 +791,9 @@ static int cmd_info(Ctl *ctl, const char *selector) {
         return 1;
     }
 
-    GVariant *v_address = g_variant_lookup_value(props, "Address", G_VARIANT_TYPE_STRING);
-    GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
-    GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
+    char *address = props_dup_string(props, "Address");
+    char *name = props_dup_string(props, "Name");
+    char *alias = props_dup_string(props, "Alias");
     GVariant *v_rssi = g_variant_lookup_value(props, "RSSI", G_VARIANT_TYPE_INT16);
     GVariant *v_paired = g_variant_lookup_value(props, "Paired", G_VARIANT_TYPE_BOOLEAN);
     GVariant *v_trusted = g_variant_lookup_value(props, "Trusted", G_VARIANT_TYPE_BOOLEAN);
@@ -738,14 +801,10 @@ static int cmd_info(Ctl *ctl, const char *selector) {
     GVariant *v_resolved = g_variant_lookup_value(props, "ServicesResolved", G_VARIANT_TYPE_BOOLEAN);
     GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
 
-    const char *address = v_address ? g_variant_get_string(v_address, NULL) : "-";
-    const char *name = v_name ? g_variant_get_string(v_name, NULL) : "-";
-    const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : "-";
-
     g_print("Device: %s\n", path);
-    g_print("  Address:          %s\n", address);
-    g_print("  Name:             %s\n", name);
-    g_print("  Alias:            %s\n", alias);
+    g_print("  Address:          %s\n", address ? address : "-");
+    g_print("  Name:             %s\n", name ? name : "-");
+    g_print("  Alias:            %s\n", alias ? alias : "-");
     if (v_rssi)
         g_print("  RSSI:             %d\n", g_variant_get_int16(v_rssi));
     else
@@ -754,13 +813,13 @@ static int cmd_info(Ctl *ctl, const char *selector) {
     g_print("  Trusted:          %s\n", yesno(v_trusted ? g_variant_get_boolean(v_trusted) : false));
     g_print("  Connected:        %s\n", yesno(v_connected ? g_variant_get_boolean(v_connected) : false));
     g_print("  ServicesResolved: %s\n", yesno(v_resolved ? g_variant_get_boolean(v_resolved) : false));
-    g_print("  Profile guess:    %s\n", guess_profile(name, alias, v_uuids));
+    g_print("  Profile guess:    %s\n", guess_profile(name ? name : "", alias ? alias : "", v_uuids));
     g_print("  UUIDs:\n");
     print_string_array(v_uuids, "    ");
 
-    if (v_address) g_variant_unref(v_address);
-    if (v_name) g_variant_unref(v_name);
-    if (v_alias) g_variant_unref(v_alias);
+    g_free(address);
+    g_free(name);
+    g_free(alias);
     if (v_rssi) g_variant_unref(v_rssi);
     if (v_paired) g_variant_unref(v_paired);
     if (v_trusted) g_variant_unref(v_trusted);
@@ -1235,19 +1294,148 @@ static ProfileKind infer_device_profile(Ctl *ctl, const char *path) {
     if (!props)
         return PROFILE_UNKNOWN;
 
-    GVariant *v_name = g_variant_lookup_value(props, "Name", G_VARIANT_TYPE_STRING);
-    GVariant *v_alias = g_variant_lookup_value(props, "Alias", G_VARIANT_TYPE_STRING);
+    char *name = props_dup_string(props, "Name");
+    char *alias = props_dup_string(props, "Alias");
     GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
 
-    const char *name = v_name ? g_variant_get_string(v_name, NULL) : "";
-    const char *alias = v_alias ? g_variant_get_string(v_alias, NULL) : "";
-    ProfileKind p = guess_profile_kind(name, alias, v_uuids);
+    ProfileKind p = guess_profile_kind(name ? name : "", alias ? alias : "", v_uuids);
 
-    if (v_name) g_variant_unref(v_name);
-    if (v_alias) g_variant_unref(v_alias);
+    g_free(name);
+    g_free(alias);
     if (v_uuids) g_variant_unref(v_uuids);
     g_variant_unref(props);
     return p;
+}
+
+static char *default_config_path(ProfileKind profile) {
+    const char *dir = g_get_user_config_dir();
+    if (profile == PROFILE_ROLAND_GOKEYS)
+        return g_build_filename(dir, "midi-ble-rt", "roland-gokeys.ini", NULL);
+    if (profile == PROFILE_STANDARD_BLE_MIDI)
+        return g_build_filename(dir, "midi-ble-rt", "standard-ble-midi.ini", NULL);
+    return g_build_filename(dir, "midi-ble-rt", "device.ini", NULL);
+}
+
+static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKind profile) {
+    GVariant *props = device_props(ctl, device_path);
+    if (!props)
+        return NULL;
+
+    char *address = props_dup_string(props, "Address");
+    char *name = props_dup_string(props, "Name");
+    char *alias = props_dup_string(props, "Alias");
+    if (!address)
+        address = g_strdup("UNKNOWN");
+    if (!name)
+        name = alias ? g_strdup(alias) : g_strdup("BLE-MIDI device");
+
+    const char *port_name = profile == PROFILE_ROLAND_GOKEYS
+        ? "Roland GO:KEYS BLE-MIDI"
+        : "BLE-MIDI Device";
+    const char *io_alias_line = profile == PROFILE_ROLAND_GOKEYS
+        ? "io_uuid_alias = " ROLAND_GOKEYS_IO_ALIAS "\n"
+        : "# io_uuid_alias =\n";
+
+    char *text = g_strdup_printf(
+        "[device]\n"
+        "# Written by midi-ble-rtctl configure.\n"
+        "address = %s\n"
+        "name = %s\n"
+        "profile = %s\n"
+        "connect_order = midi-first\n"
+        "pair = no\n"
+        "trust = yes\n"
+        "auto_reconnect = yes\n"
+        "\n"
+        "[gatt]\n"
+        "service_uuid = " BLE_MIDI_SERVICE_UUID "\n"
+        "io_uuid = " BLE_MIDI_IO_UUID "\n"
+        "%s"
+        "require_notify = yes\n"
+        "require_write_without_response = yes\n"
+        "\n"
+        "[alsa]\n"
+        "client_name = midi-ble-rt\n"
+        "port_name = %s\n"
+        "\n"
+        "[debug]\n"
+        "print_ble_packets = yes\n"
+        "print_midi_events = no\n",
+        address, name, profile_name(profile), io_alias_line, port_name);
+
+    g_free(address);
+    g_free(name);
+    g_free(alias);
+    g_variant_unref(props);
+    return text;
+}
+
+static bool write_config_file(const char *path, const char *text, bool force) {
+    if (!force && g_file_test(path, G_FILE_TEST_EXISTS)) {
+        g_printerr("Config already exists: %s\n", path);
+        g_printerr("Use --force to overwrite, or --output PATH to write elsewhere.\n");
+        return false;
+    }
+
+    char *dir = g_path_get_dirname(path);
+    GError *error = NULL;
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        g_printerr("Failed to create config dir: %s\n", dir);
+        g_free(dir);
+        return false;
+    }
+    g_free(dir);
+
+    if (!g_file_set_contents(path, text, -1, &error)) {
+        g_printerr("Failed to write %s: %s\n", path, error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_print("written: %s\n", path);
+    return true;
+}
+
+static int cmd_configure(Ctl *ctl, const char *selector, const ConfigureOptions *opts) {
+    char *path = find_device_path(ctl, selector);
+    if (!path) {
+        g_printerr("Device not found: %s\n", selector);
+        g_printerr("Run `midi-ble-rtctl scan --midi-only` first.\n");
+        return 1;
+    }
+
+    ProfileKind profile = opts->profile != PROFILE_UNKNOWN ? opts->profile : infer_device_profile(ctl, path);
+    if (profile == PROFILE_UNKNOWN) {
+        g_printerr("Could not infer profile. Use --profile roland_gokeys or --profile standard_ble_midi.\n");
+        g_free(path);
+        return 2;
+    }
+
+    char *text = config_text_for_device(ctl, path, profile);
+    if (!text) {
+        g_printerr("Could not build config for %s\n", path);
+        g_free(path);
+        return 1;
+    }
+
+    if (opts->print_only) {
+        g_print("%s", text);
+        g_free(text);
+        g_free(path);
+        return 0;
+    }
+
+    char *out = opts->output_path ? g_strdup(opts->output_path) : default_config_path(profile);
+    bool ok = write_config_file(out, text, opts->force);
+    if (ok) {
+        g_print("profile: %s\n", profile_name(profile));
+        g_print("next: ./build/midi-ble-rtd --config %s\n", out);
+    }
+
+    g_free(out);
+    g_free(text);
+    g_free(path);
+    return ok ? 0 : 1;
 }
 
 static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opts) {
@@ -1290,6 +1478,15 @@ static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opt
     bool ok = true;
     if (!opts->no_probe)
         ok = validate_ble_midi_gatt(ctl, path, false);
+
+    if (ok && opts->write_config) {
+        ConfigureOptions c = {0};
+        c.profile = profile;
+        c.output_path = opts->output_path;
+        c.force = true;
+        c.print_only = false;
+        ok = cmd_configure(ctl, selector, &c) == 0;
+    }
 
     if (ok) {
         g_print("BlueZ connection ready.\n");
@@ -1430,6 +1627,10 @@ int main(int argc, char **argv) {
                 opts.no_trust = true;
             } else if (g_strcmp0(argv[i], "--no-probe") == 0) {
                 opts.no_probe = true;
+            } else if (g_strcmp0(argv[i], "--write-config") == 0) {
+                opts.write_config = true;
+            } else if (g_strcmp0(argv[i], "--output") == 0 && i + 1 < argc) {
+                opts.output_path = argv[++i];
             } else {
                 usage(argv[0]);
                 rc = 2;
@@ -1437,6 +1638,34 @@ int main(int argc, char **argv) {
             }
         }
         rc = cmd_connect(&ctl, argv[2], &opts);
+    } else if (g_strcmp0(cmd, "configure") == 0) {
+        if (argc < 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        ConfigureOptions opts = {0};
+        for (int i = 3; i < argc; i++) {
+            if (g_strcmp0(argv[i], "--profile") == 0 && i + 1 < argc) {
+                opts.profile = profile_from_string(argv[++i]);
+                if (opts.profile == PROFILE_UNKNOWN) {
+                    g_printerr("Unknown profile: %s\n", argv[i]);
+                    rc = 2;
+                    goto out;
+                }
+            } else if (g_strcmp0(argv[i], "--output") == 0 && i + 1 < argc) {
+                opts.output_path = argv[++i];
+            } else if (g_strcmp0(argv[i], "--print") == 0) {
+                opts.print_only = true;
+            } else if (g_strcmp0(argv[i], "--force") == 0) {
+                opts.force = true;
+            } else {
+                usage(argv[0]);
+                rc = 2;
+                goto out;
+            }
+        }
+        rc = cmd_configure(&ctl, argv[2], &opts);
     } else if (g_strcmp0(cmd, "disconnect") == 0) {
         if (argc != 3) {
             usage(argv[0]);
