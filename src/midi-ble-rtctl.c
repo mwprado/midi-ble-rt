@@ -56,27 +56,286 @@ typedef struct {
     bool no_probe;
 } ConnectOptions;
 
-static void usage(const char *argv0) {
-    g_printerr(
-        "Usage:\n"
-        "  %s list [--midi-only] [--connected]\n"
-        "  %s scan [--timeout SECONDS] [--midi-only]\n"
-        "  %s info DEVICE\n"
-        "  %s probe DEVICE\n"
-        "  %s pair DEVICE\n"
-        "  %s trust DEVICE\n"
-        "  %s untrust DEVICE\n"
-        "  %s connect DEVICE [--profile roland_gokeys|standard_ble_midi] [--pair|--no-pair] [--no-trust] [--no-probe]\n"
-        "  %s disconnect DEVICE\n"
-        "  %s forget DEVICE --yes\n"
-        "\n"
-        "DEVICE may be a Bluetooth address, BlueZ object path, or a case-insensitive\n"
-        "substring of the BlueZ Name/Alias.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
-}
-
 static const char *yesno(bool v) {
     return v ? "yes" : "no";
+}
+
+static bool is_help_arg(const char *s) {
+    return g_strcmp0(s, "--help") == 0 || g_strcmp0(s, "-h") == 0;
+}
+
+static void help_device_selector(void) {
+    g_print(
+        "DEVICE selector:\n"
+        "  DEVICE may be one of:\n"
+        "    - Bluetooth address, for example CB:81:F4:62:FF:07\n"
+        "    - BlueZ object path, for example /org/bluez/hci0/dev_CB_81_F4_62_FF_07\n"
+        "    - case-insensitive substring of Name or Alias, for example gokeys\n"
+        "\n"
+        "  Address is preferred because it is stable. Name/Alias matching is convenient but\n"
+        "  may select the wrong device if several devices have similar names.\n"
+        "\n");
+}
+
+static void help_global(const char *argv0) {
+    g_print(
+        "midi-ble-rtctl - BlueZ control CLI for BLE-MIDI devices\n"
+        "\n"
+        "Usage:\n"
+        "  %s COMMAND [ARGS...]\n"
+        "  %s --help\n"
+        "  %s help [COMMAND]\n"
+        "\n"
+        "Commands:\n"
+        "  list         List known BlueZ devices\n"
+        "  scan         Run BlueZ discovery, then list devices\n"
+        "  info         Show one device's BlueZ properties\n"
+        "  probe        Connect if needed and inspect BLE-MIDI GATT objects\n"
+        "  pair         Pair a device through BlueZ Device1.Pair\n"
+        "  trust        Set BlueZ Device1.Trusted=true\n"
+        "  untrust      Set BlueZ Device1.Trusted=false\n"
+        "  connect      Prepare a BLE-MIDI device using BlueZ\n"
+        "  disconnect   Disconnect a BlueZ device\n"
+        "  forget       Remove a device from BlueZ cache/pairing records\n"
+        "\n"
+        "Help:\n"
+        "  %s help list\n"
+        "  %s connect --help\n"
+        "\n"
+        "Typical GO:KEYS flow:\n"
+        "  %s scan --timeout 10 --midi-only\n"
+        "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys\n"
+        "  %s probe CB:81:F4:62:FF:07\n"
+        "\n",
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+}
+
+static bool help_command(const char *argv0, const char *cmd) {
+    if (!cmd || !*cmd) {
+        help_global(argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "list") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s list [--midi-only] [--connected]\n"
+            "\n"
+            "Description:\n"
+            "  Lists devices known to BlueZ from ObjectManager.GetManagedObjects().\n"
+            "  This does not start discovery. Use scan for live discovery.\n"
+            "\n"
+            "Options:\n"
+            "  --midi-only\n"
+            "      Show only devices with a BLE-MIDI hint. Hints include the BLE-MIDI\n"
+            "      service UUID, a MIDI-looking name/alias, or a GO:KEYS-looking name.\n"
+            "\n"
+            "  --connected\n"
+            "      Show only devices whose BlueZ Device1.Connected property is true.\n"
+            "\n"
+            "Examples:\n"
+            "  %s list\n"
+            "  %s list --midi-only\n"
+            "  %s list --midi-only --connected\n"
+            "\n",
+            argv0, argv0, argv0, argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "scan") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s scan [--timeout SECONDS] [--midi-only]\n"
+            "\n"
+            "Description:\n"
+            "  Calls BlueZ Adapter1.StartDiscovery(), waits, then calls StopDiscovery()\n"
+            "  and prints the discovered/known devices.\n"
+            "\n"
+            "Options:\n"
+            "  --timeout SECONDS\n"
+            "      Discovery duration. Minimum 1 second, maximum 60 seconds.\n"
+            "      Default: 8 seconds.\n"
+            "\n"
+            "  --midi-only\n"
+            "      After scanning, show only devices with a BLE-MIDI hint.\n"
+            "\n"
+            "Examples:\n"
+            "  %s scan\n"
+            "  %s scan --timeout 10 --midi-only\n"
+            "\n",
+            argv0, argv0, argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "info") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s info DEVICE\n"
+            "\n"
+            "Description:\n"
+            "  Shows one BlueZ Device1 object's Address, Name, Alias, RSSI, Paired,\n"
+            "  Trusted, Connected, ServicesResolved, guessed profile, and advertised UUIDs.\n"
+            "\n");
+        help_device_selector();
+        g_print(
+            "Examples:\n"
+            "  %s info CB:81:F4:62:FF:07\n"
+            "  %s info gokeys\n"
+            "\n",
+            argv0, argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "probe") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s probe DEVICE\n"
+            "\n"
+            "Description:\n"
+            "  Connects the device if needed, waits for ServicesResolved=true, enumerates\n"
+            "  GATT services under the device, finds the BLE-MIDI service, then scores\n"
+            "  MIDI I/O characteristic candidates.\n"
+            "\n"
+            "  It accepts:\n"
+            "    - official BLE-MIDI I/O UUID: %s\n"
+            "    - Roland GO:KEYS alias:       %s\n"
+            "\n"
+            "  This command validates whether midi-ble-rtd can likely use StartNotify.\n"
+            "  It does not create an ALSA port. The data plane remains midi-ble-rtd.\n"
+            "\n",
+            argv0, BLE_MIDI_IO_UUID, ROLAND_GOKEYS_IO_ALIAS);
+        help_device_selector();
+        g_print(
+            "Example:\n"
+            "  %s probe CB:81:F4:62:FF:07\n"
+            "\n",
+            argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "pair") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s pair DEVICE\n"
+            "\n"
+            "Description:\n"
+            "  Calls BlueZ Device1.Pair() unless the device is already paired.\n"
+            "  If BlueZ requires user authorization and no Agent1 is available, this may fail.\n"
+            "  Agent1 support is planned for a later phase.\n"
+            "\n");
+        help_device_selector();
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "trust") == 0 || g_strcmp0(cmd, "untrust") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s trust DEVICE\n"
+            "  %s untrust DEVICE\n"
+            "\n"
+            "Description:\n"
+            "  Sets BlueZ Device1.Trusted.\n"
+            "\n"
+            "  trust:\n"
+            "      Device1.Trusted=true. Useful for known MIDI devices that should\n"
+            "      reconnect or authorize without repeated prompts.\n"
+            "\n"
+            "  untrust:\n"
+            "      Device1.Trusted=false. Keeps the device in BlueZ but removes trust.\n"
+            "\n",
+            argv0, argv0);
+        help_device_selector();
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "connect") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s connect DEVICE [OPTIONS]\n"
+            "\n"
+            "Description:\n"
+            "  Prepares a BLE-MIDI device through BlueZ. It can pair, trust, connect,\n"
+            "  wait for ServicesResolved=true, and validate BLE-MIDI GATT objects.\n"
+            "\n"
+            "  This is still control-plane only. It does not start midi-ble-rtd yet.\n"
+            "\n"
+            "Options:\n"
+            "  --profile PROFILE\n"
+            "      Select device policy explicitly. Supported values:\n"
+            "        roland_gokeys\n"
+            "            Forces pair by default, sets Trusted=true unless --no-trust is used,\n"
+            "            connects, waits for GATT, and accepts the Roland %s alias.\n"
+            "\n"
+            "        standard_ble_midi\n"
+            "            Uses the standard BLE-MIDI service and official I/O characteristic.\n"
+            "\n"
+            "  --pair\n"
+            "      Force Device1.Pair() before connect, even when profile is not Roland.\n"
+            "\n"
+            "  --no-pair\n"
+            "      Do not call Device1.Pair(). Overrides profile default.\n"
+            "\n"
+            "  --no-trust\n"
+            "      Do not set Trusted=true before connect.\n"
+            "\n"
+            "  --no-probe\n"
+            "      Skip ServicesResolved wait and BLE-MIDI GATT validation after connect.\n"
+            "      Useful only for debugging connection problems.\n"
+            "\n",
+            argv0, ROLAND_GOKEYS_IO_ALIAS);
+        help_device_selector();
+        g_print(
+            "Examples:\n"
+            "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys\n"
+            "  %s connect gokeys --profile roland_gokeys --no-pair\n"
+            "  %s connect CB:81:F4:62:FF:07 --profile standard_ble_midi\n"
+            "\n",
+            argv0, argv0, argv0);
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "disconnect") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s disconnect DEVICE\n"
+            "\n"
+            "Description:\n"
+            "  Calls BlueZ Device1.Disconnect(). This disconnects the BlueZ device.\n"
+            "  It does not yet coordinate with a running midi-ble-rtd session.\n"
+            "\n");
+        help_device_selector();
+        return true;
+    }
+
+    if (g_strcmp0(cmd, "forget") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s forget DEVICE --yes\n"
+            "\n"
+            "Description:\n"
+            "  Disconnects the device if needed, then calls BlueZ Adapter1.RemoveDevice().\n"
+            "  This removes BlueZ cache/pairing records for the device.\n"
+            "\n"
+            "Required option:\n"
+            "  --yes\n"
+            "      Required safety flag. Without it the command refuses to run.\n"
+            "\n");
+        help_device_selector();
+        g_print(
+            "Example:\n"
+            "  %s forget CB:81:F4:62:FF:07 --yes\n"
+            "\n",
+            argv0);
+        return true;
+    }
+
+    g_printerr("Unknown help topic: %s\n\n", cmd);
+    help_global(argv0);
+    return false;
+}
+
+static void usage(const char *argv0) {
+    help_global(argv0);
 }
 
 static bool uuid_equal(const char *a, const char *b) {
@@ -1041,11 +1300,40 @@ static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opt
     return ok ? 0 : 1;
 }
 
+static bool any_help_arg(int argc, char **argv, int first) {
+    for (int i = first; i < argc; i++) {
+        if (is_help_arg(argv[i]))
+            return true;
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(argv[0]);
         return 2;
     }
+
+    if (is_help_arg(argv[1])) {
+        help_global(argv[0]);
+        return 0;
+    }
+
+    if (g_strcmp0(argv[1], "help") == 0) {
+        if (argc == 2)
+            help_global(argv[0]);
+        else if (argc == 3)
+            return help_command(argv[0], argv[2]) ? 0 : 2;
+        else {
+            g_printerr("Usage: %s help [COMMAND]\n", argv[0]);
+            return 2;
+        }
+        return 0;
+    }
+
+    const char *cmd = argv[1];
+    if (any_help_arg(argc, argv, 2))
+        return help_command(argv[0], cmd) ? 0 : 2;
 
     GError *error = NULL;
     Ctl ctl = {0};
@@ -1056,7 +1344,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const char *cmd = argv[1];
     int rc = 0;
 
     if (g_strcmp0(cmd, "list") == 0) {
