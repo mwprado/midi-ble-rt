@@ -10,18 +10,19 @@
  *   - official BLE-MIDI I/O UUID and Roland 00006bf3 alias
  *   - StartNotify via D-Bus
  *   - minimal BLE-MIDI decoder
- *   - ALSA Sequencer source port
+ *   - ALSA Sequencer duplex port
+ *   - ALSA -> BLE-MIDI WriteValue path for short MIDI messages
  *
  * Future:
  *   - Agent1
  *   - AcquireNotify
- *   - bidirectional MIDI
  *   - RT thread / mlockall / jitter metrics
  */
 
 #include <alsa/asoundlib.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ typedef struct {
 
     bool print_ble_packets;
     bool print_midi_events;
+    bool enable_tx;
 } Config;
 
 typedef struct {
@@ -67,6 +69,8 @@ typedef struct {
     snd_seq_t *seq;
     int alsa_port;
     snd_midi_event_t *alsa_midi_encoder;
+    snd_midi_event_t *alsa_midi_decoder;
+    guint alsa_rx_source_id;
 
     uint8_t running_status;
 } App;
@@ -122,6 +126,7 @@ static bool load_config(Config *cfg, const char *path) {
 
     cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
     cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
+    cfg->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", true);
 
     g_key_file_unref(kf);
     return true;
@@ -535,7 +540,7 @@ static char *find_ble_midi_characteristic(App *app) {
 }
 
 static bool alsa_init(App *app) {
-    int err = snd_seq_open(&app->seq, "default", SND_SEQ_OPEN_OUTPUT, 0);
+    int err = snd_seq_open(&app->seq, "default", SND_SEQ_OPEN_DUPLEX, SND_SEQ_NONBLOCK);
     if (err < 0) {
         g_printerr("snd_seq_open(default) failed: %s\n", snd_strerror(err));
         return false;
@@ -546,7 +551,8 @@ static bool alsa_init(App *app) {
     app->alsa_port = snd_seq_create_simple_port(
         app->seq,
         app->cfg.alsa_port_name,
-        SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+        SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ |
+        SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE,
         SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
 
     if (app->alsa_port < 0) {
@@ -556,14 +562,23 @@ static bool alsa_init(App *app) {
 
     err = snd_midi_event_new(2048, &app->alsa_midi_encoder);
     if (err < 0) {
-        g_printerr("snd_midi_event_new failed: %s\n", snd_strerror(err));
+        g_printerr("snd_midi_event_new encoder failed: %s\n", snd_strerror(err));
+        return false;
+    }
+
+    err = snd_midi_event_new(2048, &app->alsa_midi_decoder);
+    if (err < 0) {
+        g_printerr("snd_midi_event_new decoder failed: %s\n", snd_strerror(err));
         return false;
     }
 
     snd_midi_event_init(app->alsa_midi_encoder);
+    snd_midi_event_init(app->alsa_midi_decoder);
 
-    g_print("ALSA Sequencer source created: %s:%s\n",
+    g_print("ALSA Sequencer duplex port created: %s:%s\n",
             app->cfg.alsa_client_name, app->cfg.alsa_port_name);
+    g_print("  READ  side: BLE-MIDI -> ALSA clients, e.g. aseqdump -p <client>:<port>\n");
+    g_print("  WRITE side: ALSA clients -> BLE-MIDI, e.g. aplaymidi -p <client>:<port> file.mid\n");
     return true;
 }
 
@@ -697,6 +712,110 @@ static void ble_midi_decode_packet(App *app, const uint8_t *p, size_t len) {
     }
 }
 
+static uint16_t ble_midi_timestamp_13bit(void) {
+    gint64 ms = g_get_monotonic_time() / 1000;
+    return (uint16_t)(ms & 0x1fff);
+}
+
+static bool ble_midi_write_packet(App *app, const uint8_t *midi, size_t len) {
+    if (!midi || len == 0)
+        return true;
+
+    const size_t max_midi_per_packet = 18; /* safe for 20-byte ATT payloads */
+    size_t off = 0;
+
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > max_midi_per_packet)
+            chunk = max_midi_per_packet;
+
+        uint8_t packet[20];
+        uint16_t ts = ble_midi_timestamp_13bit();
+        packet[0] = 0x80 | ((ts >> 7) & 0x3f);
+        packet[1] = 0x80 | (ts & 0x7f);
+        memcpy(&packet[2], &midi[off], chunk);
+        size_t packet_len = chunk + 2;
+
+        if (app->cfg.print_ble_packets) {
+            g_print("BLE write:");
+            for (size_t i = 0; i < packet_len; i++)
+                g_print(" %02x", packet[i]);
+            g_print("\n");
+        }
+
+        GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
+                                                    packet, packet_len,
+                                                    sizeof(guint8));
+        GVariantBuilder options;
+        g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
+
+        GError *error = NULL;
+        GVariant *ret = g_dbus_connection_call_sync(
+            app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "WriteValue",
+            g_variant_new("(@aya{sv})", value, &options),
+            NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+
+        if (!ret) {
+            g_printerr("WriteValue failed: %s\n", error->message);
+            g_clear_error(&error);
+            return false;
+        }
+
+        g_variant_unref(ret);
+        off += chunk;
+    }
+
+    return true;
+}
+
+static void print_midi_bytes(const char *prefix, const uint8_t *bytes, size_t len) {
+    g_print("%s", prefix);
+    for (size_t i = 0; i < len; i++)
+        g_print(" %02x", bytes[i]);
+    g_print("\n");
+}
+
+static gboolean alsa_rx_poll_cb(gpointer user_data) {
+    App *app = user_data;
+
+    if (!app->cfg.enable_tx)
+        return G_SOURCE_CONTINUE;
+
+    for (;;) {
+        int pending = snd_seq_event_input_pending(app->seq, 0);
+        if (pending <= 0)
+            break;
+
+        snd_seq_event_t *ev = NULL;
+        int r = snd_seq_event_input(app->seq, &ev);
+        if (r < 0) {
+            if (r != -EAGAIN)
+                g_printerr("snd_seq_event_input failed: %s\n", snd_strerror(r));
+            break;
+        }
+        if (!ev)
+            break;
+
+        uint8_t midi[1024];
+        long n = snd_midi_event_decode(app->alsa_midi_decoder, midi, sizeof(midi), ev);
+        if (n < 0) {
+            g_printerr("ALSA MIDI decode failed for event type %d: %s\n", ev->type, snd_strerror((int)n));
+            snd_midi_event_reset_decode(app->alsa_midi_decoder);
+            continue;
+        }
+        if (n == 0)
+            continue;
+
+        if (app->cfg.print_midi_events)
+            print_midi_bytes("ALSA->BLE MIDI:", midi, (size_t)n);
+
+        ble_midi_write_packet(app, midi, (size_t)n);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void on_properties_changed(GDBusConnection *connection, const gchar *sender_name,
                                   const gchar *object_path, const gchar *interface_name,
                                   const gchar *signal_name, GVariant *parameters,
@@ -758,6 +877,10 @@ static bool start_notify(App *app) {
 }
 
 static void app_cleanup(App *app) {
+    if (app->alsa_rx_source_id)
+        g_source_remove(app->alsa_rx_source_id);
+    if (app->alsa_midi_decoder)
+        snd_midi_event_free(app->alsa_midi_decoder);
     if (app->alsa_midi_encoder)
         snd_midi_event_free(app->alsa_midi_encoder);
     if (app->seq)
@@ -806,6 +929,7 @@ int main(int argc, char **argv) {
     g_print("I/O UUID: %s\n", app.cfg.io_uuid);
     g_print("I/O alias: %s\n", app.cfg.io_uuid_alias);
     g_print("GATT decides; Name/Alias is diagnostic only.\n");
+    g_print("TX ALSA->BLE: %s\n", app.cfg.enable_tx ? "enabled" : "disabled");
 
     GError *error = NULL;
     app.bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
@@ -864,6 +988,9 @@ int main(int argc, char **argv) {
         app_cleanup(&app);
         return 1;
     }
+
+    if (app.cfg.enable_tx)
+        app.alsa_rx_source_id = g_timeout_add(1, alsa_rx_poll_cb, &app);
 
     app.loop = g_main_loop_new(NULL, FALSE);
     g_main_loop_run(app.loop);
