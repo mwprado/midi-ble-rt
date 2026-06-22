@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.1.0
+Version:        0.1.1
 Release:        0.3%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
