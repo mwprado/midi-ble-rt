@@ -8,11 +8,11 @@ set -euo pipefail
 #   packaging/fedora/make-srpm.sh
 #   copr-cli build USER/PROJECT "$HOME/rpmbuild/SRPMS/midi-ble-rt-*.src.rpm"
 #
-# The spec uses Source0: midi-ble-rt-VERSION.tar.gz. This helper generates that
-# tarball from HEAD with the exact directory prefix expected by %autosetup.
+# The spec lives in packaging/fedora and uses Source0 from the upstream tag.
+# This helper generates a matching tarball from HEAD for local SRPM builds.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SPEC="$REPO_ROOT/midi-ble-rt.spec"
+SPEC="$REPO_ROOT/packaging/fedora/midi-ble-rt.spec"
 
 if [[ ! -f "$SPEC" ]]; then
     echo "error: spec not found: $SPEC" >&2
