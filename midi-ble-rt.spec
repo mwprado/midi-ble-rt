@@ -1,11 +1,11 @@
 Name:           midi-ble-rt
 Version:        0.1.0
-Release:        0.2%{?dist}
+Release:        0.3%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
 URL:            https://github.com/mwprado/midi-ble-rt
-Source0:        %{name}-%{version}.tar.gz
+Source0:        %{url}/archive/refs/tags/v%{version}.tar.gz#/%{name}-%{version}.tar.gz
 
 BuildRequires:  gcc
 BuildRequires:  cmake
@@ -68,6 +68,9 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.3
+- Point Source0 to GitHub tag tarball for COPR SCM/spec builds.
+
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.2
 - Switch package license to MIT and install LICENSE as %%license.
 
