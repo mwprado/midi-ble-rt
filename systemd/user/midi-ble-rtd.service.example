@@ -1,0 +1,16 @@
+[Unit]
+Description=midi-ble-rt BLE-MIDI to ALSA Sequencer daemon
+Documentation=README.md docs/ALSA.md docs/TESTING.md
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/midi-ble-rtd --config %h/.config/midi-ble-rt/roland-gokeys.ini
+Restart=on-failure
+RestartSec=2s
+
+# Keep the daemon tied to the user session. This is intentional: the ALSA
+# Sequencer port belongs to the user's MIDI/audio workflow.
+
+[Install]
+WantedBy=default.target
