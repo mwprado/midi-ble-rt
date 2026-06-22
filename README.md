@@ -187,7 +187,13 @@ The daemon creates a duplex ALSA Sequencer port. After the daemon is running, se
 aplaymidi -p 128:0 test.mid
 ```
 
-For a minimal smoke test, create a one-note MIDI file with any DAW or sequencer and play it through the port. With debug enabled, the daemon prints outgoing MIDI bytes and BLE packets.
+For a minimal smoke test, use the repository test MIDI file:
+
+```bash
+aplaymidi -p 128:0 examples/midi/test-note.mid
+```
+
+With debug enabled, the daemon prints outgoing MIDI bytes and BLE packets.
 
 Transmit can be disabled in the config:
 
@@ -195,6 +201,34 @@ Transmit can be disabled in the config:
 [midi]
 enable_tx = no
 ```
+
+## Hardware-free tests
+
+Hardware-free tests are documented in:
+
+```text
+docs/TESTING.md
+```
+
+Validate ALSA MIDI write/read without GO:KEYS:
+
+```bash
+scripts/test-alsa-loopback.sh
+```
+
+Validate the example MIDI file through FluidSynth without GO:KEYS:
+
+```bash
+scripts/test-fluidsynth-smoke.sh
+```
+
+The FluidSynth test requires an existing FluidSynth ALSA Sequencer input port. If the port is not auto-detected:
+
+```bash
+FLUIDSYNTH_PORT=128:0 scripts/test-fluidsynth-smoke.sh
+```
+
+These tests validate ALSA and MIDI fixtures. They do not validate BlueZ GATT behavior.
 
 ## Operational rule for Roland GO:KEYS
 
@@ -241,6 +275,7 @@ If the native BlueZ MIDI profile fails only with SELinux enforcing, capture the 
 - [x] detailed `midi-ble-rtctl --help` and per-command help
 - [x] profile-aware local config for GO:KEYS
 - [x] initial ALSA -> BLE-MIDI write path
+- [x] hardware-free ALSA/FluidSynth smoke tests
 - [ ] multiple device ids and config directory loading
 - [ ] daemon control from `midi-ble-rtctl connect`
 - [ ] BlueZ Agent1 integration for automatic pair/authorize
