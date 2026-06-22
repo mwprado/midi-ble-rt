@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
-Version:        0.1.0
-Release:        0.4%{?dist}
+Version:        0.1.1
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -66,6 +66,9 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.1-1
+- Bump package version for COPR rebuild with fixed spec.
+
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.4
 - Do not install missing examples/midi/README.md.
 
