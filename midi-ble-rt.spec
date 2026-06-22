@@ -1,11 +1,9 @@
 Name:           midi-ble-rt
 Version:        0.1.0
-Release:        0.1%{?dist}
+Release:        0.2%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
-# FIXME: replace with the final upstream SPDX license once LICENSE is added.
-# COPR will build with this placeholder, but Fedora review will require a real license.
-License:        LicenseRef-Unknown
+License:        MIT
 URL:            https://github.com/mwprado/midi-ble-rt
 Source0:        %{name}-%{version}.tar.gz
 
@@ -62,6 +60,7 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 %systemd_user_postun_with_restart midi-ble-rtd.service
 
 %files
+%license LICENSE
 %doc README.md docs/*.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
@@ -69,6 +68,9 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.2
+- Switch package license to MIT and install LICENSE as %%license.
+
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.1
 - Initial COPR-oriented Fedora package.
 - Package BLE-MIDI daemon, control CLI, user systemd unit and MIDI smoke tests.
