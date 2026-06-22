@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.1.1
-Release:        0.3%{?dist}
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -42,8 +42,6 @@ install -D -m 0644 packaging/fedora/midi-ble-rtd.service \
 
 install -D -m 0644 examples/midi/test-note.mid \
     %{buildroot}%{_datadir}/%{name}/examples/midi/test-note.mid
-install -D -m 0644 examples/midi/README.md \
-    %{buildroot}%{_datadir}/%{name}/examples/midi/README.md
 
 install -D -m 0755 scripts/test-alsa-loopback.sh \
     %{buildroot}%{_datadir}/%{name}/scripts/test-alsa-loopback.sh
@@ -68,6 +66,10 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.1-1
+- Consolidate Fedora spec under packaging/fedora.
+- Do not install missing examples/midi/README.md.
+
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.3
 - Point Source0 to GitHub tag tarball for COPR SCM/spec builds.
 
