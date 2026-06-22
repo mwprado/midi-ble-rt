@@ -80,45 +80,47 @@ cmake --build build
 
 `midi-ble-rtctl` is the BlueZ control-plane tool. It helps discover, inspect, prepare and configure BLE-MIDI devices without manually driving `bluetoothctl` for every step.
 
+The examples below use the installed command names. When running directly from a local build tree, prefix the commands with the build path, for example `./build/midi-ble-rtctl`.
+
 Help commands:
 
 ```bash
-./build/midi-ble-rtctl --help
-./build/midi-ble-rtctl help
-./build/midi-ble-rtctl help connect
-./build/midi-ble-rtctl help configure
-./build/midi-ble-rtctl connect --help
-./build/midi-ble-rtctl configure --help
+midi-ble-rtctl --help
+midi-ble-rtctl help
+midi-ble-rtctl help connect
+midi-ble-rtctl help configure
+midi-ble-rtctl connect --help
+midi-ble-rtctl configure --help
 ```
 
 Inspection commands:
 
 ```bash
-./build/midi-ble-rtctl list
-./build/midi-ble-rtctl list --midi-only
-./build/midi-ble-rtctl scan --timeout 10 --midi-only
-./build/midi-ble-rtctl info CB:81:F4:62:FF:07
-./build/midi-ble-rtctl probe CB:81:F4:62:FF:07
+midi-ble-rtctl list
+midi-ble-rtctl list --midi-only
+midi-ble-rtctl scan --timeout 10 --midi-only
+midi-ble-rtctl info CB:81:F4:62:FF:07
+midi-ble-rtctl probe CB:81:F4:62:FF:07
 ```
 
 BlueZ control commands:
 
 ```bash
-./build/midi-ble-rtctl pair CB:81:F4:62:FF:07
-./build/midi-ble-rtctl trust CB:81:F4:62:FF:07
-./build/midi-ble-rtctl untrust CB:81:F4:62:FF:07
-./build/midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys
-./build/midi-ble-rtctl disconnect CB:81:F4:62:FF:07
-./build/midi-ble-rtctl forget CB:81:F4:62:FF:07 --yes
+midi-ble-rtctl pair CB:81:F4:62:FF:07
+midi-ble-rtctl trust CB:81:F4:62:FF:07
+midi-ble-rtctl untrust CB:81:F4:62:FF:07
+midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys
+midi-ble-rtctl disconnect CB:81:F4:62:FF:07
+midi-ble-rtctl forget CB:81:F4:62:FF:07 --yes
 ```
 
 Configuration commands:
 
 ```bash
-./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys
-./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --print
-./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
-./build/midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config
+midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys
+midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --print
+midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
+midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config
 ```
 
 For `--profile roland_gokeys`, `connect` applies the current Roland policy:
@@ -149,13 +151,13 @@ accept official MIDI I/O UUID or Roland 00006bf3... alias
 Create or update the config file automatically:
 
 ```bash
-./build/midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
+midi-ble-rtctl configure CB:81:F4:62:FF:07 --profile roland_gokeys --force
 ```
 
 Then run:
 
 ```bash
-./build/midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
+midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
 ```
 
 Check the ALSA port:
