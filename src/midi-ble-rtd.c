@@ -783,7 +783,7 @@ static gboolean alsa_rx_poll_cb(gpointer user_data) {
         return G_SOURCE_CONTINUE;
 
     for (;;) {
-        int pending = snd_seq_event_input_pending(app->seq, 0);
+        int pending = snd_seq_event_input_pending(app->seq, 1);
         if (pending <= 0)
             break;
 
