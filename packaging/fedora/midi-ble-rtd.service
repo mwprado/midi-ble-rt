@@ -1,0 +1,13 @@
+[Unit]
+Description=midi-ble-rt BLE-MIDI to ALSA Sequencer daemon
+Documentation=https://github.com/mwprado/midi-ble-rt
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/midi-ble-rtd --config %h/.config/midi-ble-rt/roland-gokeys.ini
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
