@@ -11,6 +11,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
 
 add_library(midi-ble-rt-core
+    src/mb-buffer.c
     src/mb-session.c
 )
 
@@ -45,6 +46,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-session PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-session PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-session COMMAND test-mb-session)
+
+    add_executable(test-mb-buffer
+        tests/test-mb-buffer.c
+    )
+    target_link_libraries(test-mb-buffer PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-buffer PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-buffer COMMAND test-mb-buffer)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
