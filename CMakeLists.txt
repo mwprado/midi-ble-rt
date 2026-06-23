@@ -55,6 +55,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-buffer PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-buffer PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-buffer COMMAND test-mb-buffer)
+
+    add_executable(test-mb-frame-model
+        tests/test-mb-frame-model.c
+    )
+    target_link_libraries(test-mb-frame-model PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-frame-model PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-frame-model COMMAND test-mb-frame-model)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
