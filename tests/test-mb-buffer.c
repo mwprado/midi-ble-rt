@@ -13,7 +13,7 @@ static void test_ring_initial_state(void) {
     MbBufferRing ring;
     mb_buffer_ring_init(&ring, MB_BUFFER_RX_RAW, 0);
 
-    g_assert_cmpstr(mb_buffer_kind_name(ring.kind), ==, "rx_raw");
+    g_assert_cmpstr(mb_buffer_kind_name(ring.kind), ==, "rx.raw");
     g_assert_cmpuint(mb_buffer_ring_active_limit(&ring), ==, MB_BUFFER_LIMIT_MIN);
     g_assert_cmpuint(mb_buffer_ring_count(&ring), ==, 0);
     g_assert_true(mb_buffer_ring_is_empty(&ring));
@@ -49,7 +49,7 @@ static void test_ring_push_pop_order(void) {
 
 static void test_ring_wraparound(void) {
     MbBufferRing ring;
-    mb_buffer_ring_init(&ring, MB_BUFFER_TX_TRANSMIT, 0);
+    mb_buffer_ring_init(&ring, MB_BUFFER_TX_ACTIVE, 0);
 
     uint8_t byte = 0x7f;
     MbBufferSlot slot;
@@ -144,21 +144,21 @@ static void test_ring_shrinks_after_30s(void) {
     g_assert_cmpuint(ring.shrink_count, ==, 2);
 }
 
-static void test_session_has_six_independent_rings(void) {
+static void test_session_has_two_explicit_pipelines(void) {
     MbSession session;
     mb_session_init(&session, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", "AA:BB:CC:DD:EE:FF", "BLE-MIDI");
 
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx_raw.kind), ==, "rx_raw");
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx_decoded.kind), ==, "rx_decoded");
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx_play.kind), ==, "rx_play");
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx_raw.kind), ==, "tx_raw");
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx_decoded.kind), ==, "tx_decoded");
-    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx_transmit.kind), ==, "tx_transmit");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx.raw.kind), ==, "rx.raw");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx.decoded.kind), ==, "rx.decoded");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.rx.active.kind), ==, "rx.active");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx.raw.kind), ==, "tx.raw");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx.decoded.kind), ==, "tx.decoded");
+    g_assert_cmpstr(mb_buffer_kind_name(session.buffers.tx.active.kind), ==, "tx.active");
 
     uint8_t byte = 0x90;
-    g_assert_true(mb_buffer_ring_push(&session.buffers.rx_raw, &byte, 1, 0, 0));
-    g_assert_cmpuint(session.buffers.rx_raw.count, ==, 1);
-    g_assert_cmpuint(session.buffers.tx_raw.count, ==, 0);
+    g_assert_true(mb_buffer_ring_push(&session.buffers.rx.raw, &byte, 1, 0, 0));
+    g_assert_cmpuint(session.buffers.rx.raw.count, ==, 1);
+    g_assert_cmpuint(session.buffers.tx.raw.count, ==, 0);
 
     mb_session_clear(&session);
 }
@@ -168,15 +168,15 @@ static void test_session_reset_clears_buffers(void) {
     mb_session_init(&session, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", "AA:BB:CC:DD:EE:FF", "BLE-MIDI");
 
     uint8_t byte = 0x90;
-    g_assert_true(mb_buffer_ring_push(&session.buffers.rx_raw, &byte, 1, 0, 0));
-    g_assert_cmpuint(session.buffers.rx_raw.count, ==, 1);
+    g_assert_true(mb_buffer_ring_push(&session.buffers.rx.raw, &byte, 1, 0, 0));
+    g_assert_cmpuint(session.buffers.rx.raw.count, ==, 1);
 
     g_assert_true(mb_session_handle_event(&session, MB_EV_CMD_CONNECT));
     g_assert_true(mb_session_handle_event(&session, MB_EV_BLUEZ_CONNECTED));
     g_assert_true(mb_session_handle_event(&session, MB_EV_CMD_DISCONNECT));
 
-    g_assert_cmpuint(session.buffers.rx_raw.count, ==, 0);
-    g_assert_cmpuint(session.buffers.rx_raw.active_limit, ==, MB_BUFFER_LIMIT_MIN);
+    g_assert_cmpuint(session.buffers.rx.raw.count, ==, 0);
+    g_assert_cmpuint(session.buffers.rx.raw.active_limit, ==, MB_BUFFER_LIMIT_MIN);
 
     mb_session_clear(&session);
 }
@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
     g_test_add_func("/mb-buffer/ring-rejects-oversize", test_ring_rejects_oversize);
     g_test_add_func("/mb-buffer/ring-overflow-at-16-slots", test_ring_overflow_at_16_slots);
     g_test_add_func("/mb-buffer/ring-shrinks-after-30s", test_ring_shrinks_after_30s);
-    g_test_add_func("/mb-buffer/session-has-six-independent-rings", test_session_has_six_independent_rings);
+    g_test_add_func("/mb-buffer/session-has-two-explicit-pipelines", test_session_has_two_explicit_pipelines);
     g_test_add_func("/mb-buffer/session-reset-clears-buffers", test_session_reset_clears_buffers);
 
     return g_test_run();
