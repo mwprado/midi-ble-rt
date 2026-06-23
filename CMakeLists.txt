@@ -71,6 +71,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-slice-ring PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-slice-ring PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-slice-ring COMMAND test-mb-slice-ring)
+
+    add_executable(test-mb-runtime
+        tests/test-mb-runtime.c
+    )
+    target_link_libraries(test-mb-runtime PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-runtime PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-runtime COMMAND test-mb-runtime)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
