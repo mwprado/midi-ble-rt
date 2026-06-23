@@ -124,6 +124,48 @@ midi-ble-rtctl info CB:81:F4:62:FF:07
 midi-ble-rtctl probe CB:81:F4:62:FF:07
 ```
 
+## Generic BLE-MIDI config
+
+Use the generic config first when testing an unknown standards-compliant
+BLE-MIDI keyboard:
+
+```text
+config/standard-ble-midi.ini.example
+```
+
+Copy it to your user config directory and replace the address:
+
+```bash
+mkdir -p ~/.config/midi-ble-rt
+cp /usr/share/midi-ble-rt/config/standard-ble-midi.ini.example \
+   ~/.config/midi-ble-rt/standard-ble-midi.ini
+$EDITOR ~/.config/midi-ble-rt/standard-ble-midi.ini
+```
+
+For a local build tree, copy from the repository instead:
+
+```bash
+cp config/standard-ble-midi.ini.example \
+   ~/.config/midi-ble-rt/standard-ble-midi.ini
+```
+
+Then run:
+
+```bash
+midi-ble-rtd --config ~/.config/midi-ble-rt/standard-ble-midi.ini
+```
+
+The generic config uses only:
+
+```text
+service_uuid = 03b80e5a-ede8-4b33-a751-6ce34ec4c700
+io_uuid      = 7772e5db-3868-4112-a1a9-f2669d106bf3
+```
+
+It intentionally leaves vendor-specific aliases empty.
+
+## Roland GO:KEYS config
+
 Prepare a Roland GO:KEYS:
 
 ```bash
