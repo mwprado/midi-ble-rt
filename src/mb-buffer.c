@@ -12,12 +12,12 @@ static uint16_t clamp_limit(uint16_t limit) {
 
 const char *mb_buffer_kind_name(MbBufferKind kind) {
     switch (kind) {
-        case MB_BUFFER_RX_RAW: return "rx_raw";
-        case MB_BUFFER_RX_DECODED: return "rx_decoded";
-        case MB_BUFFER_RX_PLAY: return "rx_play";
-        case MB_BUFFER_TX_RAW: return "tx_raw";
-        case MB_BUFFER_TX_DECODED: return "tx_decoded";
-        case MB_BUFFER_TX_TRANSMIT: return "tx_transmit";
+        case MB_BUFFER_RX_RAW: return "rx.raw";
+        case MB_BUFFER_RX_DECODED: return "rx.decoded";
+        case MB_BUFFER_RX_ACTIVE: return "rx.active";
+        case MB_BUFFER_TX_RAW: return "tx.raw";
+        case MB_BUFFER_TX_DECODED: return "tx.decoded";
+        case MB_BUFFER_TX_ACTIVE: return "tx.active";
         case MB_BUFFER_KIND_COUNT:
         default: return "unknown";
     }
@@ -169,16 +169,71 @@ uint64_t mb_buffer_ring_overflows(const MbBufferRing *ring) {
     return ring ? ring->overflows : 0;
 }
 
+void mb_buffer_pipeline_init(MbBufferPipeline *pipeline,
+                             MbBufferKind raw_kind,
+                             MbBufferKind decoded_kind,
+                             MbBufferKind active_kind,
+                             uint64_t now_ns) {
+    if (!pipeline)
+        return;
+
+    mb_buffer_ring_init(&pipeline->raw, raw_kind, now_ns);
+    mb_buffer_ring_init(&pipeline->decoded, decoded_kind, now_ns);
+    mb_buffer_ring_init(&pipeline->active, active_kind, now_ns);
+}
+
+void mb_buffer_pipeline_reset(MbBufferPipeline *pipeline,
+                              MbBufferKind raw_kind,
+                              MbBufferKind decoded_kind,
+                              MbBufferKind active_kind,
+                              uint64_t now_ns) {
+    mb_buffer_pipeline_init(pipeline, raw_kind, decoded_kind, active_kind, now_ns);
+}
+
+void mb_buffer_pipeline_tick(MbBufferPipeline *pipeline, uint64_t now_ns) {
+    if (!pipeline)
+        return;
+
+    mb_buffer_ring_tick(&pipeline->raw, now_ns);
+    mb_buffer_ring_tick(&pipeline->decoded, now_ns);
+    mb_buffer_ring_tick(&pipeline->active, now_ns);
+}
+
+uint64_t mb_buffer_pipeline_total_overflows(const MbBufferPipeline *pipeline) {
+    if (!pipeline)
+        return 0;
+
+    return pipeline->raw.overflows +
+           pipeline->decoded.overflows +
+           pipeline->active.overflows;
+}
+
+uint16_t mb_buffer_pipeline_max_active_limit(const MbBufferPipeline *pipeline) {
+    if (!pipeline)
+        return 0;
+
+    uint16_t max = pipeline->raw.active_limit;
+    if (pipeline->decoded.active_limit > max)
+        max = pipeline->decoded.active_limit;
+    if (pipeline->active.active_limit > max)
+        max = pipeline->active.active_limit;
+    return max;
+}
+
 void mb_session_buffers_init(MbSessionBuffers *buffers, uint64_t now_ns) {
     if (!buffers)
         return;
 
-    mb_buffer_ring_init(&buffers->rx_raw, MB_BUFFER_RX_RAW, now_ns);
-    mb_buffer_ring_init(&buffers->rx_decoded, MB_BUFFER_RX_DECODED, now_ns);
-    mb_buffer_ring_init(&buffers->rx_play, MB_BUFFER_RX_PLAY, now_ns);
-    mb_buffer_ring_init(&buffers->tx_raw, MB_BUFFER_TX_RAW, now_ns);
-    mb_buffer_ring_init(&buffers->tx_decoded, MB_BUFFER_TX_DECODED, now_ns);
-    mb_buffer_ring_init(&buffers->tx_transmit, MB_BUFFER_TX_TRANSMIT, now_ns);
+    mb_buffer_pipeline_init(&buffers->rx,
+                            MB_BUFFER_RX_RAW,
+                            MB_BUFFER_RX_DECODED,
+                            MB_BUFFER_RX_ACTIVE,
+                            now_ns);
+    mb_buffer_pipeline_init(&buffers->tx,
+                            MB_BUFFER_TX_RAW,
+                            MB_BUFFER_TX_DECODED,
+                            MB_BUFFER_TX_ACTIVE,
+                            now_ns);
 }
 
 void mb_session_buffers_reset(MbSessionBuffers *buffers, uint64_t now_ns) {
@@ -189,43 +244,23 @@ void mb_session_buffers_tick(MbSessionBuffers *buffers, uint64_t now_ns) {
     if (!buffers)
         return;
 
-    mb_buffer_ring_tick(&buffers->rx_raw, now_ns);
-    mb_buffer_ring_tick(&buffers->rx_decoded, now_ns);
-    mb_buffer_ring_tick(&buffers->rx_play, now_ns);
-    mb_buffer_ring_tick(&buffers->tx_raw, now_ns);
-    mb_buffer_ring_tick(&buffers->tx_decoded, now_ns);
-    mb_buffer_ring_tick(&buffers->tx_transmit, now_ns);
+    mb_buffer_pipeline_tick(&buffers->rx, now_ns);
+    mb_buffer_pipeline_tick(&buffers->tx, now_ns);
 }
 
 uint64_t mb_session_buffers_total_overflows(const MbSessionBuffers *buffers) {
     if (!buffers)
         return 0;
 
-    return buffers->rx_raw.overflows +
-           buffers->rx_decoded.overflows +
-           buffers->rx_play.overflows +
-           buffers->tx_raw.overflows +
-           buffers->tx_decoded.overflows +
-           buffers->tx_transmit.overflows;
+    return mb_buffer_pipeline_total_overflows(&buffers->rx) +
+           mb_buffer_pipeline_total_overflows(&buffers->tx);
 }
 
 uint16_t mb_session_buffers_max_active_limit(const MbSessionBuffers *buffers) {
     if (!buffers)
         return 0;
 
-    uint16_t max = buffers->rx_raw.active_limit;
-    const MbBufferRing *rings[] = {
-        &buffers->rx_decoded,
-        &buffers->rx_play,
-        &buffers->tx_raw,
-        &buffers->tx_decoded,
-        &buffers->tx_transmit,
-    };
-
-    for (size_t i = 0; i < sizeof(rings) / sizeof(rings[0]); i++) {
-        if (rings[i]->active_limit > max)
-            max = rings[i]->active_limit;
-    }
-
-    return max;
+    uint16_t rx_max = mb_buffer_pipeline_max_active_limit(&buffers->rx);
+    uint16_t tx_max = mb_buffer_pipeline_max_active_limit(&buffers->tx);
+    return rx_max > tx_max ? rx_max : tx_max;
 }
