@@ -18,6 +18,7 @@ validation.
 - Developer documentation in `DEVELOPERS.md`.
 - State diagrams for MIDI session lifecycle.
 - Documentation for identical keyboards with different Bluetooth addresses.
+- Generic standards-only BLE-MIDI config example: `config/standard-ble-midi.ini.example`.
 
 ## Changed
 
@@ -27,10 +28,15 @@ validation.
   - BlueZ owns Bluetooth/GATT state.
   - `midi-ble-rt` owns MIDI session state.
   - ALSA remains the musical endpoint.
+  - PipeWire/WirePlumber and apps consume the exported ALSA MIDI ports.
+- Config examples are installed under `%{_datadir}/midi-ble-rt/config`.
 
 ## Validation scope
 
 Validated target remains the Roland GO:KEYS single-device workflow.
+
+The generic BLE-MIDI config is provided for testing standards-compliant devices,
+but validation on additional physical keyboards is still pending.
 
 Multi-session behavior is covered by unit tests and architecture documentation,
 but has not yet been validated with two physical BLE-MIDI keyboards.
