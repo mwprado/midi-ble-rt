@@ -15,6 +15,7 @@ add_library(midi-ble-rt-core
     src/mb-frame-model.c
     src/mb-log.c
     src/mb-session.c
+    src/mb-slice-ring.c
 )
 
 target_include_directories(midi-ble-rt-core
@@ -62,6 +63,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-frame-model PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-frame-model PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-frame-model COMMAND test-mb-frame-model)
+
+    add_executable(test-mb-slice-ring
+        tests/test-mb-slice-ring.c
+    )
+    target_link_libraries(test-mb-slice-ring PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-slice-ring PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-slice-ring COMMAND test-mb-slice-ring)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
