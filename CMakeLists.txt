@@ -14,6 +14,7 @@ add_library(midi-ble-rt-core
     src/mb-buffer.c
     src/mb-frame-model.c
     src/mb-log.c
+    src/mb-runtime.c
     src/mb-session.c
     src/mb-slice-ring.c
 )
