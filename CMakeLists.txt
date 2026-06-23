@@ -48,4 +48,4 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES config/roland-gokeys.ini.example DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt)
+install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.ini.example")
