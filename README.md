@@ -1,11 +1,18 @@
 # midi-ble-rt
 
-`midi-ble-rt` is a Linux BLE-MIDI/GATT to ALSA Sequencer bridge.
+`midi-ble-rt` is Linux BLE-MIDI infrastructure.
+
+It exposes Bluetooth LE MIDI devices as stable ALSA Sequencer MIDI ports that
+standard Linux MIDI tools, DAWs, PipeWire and WirePlumber-based desktops can
+consume.
 
 It uses BlueZ as the BLE/GATT transport, finds the BLE-MIDI service and I/O
 characteristic directly, subscribes to notifications, decodes BLE-MIDI packets,
 publishes ALSA Sequencer ports, and can write short MIDI messages back through
 GATT `WriteValue`.
+
+The core BLE-MIDI data path does not depend on PipeWire. PipeWire is expected to
+consume the ALSA MIDI ports exported by this daemon.
 
 The first validated target is the Roland GO:KEYS family.
 
@@ -15,7 +22,7 @@ and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md).
 ## Architecture overview
 
 ```text
-BLE-MIDI device <-> BlueZ/GATT <-> midi-ble-rt <-> ALSA Sequencer <-> apps
+BLE-MIDI device <-> BlueZ/GATT <-> midi-ble-rt <-> ALSA Sequencer <-> PipeWire/apps
 ```
 
 ```mermaid
@@ -23,11 +30,12 @@ flowchart LR
     K[BLE-MIDI keyboard] <--> B[BlueZ / GATT]
     B <--> D[midi-ble-rt]
     D <--> A[ALSA Sequencer]
-    A <--> P[aseqdump / aplaymidi / DAW / PipeWire]
+    A <--> P[PipeWire / WirePlumber / aseqdump / aplaymidi / DAW]
 ```
 
-The primary interface is ALSA Sequencer. PipeWire/JACK/DAWs may consume or display
-ALSA MIDI ports, but they are not dependencies of the project.
+The primary exported interface is ALSA Sequencer. PipeWire, JACK bridges, DAWs
+and standard MIDI tools may consume or display those ALSA MIDI ports, but they
+are not dependencies of the core BLE-MIDI bridge.
 
 ## Current status
 
@@ -41,7 +49,7 @@ Roland GO:KEYS MIDI
 -> StartNotify
 -> midi-ble-rtd
 -> ALSA Sequencer
--> aseqdump / DAW
+-> aseqdump / DAW / PipeWire environment
 ```
 
 Initial transmit path:
