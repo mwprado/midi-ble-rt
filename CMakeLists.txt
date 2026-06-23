@@ -12,6 +12,7 @@ pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
 
 add_library(midi-ble-rt-core
     src/mb-buffer.c
+    src/mb-frame-model.c
     src/mb-log.c
     src/mb-session.c
 )
