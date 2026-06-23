@@ -50,20 +50,39 @@ connection, but it does not prove that the bridge is musically usable.
 
 ## Identity
 
-The primary runtime key is the BlueZ `device_path`, for example:
-
-```text
-/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
-```
-
-The stable user-facing key is the Bluetooth address:
+The stable technical identity is the Bluetooth address:
 
 ```text
 AA:BB:CC:DD:EE:FF
 ```
 
+The BlueZ runtime object path is the active process key:
+
+```text
+/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
+```
+
+The address is treated as authoritative. If the same address appears again with a
+different BlueZ object path, the daemon must reindex the existing `MbSession`
+instead of creating a duplicate session.
+
+This matters for identical keyboards. Two Roland GO:KEYS units may expose the same
+name and the same BLE-MIDI GATT shape, but they still have different Bluetooth
+addresses:
+
+```text
+GO:KEYS 11:22:33:44:55:66 -> Session A -> ALSA port A
+GO:KEYS AA:BB:CC:DD:EE:FF -> Session B -> ALSA port B
+```
+
 Name and alias are diagnostics only. They must not be used as decisive MIDI
-identity because a device may expose confusing names such as `Audio` and `MIDI`.
+identity because a device may expose confusing names such as `Audio` and `MIDI`,
+or because two equal keyboards may share the same human-readable name.
+
+An optional user index such as `gokeys-1` or `gokeys-2` is acceptable as a label
+for logs, config files and ALSA port names, but it is not identity. The daemon must
+not select a device by index unless that index resolves to a stored Bluetooth
+address.
 
 ## Ownership boundary
 
@@ -99,6 +118,8 @@ The unit tests cover:
 single-session happy path
 BlueZ disconnect -> RECONNECTING
 independence between two sessions
+identical keyboard names with different addresses
+duplicate address reuses/reindexes the same session
 error path for missing MIDI characteristic
 session removal and index cleanup
 invalid transition handling
