@@ -105,6 +105,59 @@ static void test_two_sessions_are_independent(void) {
     mb_daemon_clear(&daemon);
 }
 
+static void test_identical_keyboards_with_different_addresses_are_distinct(void) {
+    MbDaemon daemon;
+    mb_daemon_init(&daemon);
+
+    MbSession *left = mb_daemon_ensure_session(&daemon,
+                                               "/org/bluez/hci0/dev_11_22_33_44_55_66",
+                                               "11:22:33:44:55:66",
+                                               "GO:KEYS");
+    MbSession *right = mb_daemon_ensure_session(&daemon,
+                                                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                                                "AA:BB:CC:DD:EE:FF",
+                                                "GO:KEYS");
+
+    g_assert_nonnull(left);
+    g_assert_nonnull(right);
+    g_assert_true(left != right);
+    g_assert_cmpstr(left->name, ==, "GO:KEYS");
+    g_assert_cmpstr(right->name, ==, "GO:KEYS");
+    g_assert_cmpuint(mb_daemon_session_count(&daemon), ==, 2u);
+    g_assert_true(mb_daemon_find_session_by_address(&daemon, "11:22:33:44:55:66") == left);
+    g_assert_true(mb_daemon_find_session_by_address(&daemon, "AA:BB:CC:DD:EE:FF") == right);
+
+    mb_session_set_alsa_port(left, 0);
+    mb_session_set_alsa_port(right, 1);
+    g_assert_cmpint(left->alsa_port_id, ==, 0);
+    g_assert_cmpint(right->alsa_port_id, ==, 1);
+
+    mb_daemon_clear(&daemon);
+}
+
+static void test_duplicate_address_reuses_session_and_reindexes_path(void) {
+    MbDaemon daemon;
+    mb_daemon_init(&daemon);
+
+    MbSession *first = mb_daemon_ensure_session(&daemon,
+                                                "/org/bluez/hci0/dev_11_22_33_44_55_66",
+                                                "11:22:33:44:55:66",
+                                                "GO:KEYS");
+    MbSession *same = mb_daemon_ensure_session(&daemon,
+                                               "/org/bluez/hci1/dev_11_22_33_44_55_66",
+                                               "11:22:33:44:55:66",
+                                               "GO:KEYS MIDI");
+
+    g_assert_true(first == same);
+    g_assert_cmpuint(mb_daemon_session_count(&daemon), ==, 1u);
+    g_assert_null(mb_daemon_find_session_by_device_path(&daemon, "/org/bluez/hci0/dev_11_22_33_44_55_66"));
+    g_assert_true(mb_daemon_find_session_by_device_path(&daemon, "/org/bluez/hci1/dev_11_22_33_44_55_66") == same);
+    g_assert_true(mb_daemon_find_session_by_address(&daemon, "11:22:33:44:55:66") == same);
+    g_assert_cmpstr(same->name, ==, "GO:KEYS MIDI");
+
+    mb_daemon_clear(&daemon);
+}
+
 static void test_error_path_for_missing_midi_characteristic(void) {
     MbSession session;
     mb_session_init(&session,
@@ -165,6 +218,8 @@ int main(int argc, char **argv) {
     g_test_add_func("/mb-session/single-session-happy-path", test_single_session_happy_path);
     g_test_add_func("/mb-session/disconnect-reconnect", test_disconnect_enters_reconnecting_and_preserves_identity);
     g_test_add_func("/mb-session/two-sessions-independent", test_two_sessions_are_independent);
+    g_test_add_func("/mb-session/identical-keyboards-different-addresses", test_identical_keyboards_with_different_addresses_are_distinct);
+    g_test_add_func("/mb-session/duplicate-address-reuses-session", test_duplicate_address_reuses_session_and_reindexes_path);
     g_test_add_func("/mb-session/error-missing-midi-characteristic", test_error_path_for_missing_midi_characteristic);
     g_test_add_func("/mb-session/remove-session-updates-indexes", test_remove_session_updates_indexes);
     g_test_add_func("/mb-session/invalid-transition", test_invalid_transition_does_not_change_state);
