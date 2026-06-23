@@ -393,6 +393,46 @@ void mb_daemon_clear(MbDaemon *daemon) {
     daemon->alsa_client_id = -1;
 }
 
+static void mb_daemon_steal_path_index(MbDaemon *daemon, const char *device_path, MbSession *expected_session) {
+    if (!daemon || !device_path || !*device_path)
+        return;
+
+    gpointer stored_key = NULL;
+    gpointer stored_value = NULL;
+    if (!g_hash_table_lookup_extended(daemon->sessions_by_device_path,
+                                      device_path,
+                                      &stored_key,
+                                      &stored_value))
+        return;
+
+    if (stored_value != expected_session)
+        return;
+
+    g_hash_table_steal(daemon->sessions_by_device_path, device_path);
+    g_free(stored_key);
+}
+
+static void mb_daemon_reindex_device_path(MbDaemon *daemon, MbSession *session,
+                                          const char *old_device_path) {
+    if (!daemon || !session)
+        return;
+
+    if (old_device_path && *old_device_path &&
+        g_strcmp0(old_device_path, session->device_path) != 0)
+        mb_daemon_steal_path_index(daemon, old_device_path, session);
+
+    if (!session->device_path || !*session->device_path)
+        return;
+
+    MbSession *existing = g_hash_table_lookup(daemon->sessions_by_device_path,
+                                             session->device_path);
+    if (existing == session)
+        return;
+
+    g_hash_table_replace(daemon->sessions_by_device_path,
+                         g_strdup(session->device_path), session);
+}
+
 static void mb_daemon_reindex_address(MbDaemon *daemon, MbSession *session,
                                       const char *old_address) {
     if (old_address && *old_address)
@@ -409,6 +449,20 @@ MbSession *mb_daemon_ensure_session(MbDaemon *daemon,
                                     const char *name) {
     g_return_val_if_fail(daemon != NULL, NULL);
     g_return_val_if_fail(device_path != NULL && *device_path != '\0', NULL);
+
+    if (address && *address) {
+        MbSession *session_by_address = g_hash_table_lookup(daemon->sessions_by_address, address);
+        if (session_by_address) {
+            char *old_device_path = dup_or_null(session_by_address->device_path);
+            char *old_address = dup_or_null(session_by_address->address);
+            mb_session_set_identity(session_by_address, device_path, address, name);
+            mb_daemon_reindex_device_path(daemon, session_by_address, old_device_path);
+            mb_daemon_reindex_address(daemon, session_by_address, old_address);
+            g_free(old_device_path);
+            g_free(old_address);
+            return session_by_address;
+        }
+    }
 
     MbSession *session = g_hash_table_lookup(daemon->sessions_by_device_path, device_path);
     if (session) {
