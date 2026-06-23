@@ -13,4 +13,13 @@ typedef struct {
     uint16_t len;
 } MbFrameModelSlice;
 
+typedef struct {
+    uint8_t payload[MB_FRAME_MODEL_CAPACITY];
+    uint16_t len;
+    int busy;
+    int holders;
+    uint64_t seq;
+    uint64_t timestamp_ns;
+} MbFrameModelFrame;
+
 #endif
