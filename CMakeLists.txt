@@ -79,6 +79,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-runtime PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-runtime PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-runtime COMMAND test-mb-runtime)
+
+    add_executable(test-mb-duplex-runtime
+        tests/test-mb-duplex-runtime.c
+    )
+    target_link_libraries(test-mb-duplex-runtime PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-duplex-runtime PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-duplex-runtime COMMAND test-mb-duplex-runtime)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
