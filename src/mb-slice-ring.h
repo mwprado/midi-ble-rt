@@ -3,6 +3,7 @@
 
 #include "mb-frame-model.h"
 
+#include <glib.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,9 +30,11 @@ typedef struct {
     MbSliceRingKind kind;
     MbFrameModelPool *pool;
     MbSliceRingItem item[MB_SLICE_RING_COUNT];
-    uint8_t read_idx;
-    uint8_t write_idx;
-    uint8_t count;
+
+    /* SPSC discipline: only the producer writes write_seq; only the consumer writes read_seq. */
+    gint read_seq;
+    gint write_seq;
+
     uint64_t next_seq;
     uint64_t pushed;
     uint64_t taken;
