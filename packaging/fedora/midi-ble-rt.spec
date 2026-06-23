@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.1.1
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -59,13 +59,19 @@ install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
 
 %files
 %license LICENSE
-%doc README.md docs/*.md
+%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.2.0.md docs/*.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Tue Jun 23 2026 Moacyr Prado <mwprado@gmail.com> - 0.2.0-1
+- Add MIDI session state core and daemon session registry.
+- Add unit tests for state transitions, multi-session isolation and address identity.
+- Document developer architecture and session state diagrams.
+- Keep BlueZ as Bluetooth/GATT source of truth and ALSA as MIDI endpoint.
+
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.1-1
 - Consolidate Fedora spec under packaging/fedora.
 - Do not install missing examples/midi/README.md.
