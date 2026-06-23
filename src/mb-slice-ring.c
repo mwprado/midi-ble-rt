@@ -15,6 +15,15 @@ const char *mb_slice_ring_kind_name(MbSliceRingKind kind) {
     }
 }
 
+static gint ring_count_from_seq(gint read_seq, gint write_seq) {
+    gint count = write_seq - read_seq;
+    if (count < 0)
+        return 0;
+    if (count > (gint)MB_SLICE_RING_COUNT)
+        return (gint)MB_SLICE_RING_COUNT;
+    return count;
+}
+
 void mb_slice_ring_init(MbSliceRing *ring,
                         MbSliceRingKind kind,
                         MbFrameModelPool *pool) {
@@ -24,13 +33,15 @@ void mb_slice_ring_init(MbSliceRing *ring,
     memset(ring, 0, sizeof(*ring));
     ring->kind = kind;
     ring->pool = pool;
+    g_atomic_int_set(&ring->read_seq, 0);
+    g_atomic_int_set(&ring->write_seq, 0);
 }
 
 void mb_slice_ring_clear(MbSliceRing *ring) {
     if (!ring)
         return;
 
-    while (ring->count > 0)
+    while (!mb_slice_ring_is_empty(ring))
         mb_slice_ring_drop(ring);
 
     MbSliceRingKind kind = ring->kind;
@@ -44,20 +55,23 @@ static bool push_item(MbSliceRing *ring,
     if (!ring || !ring->pool || !mb_frame_model_slice_ok(slice))
         return false;
 
-    if (ring->count >= MB_SLICE_RING_COUNT) {
+    gint read_seq = g_atomic_int_get(&ring->read_seq);
+    gint write_seq = g_atomic_int_get(&ring->write_seq);
+
+    if (ring_count_from_seq(read_seq, write_seq) >= (gint)MB_SLICE_RING_COUNT) {
         ring->overflow++;
         return false;
     }
 
-    MbSliceRingItem *item = &ring->item[ring->write_idx];
+    guint slot_idx = (guint)write_seq % MB_SLICE_RING_COUNT;
+    MbSliceRingItem *item = &ring->item[slot_idx];
     item->slice = slice;
     item->seq = ring->next_seq++;
     item->timestamp_ns = timestamp_ns;
     item->flags = 0;
 
-    ring->write_idx = (uint8_t)((ring->write_idx + 1u) % MB_SLICE_RING_COUNT);
-    ring->count++;
     ring->pushed++;
+    g_atomic_int_set(&ring->write_seq, write_seq + 1);
     return true;
 }
 
@@ -85,28 +99,40 @@ bool mb_slice_ring_push_shared(MbSliceRing *ring,
 }
 
 bool mb_slice_ring_peek(const MbSliceRing *ring, const MbSliceRingItem **item) {
-    if (!ring || !item || ring->count == 0) {
+    if (!ring || !item) {
         if (item)
             *item = NULL;
         return false;
     }
 
-    *item = &ring->item[ring->read_idx];
+    gint read_seq = g_atomic_int_get((gint *)&ring->read_seq);
+    gint write_seq = g_atomic_int_get((gint *)&ring->write_seq);
+    if (read_seq == write_seq) {
+        *item = NULL;
+        return false;
+    }
+
+    *item = &ring->item[(guint)read_seq % MB_SLICE_RING_COUNT];
     return true;
 }
 
 bool mb_slice_ring_take(MbSliceRing *ring, MbSliceRingItem *out_item) {
-    if (!ring || ring->count == 0)
+    if (!ring)
         return false;
 
-    MbSliceRingItem *item = &ring->item[ring->read_idx];
+    gint read_seq = g_atomic_int_get(&ring->read_seq);
+    gint write_seq = g_atomic_int_get(&ring->write_seq);
+    if (read_seq == write_seq)
+        return false;
+
+    guint slot_idx = (guint)read_seq % MB_SLICE_RING_COUNT;
+    MbSliceRingItem *item = &ring->item[slot_idx];
     if (out_item)
         *out_item = *item;
 
     memset(item, 0, sizeof(*item));
-    ring->read_idx = (uint8_t)((ring->read_idx + 1u) % MB_SLICE_RING_COUNT);
-    ring->count--;
     ring->taken++;
+    g_atomic_int_set(&ring->read_seq, read_seq + 1);
     return true;
 }
 
@@ -129,15 +155,29 @@ void mb_slice_ring_item_done(MbSliceRing *ring, MbSliceRingItem *item) {
 }
 
 bool mb_slice_ring_is_empty(const MbSliceRing *ring) {
-    return !ring || ring->count == 0;
+    if (!ring)
+        return true;
+
+    return g_atomic_int_get((gint *)&ring->read_seq) ==
+           g_atomic_int_get((gint *)&ring->write_seq);
 }
 
 bool mb_slice_ring_is_full(const MbSliceRing *ring) {
-    return ring && ring->count >= MB_SLICE_RING_COUNT;
+    if (!ring)
+        return false;
+
+    gint read_seq = g_atomic_int_get((gint *)&ring->read_seq);
+    gint write_seq = g_atomic_int_get((gint *)&ring->write_seq);
+    return ring_count_from_seq(read_seq, write_seq) >= (gint)MB_SLICE_RING_COUNT;
 }
 
 uint8_t mb_slice_ring_count(const MbSliceRing *ring) {
-    return ring ? ring->count : 0;
+    if (!ring)
+        return 0;
+
+    gint read_seq = g_atomic_int_get((gint *)&ring->read_seq);
+    gint write_seq = g_atomic_int_get((gint *)&ring->write_seq);
+    return (uint8_t)ring_count_from_seq(read_seq, write_seq);
 }
 
 uint64_t mb_slice_ring_overflow_count(const MbSliceRing *ring) {
