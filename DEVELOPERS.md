@@ -3,7 +3,8 @@
 This document describes the internal architecture of `midi-ble-rt`: state
 ownership, MIDI session lifecycle, multi-keyboard identity, and tests.
 
-The user-facing quick start remains in [`README.md`](README.md).
+The user-facing quick start remains in [`README.md`](README.md).  The daemon
+layer split is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Design boundary
 
@@ -30,6 +31,7 @@ BLE-MIDI characteristic selection
 Notify lifecycle decision
 BLE-MIDI parser state
 ALSA Sequencer port mapping
+Runtime queues
 Reconnect policy
 ```
 
@@ -45,19 +47,35 @@ midi-ble-rt models MIDI sessions.
 The intended daemon model is:
 
 ```text
+1 public daemon = midi-ble-rtd
 1 daemon = 1 BlueZ adapter context + 1 ALSA Sequencer client + N MIDI sessions
 1 BLE-MIDI keyboard = 1 MbSession + 1 parser state + 1 ALSA port
 ```
 
 A failure in one `MbSession` must not affect any other active session.
 
+Internally, the daemon is split into:
+
+```text
+midi-ble-rtd
+  -> mb-daemon
+      -> mb-orchestrator
+          -> core modules / session model / runtime queues
+```
+
+The former `midi-ble-rtd-duplex` path was a validation wrapper.  The public
+interface should now be a single daemon, while the threaded RX/TX path lives in
+`mb-orchestrator`.
+
 ## High-level architecture
 
 ```mermaid
 flowchart LR
     K[BLE-MIDI keyboard] <--> B[BlueZ / GATT]
-    B <--> S[MbSession]
+    B <--> O[mb-orchestrator]
+    O <--> S[MbSession]
     S <--> P[BLE-MIDI parser]
+    O <--> R[Runtime queues]
     P <--> A[ALSA Sequencer port]
 ```
 
@@ -66,16 +84,100 @@ For multiple keyboards:
 ```mermaid
 flowchart TB
     D[midi-ble-rtd]
+    O[mb-orchestrator]
     A[ALSA Sequencer client]
 
-    D --> A
-    D --> S1[MbSession A]
-    D --> S2[MbSession B]
-    D --> S3[MbSession C]
+    D --> O
+    O --> A
+    O --> S1[MbSession A]
+    O --> S2[MbSession B]
+    O --> S3[MbSession C]
 
     S1 --> P1[ALSA port 0]
     S2 --> P2[ALSA port 1]
     S3 --> P3[ALSA port 2]
+```
+
+## Layer responsibilities
+
+### `mb-daemon`
+
+`mb-daemon` is the process entry layer.  It owns:
+
+```text
+main()
+argument handling
+process startup
+exit code
+signal/cleanup boundary
+```
+
+It should stay small and delegate runtime behavior to `mb-orchestrator`.
+
+### `mb-orchestrator`
+
+`mb-orchestrator` owns runtime policy:
+
+```text
+session lifecycle
+RX/TX coordination
+threaded runtime startup/shutdown
+queue push/consume decisions
+ALSA polling policy
+GATT notification callback policy
+reconnect policy, later
+multi-session policy, later
+```
+
+### Core/session modules
+
+The session object and primitive runtime structures belong to the core:
+
+```text
+mb-session
+mb-buffer
+mb-runtime
+mb-duplex-runtime
+mb-slice-ring
+mb-frame-model
+mb-log
+```
+
+The next extraction target is to move legacy static helpers from the original
+daemon implementation into explicit core modules:
+
+```text
+mb-config
+mb-bluez
+mb-gatt
+mb-alsa
+mb-ble-midi
+```
+
+## Session ownership rule
+
+The session object belongs to the core.  Session lifecycle policy belongs to the
+orchestrator.
+
+```text
+core:
+  what is a session?
+  what states and invariants are valid?
+
+orchestrator:
+  what should happen to this session now?
+  when should it connect, notify, stream, reconnect or stop?
+```
+
+This improves debugging:
+
+```text
+argument/config failure          -> mb-daemon
+state transition/reconnect issue -> mb-orchestrator / mb-session
+ALSA event/decode issue          -> mb-alsa
+BlueZ/GATT issue                 -> mb-bluez / mb-gatt
+BLE-MIDI packet issue            -> mb-ble-midi
+queue/drop/overflow issue        -> mb-buffer / mb-runtime
 ```
 
 ## Session states
@@ -240,29 +342,69 @@ The Roland alias is treated as a quirk inside the standard BLE-MIDI service.
 
 ## Source layout
 
-Core session model:
+Public process entry and orchestrator:
+
+```text
+src/mb-daemon.c
+src/mb-orchestrator.h
+src/mb-orchestrator.c
+```
+
+Current legacy daemon core still being extracted:
+
+```text
+src/midi-ble-rtd.c
+```
+
+Core session/runtime model:
 
 ```text
 src/mb-session.h
 src/mb-session.c
+src/mb-buffer.h
+src/mb-buffer.c
+src/mb-runtime.h
+src/mb-runtime.c
+src/mb-duplex-runtime.h
+src/mb-duplex-runtime.c
+src/mb-slice-ring.h
+src/mb-slice-ring.c
+src/mb-frame-model.h
+src/mb-frame-model.c
+src/mb-log.h
+src/mb-log.c
 ```
 
-Daemon and control plane:
+Control plane:
 
 ```text
-src/midi-ble-rtd.c
 src/midi-ble-rtctl.c
 ```
+
+Obsolete validation wrapper:
+
+```text
+src/midi-ble-rtd-duplex.c
+```
+
+`midi-ble-rtd-duplex.c` may remain in the tree temporarily, but it is no longer
+the installed daemon model and should not be the target for new functionality.
 
 Tests:
 
 ```text
 tests/test-mb-session.c
+tests/test-mb-buffer.c
+tests/test-mb-frame-model.c
+tests/test-mb-slice-ring.c
+tests/test-mb-runtime.c
+tests/test-mb-duplex-runtime.c
 ```
 
 Supporting docs:
 
 ```text
+docs/ARCHITECTURE.md
 docs/session-state.md
 docs/TESTING.md
 docs/ALSA.md
@@ -351,6 +493,7 @@ midi_char_path
 notify_enabled
 alsa_port_id
 parser running status
+runtime queue state
 reconnect attempts
 ```
 
