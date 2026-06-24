@@ -485,6 +485,7 @@ static char *find_ble_midi_characteristic(App *app) {
         bool official = uuid_equal(uuid, app->cfg.io_uuid);
         bool alias = uuid_equal(uuid, app->cfg.io_uuid_alias);
         bool notify = string_array_contains_exact(v_flags, "notify");
+        bool indicate = string_array_contains_exact(v_flags, "indicate");
         bool write_cmd = string_array_contains_exact(v_flags, "write-without-response");
         bool write_req = string_array_contains_exact(v_flags, "write");
         bool read = string_array_contains_exact(v_flags, "read");
@@ -493,11 +494,11 @@ static char *find_ble_midi_characteristic(App *app) {
             int score = 0;
             if (official) score += 1000;
             if (alias) score += 950;
-            if (notify) score += 100;
+            if (notify || indicate) score += 100;
             if (write_cmd) score += 100;
             if (write_req) score += 20;
             if (read) score += 20;
-            if (!official && !alias && notify && write_cmd) score += 500;
+            if (!official && !alias && (notify || indicate) && write_cmd) score += 500;
 
             g_print("Characteristic under BLE-MIDI service: %s\n", path);
             g_print("  UUID: %s%s%s\n", uuid ? uuid : "(none)",
@@ -776,6 +777,64 @@ static void print_midi_bytes(const char *prefix, const uint8_t *bytes, size_t le
     g_print("\n");
 }
 
+static bool alsa_event_is_midi_payload(const snd_seq_event_t *ev) {
+    switch (ev->type) {
+        case SND_SEQ_EVENT_NOTE:
+        case SND_SEQ_EVENT_NOTEON:
+        case SND_SEQ_EVENT_NOTEOFF:
+        case SND_SEQ_EVENT_KEYPRESS:
+        case SND_SEQ_EVENT_CONTROLLER:
+        case SND_SEQ_EVENT_PGMCHANGE:
+        case SND_SEQ_EVENT_CHANPRESS:
+        case SND_SEQ_EVENT_PITCHBEND:
+        case SND_SEQ_EVENT_CONTROL14:
+        case SND_SEQ_EVENT_NONREGPARAM:
+        case SND_SEQ_EVENT_REGPARAM:
+        case SND_SEQ_EVENT_SONGPOS:
+        case SND_SEQ_EVENT_SONGSEL:
+        case SND_SEQ_EVENT_QFRAME:
+        case SND_SEQ_EVENT_TIMESIGN:
+        case SND_SEQ_EVENT_KEYSIGN:
+        case SND_SEQ_EVENT_START:
+        case SND_SEQ_EVENT_CONTINUE:
+        case SND_SEQ_EVENT_STOP:
+        case SND_SEQ_EVENT_SETPOS_TICK:
+        case SND_SEQ_EVENT_SETPOS_TIME:
+        case SND_SEQ_EVENT_TEMPO:
+        case SND_SEQ_EVENT_CLOCK:
+        case SND_SEQ_EVENT_TICK:
+        case SND_SEQ_EVENT_TUNE_REQUEST:
+        case SND_SEQ_EVENT_RESET:
+        case SND_SEQ_EVENT_SENSING:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static const char *alsa_event_type_name(int type) {
+    switch (type) {
+        case SND_SEQ_EVENT_PORT_SUBSCRIBED:
+            return "PORT_SUBSCRIBED";
+        case SND_SEQ_EVENT_PORT_UNSUBSCRIBED:
+            return "PORT_UNSUBSCRIBED";
+        case SND_SEQ_EVENT_CLIENT_START:
+            return "CLIENT_START";
+        case SND_SEQ_EVENT_CLIENT_EXIT:
+            return "CLIENT_EXIT";
+        case SND_SEQ_EVENT_CLIENT_CHANGE:
+            return "CLIENT_CHANGE";
+        case SND_SEQ_EVENT_PORT_START:
+            return "PORT_START";
+        case SND_SEQ_EVENT_PORT_EXIT:
+            return "PORT_EXIT";
+        case SND_SEQ_EVENT_PORT_CHANGE:
+            return "PORT_CHANGE";
+        default:
+            return "non-MIDI/control";
+    }
+}
+
 static gboolean alsa_rx_poll_cb(gpointer user_data) {
     App *app = user_data;
 
@@ -796,6 +855,13 @@ static gboolean alsa_rx_poll_cb(gpointer user_data) {
         }
         if (!ev)
             break;
+
+        if (!alsa_event_is_midi_payload(ev)) {
+            if (app->cfg.print_midi_events)
+                g_print("Ignoring ALSA Sequencer control event type %d (%s).\n",
+                        ev->type, alsa_event_type_name(ev->type));
+            continue;
+        }
 
         uint8_t midi[1024];
         long n = snd_midi_event_decode(app->alsa_midi_decoder, midi, sizeof(midi), ev);
@@ -860,6 +926,9 @@ static bool start_notify(App *app) {
         return false;
     }
 
+    g_print("Subscribing to BlueZ PropertiesChanged for %s.\n", app->char_path);
+    g_print("Calling StartNotify on %s.\n", app->char_path);
+
     GVariant *ret = g_dbus_connection_call_sync(
         app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "StartNotify",
         NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
@@ -867,12 +936,13 @@ static bool start_notify(App *app) {
     if (!ret) {
         g_printerr("StartNotify failed: %s\n", error->message);
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
+        g_printerr("If TX works but RX is silent after reconnects, restart bluetooth and midi-ble-rtd to clear stale BlueZ GATT state.\n");
         g_clear_error(&error);
         return false;
     }
 
     g_variant_unref(ret);
-    g_print("StartNotify ok. ALSA MIDI port is ready.\n");
+    g_print("StartNotify ok on %s. ALSA MIDI port is ready.\n", app->char_path);
     return true;
 }
 
