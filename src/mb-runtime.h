@@ -18,6 +18,15 @@ typedef void (*MbRuntimeConsumeFunc)(MbRuntimeFlow *flow,
                                      size_t len,
                                      void *user_data);
 
+typedef struct {
+    uint64_t pushed;
+    uint64_t consumed;
+    uint64_t dropped;
+    uint64_t push_failures;
+    uint64_t overflows;
+    uint8_t depth;
+} MbRuntimeFlowStats;
+
 struct _MbRuntimeFlow {
     const char *name;
 
@@ -58,6 +67,7 @@ void mb_runtime_flow_wake(MbRuntimeFlow *flow);
 
 uint8_t mb_runtime_flow_depth(const MbRuntimeFlow *flow);
 uint64_t mb_runtime_flow_overflows(const MbRuntimeFlow *flow);
+MbRuntimeFlowStats mb_runtime_flow_stats(const MbRuntimeFlow *flow);
 
 G_END_DECLS
 
