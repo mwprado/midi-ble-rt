@@ -262,6 +262,9 @@ When the GO:KEYS is connected as Audio, it behaves as a Bluetooth speaker or
 receiver. That is not the MIDI path. The daemon validates the MIDI target by GATT,
 not by BlueZ `Name` or `Alias`.
 
+If transmit works but receive is silent after reconnects, see
+[`docs/ROLAND_GOKEYS_RECOVERY.md`](docs/ROLAND_GOKEYS_RECOVERY.md).
+
 ## Hardware-free tests
 
 Hardware-free tests are documented in:
