@@ -17,13 +17,17 @@
 #include "mb-ble-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
+#include "mb-stats.h"
 
 typedef struct {
     App app;
     MbDuplexRuntime runtime;
+    MbStats stats;
     GMutex alsa_lock;
     GMutex gatt_write_lock;
+    GMutex stats_lock;
     guint notify_sub_id;
+    guint stats_source_id;
     bool runtime_started;
 } MbOrchestrator;
 
@@ -40,7 +44,33 @@ static bool orchestrator_load_config(Config *cfg, const char *path) {
     return mb_config_load((MbConfig *)cfg, path);
 }
 
-static bool orchestrator_ble_midi_write_packet(App *app, const uint8_t *midi, size_t len) {
+static void orchestrator_stats_rx_packet(MbOrchestrator *orc, size_t bytes, uint64_t now_ns) {
+    g_mutex_lock(&orc->stats_lock);
+    mb_stats_rx_packet(&orc->stats, bytes, now_ns);
+    g_mutex_unlock(&orc->stats_lock);
+}
+
+static void orchestrator_stats_tx_packet(MbOrchestrator *orc, size_t bytes, uint64_t now_ns) {
+    g_mutex_lock(&orc->stats_lock);
+    mb_stats_tx_packet(&orc->stats, bytes, now_ns);
+    g_mutex_unlock(&orc->stats_lock);
+}
+
+static void orchestrator_stats_rx_drop(MbOrchestrator *orc) {
+    g_mutex_lock(&orc->stats_lock);
+    mb_stats_rx_drop(&orc->stats);
+    g_mutex_unlock(&orc->stats_lock);
+}
+
+static void orchestrator_stats_tx_drop(MbOrchestrator *orc) {
+    g_mutex_lock(&orc->stats_lock);
+    mb_stats_tx_drop(&orc->stats);
+    g_mutex_unlock(&orc->stats_lock);
+}
+
+static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_t *midi, size_t len) {
+    App *app = &orc->app;
+
     if (!midi || len == 0)
         return true;
 
@@ -58,6 +88,7 @@ static bool orchestrator_ble_midi_write_packet(App *app, const uint8_t *midi, si
                                      &midi[off], chunk,
                                      packet, sizeof(packet), &packet_len)) {
             g_printerr("BLE-MIDI packet construction failed.\n");
+            orchestrator_stats_tx_drop(orc);
             return false;
         }
 
@@ -84,10 +115,12 @@ static bool orchestrator_ble_midi_write_packet(App *app, const uint8_t *midi, si
         if (!ret) {
             g_printerr("WriteValue failed: %s\n", error->message);
             g_clear_error(&error);
+            orchestrator_stats_tx_drop(orc);
             return false;
         }
 
         g_variant_unref(ret);
+        orchestrator_stats_tx_packet(orc, chunk, orchestrator_now_ns());
         off += chunk;
     }
 
@@ -118,7 +151,7 @@ static void orchestrator_tx_consume(MbRuntimeFlow *flow,
     MbOrchestrator *orc = user_data;
 
     g_mutex_lock(&orc->gatt_write_lock);
-    orchestrator_ble_midi_write_packet(&orc->app, data, len);
+    orchestrator_ble_midi_write_packet(orc, data, len);
     g_mutex_unlock(&orc->gatt_write_lock);
 }
 
@@ -174,8 +207,10 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
         if (app->cfg.print_midi_events)
             print_midi_bytes("ALSA->BLE MIDI:", midi, (size_t)n);
 
-        if (!mb_duplex_runtime_push_tx(&orc->runtime, midi, (size_t)n, orchestrator_now_ns()))
+        if (!mb_duplex_runtime_push_tx(&orc->runtime, midi, (size_t)n, orchestrator_now_ns())) {
             g_printerr("TX runtime queue push failed; ALSA event dropped.\n");
+            orchestrator_stats_tx_drop(orc);
+        }
     }
 
     return G_SOURCE_CONTINUE;
@@ -206,8 +241,13 @@ static void orchestrator_on_properties_changed(GDBusConnection *connection,
         if (value) {
             gsize len = 0;
             const guint8 *bytes = g_variant_get_fixed_array(value, &len, sizeof(guint8));
-            if (!mb_duplex_runtime_push_rx(&orc->runtime, bytes, len, orchestrator_now_ns()))
+            uint64_t now_ns = orchestrator_now_ns();
+            if (!mb_duplex_runtime_push_rx(&orc->runtime, bytes, len, now_ns)) {
                 g_printerr("RX runtime queue push failed; BLE notification dropped.\n");
+                orchestrator_stats_rx_drop(orc);
+            } else {
+                orchestrator_stats_rx_packet(orc, len, now_ns);
+            }
             g_variant_unref(value);
         }
     }
@@ -246,8 +286,40 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
     return true;
 }
 
+static gboolean orchestrator_stats_export_cb(gpointer user_data) {
+    MbOrchestrator *orc = user_data;
+    App *app = &orc->app;
+    GError *error = NULL;
+    uint64_t now_ns = orchestrator_now_ns();
+    const char *label = app->cfg.name && *app->cfg.name ? app->cfg.name : "BLE-MIDI";
+    const char *address = app->cfg.address && *app->cfg.address ? app->cfg.address : "-";
+
+    g_mutex_lock(&orc->stats_lock);
+    bool ok = mb_stats_export_tsv(&orc->stats,
+                                  label,
+                                  address,
+                                  "STREAMING",
+                                  mb_duplex_runtime_rx_depth(&orc->runtime),
+                                  mb_duplex_runtime_tx_depth(&orc->runtime),
+                                  now_ns,
+                                  &error);
+    g_mutex_unlock(&orc->stats_lock);
+
+    if (!ok) {
+        g_printerr("Stats export failed: %s\n", error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void orchestrator_cleanup(MbOrchestrator *orc) {
     App *app = &orc->app;
+
+    if (orc->stats_source_id) {
+        g_source_remove(orc->stats_source_id);
+        orc->stats_source_id = 0;
+    }
 
     if (app->alsa_rx_source_id) {
         g_source_remove(app->alsa_rx_source_id);
@@ -265,9 +337,13 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
     }
 
     mb_duplex_runtime_clear(&orc->runtime);
+    g_mutex_lock(&orc->stats_lock);
+    mb_stats_clear(&orc->stats);
+    g_mutex_unlock(&orc->stats_lock);
     app_cleanup(app);
     g_mutex_clear(&orc->alsa_lock);
     g_mutex_clear(&orc->gatt_write_lock);
+    g_mutex_clear(&orc->stats_lock);
 }
 
 static void orchestrator_print_usage(const char *argv0) {
@@ -295,11 +371,14 @@ int mb_orchestrator_main(int argc, char **argv) {
     App *app = &orc.app;
     g_mutex_init(&orc.alsa_lock);
     g_mutex_init(&orc.gatt_write_lock);
+    g_mutex_init(&orc.stats_lock);
 
     if (!orchestrator_load_config(&app->cfg, config_path)) {
         orchestrator_cleanup(&orc);
         return 1;
     }
+
+    mb_stats_init(&orc.stats, app->cfg.stats_enabled, app->cfg.stats_interval_ms);
 
     g_print("midi-ble-rtd\n");
     g_print("Runtime: orchestrator\n");
@@ -310,6 +389,9 @@ int mb_orchestrator_main(int argc, char **argv) {
     g_print("I/O alias: %s\n", app->cfg.io_uuid_alias);
     g_print("GATT decides; Name/Alias is diagnostic only.\n");
     g_print("TX ALSA->BLE: %s\n", app->cfg.enable_tx ? "enabled" : "disabled");
+    g_print("Stats: %s\n", app->cfg.stats_enabled ? "enabled" : "disabled");
+    if (app->cfg.stats_enabled && orc.stats.path)
+        g_print("Stats path: %s\n", orc.stats.path);
 
     GError *error = NULL;
     app->bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
@@ -381,6 +463,11 @@ int mb_orchestrator_main(int argc, char **argv) {
 
     if (app->cfg.enable_tx)
         app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, &orc);
+
+    if (app->cfg.stats_enabled)
+        orc.stats_source_id = g_timeout_add(app->cfg.stats_interval_ms,
+                                            orchestrator_stats_export_cb,
+                                            &orc);
 
     app->loop = g_main_loop_new(NULL, FALSE);
     g_main_loop_run(app->loop);
