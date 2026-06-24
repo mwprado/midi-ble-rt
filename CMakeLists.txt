@@ -99,3 +99,6 @@ endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.ini.example")
+install(FILES examples/midi/test-note.mid DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/examples/midi)
+install(PROGRAMS scripts/test-alsa-loopback.sh scripts/test-fluidsynth-smoke.sh DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/scripts)
+install(FILES packaging/fedora/midi-ble-rtd.service DESTINATION lib/systemd/user)
