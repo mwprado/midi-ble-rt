@@ -11,6 +11,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
 
 add_library(midi-ble-rt-core
+    src/mb-alsa.c
     src/mb-buffer.c
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
@@ -52,6 +53,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-session PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-session PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-session COMMAND test-mb-session)
+
+    add_executable(test-mb-alsa
+        tests/test-mb-alsa.c
+    )
+    target_link_libraries(test-mb-alsa PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-alsa PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-alsa COMMAND test-mb-alsa)
 
     add_executable(test-mb-buffer
         tests/test-mb-buffer.c
