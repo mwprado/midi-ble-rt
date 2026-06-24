@@ -21,6 +21,7 @@ add_library(midi-ble-rt-core
     src/mb-runtime.c
     src/mb-session.c
     src/mb-slice-ring.c
+    src/mb-stats.c
 )
 
 target_include_directories(midi-ble-rt-core
