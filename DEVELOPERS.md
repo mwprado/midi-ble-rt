@@ -135,6 +135,7 @@ The session object and primitive runtime structures belong to the core:
 
 ```text
 mb-session
+mb-alsa
 mb-buffer
 mb-runtime
 mb-duplex-runtime
@@ -143,14 +144,17 @@ mb-frame-model
 mb-log
 ```
 
-The next extraction target is to move legacy static helpers from the original
-daemon implementation into explicit core modules:
+`mb-alsa` owns ALSA Sequencer event classification shared by the daemon and tests.
+In particular, ALSA Sequencer topology/control events such as `PORT_SUBSCRIBED`
+and `PORT_UNSUBSCRIBED` are not MIDI payload and must be rejected before
+`snd_midi_event_decode()`.
+
+Remaining extraction targets from the legacy daemon implementation:
 
 ```text
 mb-config
 mb-bluez
 mb-gatt
-mb-alsa
 mb-ble-midi
 ```
 
@@ -361,6 +365,8 @@ Core session/runtime model:
 ```text
 src/mb-session.h
 src/mb-session.c
+src/mb-alsa.h
+src/mb-alsa.c
 src/mb-buffer.h
 src/mb-buffer.c
 src/mb-runtime.h
@@ -394,6 +400,7 @@ Tests:
 
 ```text
 tests/test-mb-session.c
+tests/test-mb-alsa.c
 tests/test-mb-buffer.c
 tests/test-mb-frame-model.c
 tests/test-mb-slice-ring.c
@@ -424,6 +431,7 @@ duplicate address reuses/reindexes the same session
 error path for missing MIDI characteristic
 session removal and index cleanup
 invalid transition handling
+ALSA MIDI payload versus control event classification
 ```
 
 Run:
