@@ -43,6 +43,7 @@ The first validated target is the Roland GO:KEYS family.
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
+%{_userunitdir}/midi-ble-rtd.service
 
 %changelog
 * Wed Jun 24 2026 Moacyr Prado <mwprado@gmail.com> - 0.4.0-1
