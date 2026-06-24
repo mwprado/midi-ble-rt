@@ -29,11 +29,8 @@ target_link_libraries(midi-ble-rt-core PUBLIC ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rt-core PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
 add_executable(midi-ble-rtd
-    src/midi-ble-rtd.c
-)
-
-add_executable(midi-ble-rtd-duplex
-    src/midi-ble-rtd-duplex.c
+    src/mb-daemon.c
+    src/mb-orchestrator.c
 )
 
 add_executable(midi-ble-rtctl
@@ -43,10 +40,6 @@ add_executable(midi-ble-rtctl
 target_include_directories(midi-ble-rtd PRIVATE ${DEPS_INCLUDE_DIRS})
 target_link_libraries(midi-ble-rtd PRIVATE midi-ble-rt-core ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rtd PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
-
-target_include_directories(midi-ble-rtd-duplex PRIVATE ${DEPS_INCLUDE_DIRS})
-target_link_libraries(midi-ble-rtd-duplex PRIVATE midi-ble-rt-core ${DEPS_LIBRARIES})
-target_compile_options(midi-ble-rtd-duplex PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
 target_include_directories(midi-ble-rtctl PRIVATE ${DEPS_INCLUDE_DIRS})
 target_link_libraries(midi-ble-rtctl PRIVATE ${DEPS_LIBRARIES})
@@ -96,5 +89,5 @@ if(BUILD_TESTING)
     add_test(NAME mb-duplex-runtime COMMAND test-mb-duplex-runtime)
 endif()
 
-install(TARGETS midi-ble-rtd midi-ble-rtd-duplex midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.ini.example")
