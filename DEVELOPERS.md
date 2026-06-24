@@ -387,15 +387,6 @@ Control plane:
 src/midi-ble-rtctl.c
 ```
 
-Obsolete validation wrapper:
-
-```text
-src/midi-ble-rtd-duplex.c
-```
-
-`midi-ble-rtd-duplex.c` may remain in the tree temporarily, but it is no longer
-the installed daemon model and should not be the target for new functionality.
-
 Tests:
 
 ```text
