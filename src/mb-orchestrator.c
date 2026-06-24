@@ -14,6 +14,7 @@
 #undef main
 
 #include "mb-alsa.h"
+#include "mb-config.h"
 #include "mb-duplex-runtime.h"
 
 typedef struct {
@@ -27,6 +28,10 @@ typedef struct {
 
 static uint64_t orchestrator_now_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ULL;
+}
+
+static bool orchestrator_load_config(Config *cfg, const char *path) {
+    return mb_config_load((MbConfig *)cfg, path);
 }
 
 static void orchestrator_rx_consume(MbRuntimeFlow *flow,
@@ -231,7 +236,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     g_mutex_init(&orc.alsa_lock);
     g_mutex_init(&orc.gatt_write_lock);
 
-    if (!load_config(&app->cfg, config_path)) {
+    if (!orchestrator_load_config(&app->cfg, config_path)) {
         orchestrator_cleanup(&orc);
         return 1;
     }
