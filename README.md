@@ -17,21 +17,37 @@ consume the ALSA MIDI ports exported by this daemon.
 The first validated target is the Roland GO:KEYS family.
 
 For developer architecture notes, state diagrams, multi-keyboard identity rules
-and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md).
+and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md).  For the daemon layer
+split, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Architecture overview
 
+External data path:
+
 ```text
-BLE-MIDI device <-> BlueZ/GATT <-> midi-ble-rt <-> ALSA Sequencer <-> PipeWire/apps
+BLE-MIDI device <-> BlueZ/GATT <-> midi-ble-rtd <-> ALSA Sequencer <-> PipeWire/apps
 ```
 
 ```mermaid
 flowchart LR
     K[BLE-MIDI keyboard] <--> B[BlueZ / GATT]
-    B <--> D[midi-ble-rt]
+    B <--> D[midi-ble-rtd]
     D <--> A[ALSA Sequencer]
     A <--> P[PipeWire / WirePlumber / aseqdump / aplaymidi / DAW]
 ```
+
+Internal daemon structure:
+
+```text
+midi-ble-rtd
+  -> mb-daemon
+      -> mb-orchestrator
+          -> core modules / session model / runtime queues
+```
+
+There is one public daemon binary: `midi-ble-rtd`.  The previous
+`midi-ble-rtd-duplex` validation path has been absorbed into the daemon's
+internal orchestrator layer and is no longer a separate installed daemon target.
 
 The primary exported interface is ALSA Sequencer. PipeWire, JACK bridges, DAWs
 and standard MIDI tools may consume or display those ALSA MIDI ports, but they
@@ -47,16 +63,17 @@ Roland GO:KEYS MIDI
 -> service 03b80e5a-ede8-4b33-a751-6ce34ec4c700
 -> characteristic 00006bf3-0000-1000-8000-00805f9b34fb
 -> StartNotify
--> midi-ble-rtd
+-> midi-ble-rtd orchestrator
 -> ALSA Sequencer
 -> aseqdump / DAW / PipeWire environment
 ```
 
-Initial transmit path:
+Validated transmit path:
 
 ```text
 aplaymidi / DAW / ALSA Sequencer client
--> midi-ble-rtd duplex ALSA port
+-> midi-ble-rtd orchestrated ALSA port
+-> runtime TX queue
 -> BLE-MIDI packet encoder
 -> GATT WriteValue
 -> Roland GO:KEYS
@@ -68,6 +85,9 @@ Observed ALSA events:
 Note on   ch 0, note 96, velocity 26
 Note off  ch 0, note 96, velocity 64
 ```
+
+ALSA Sequencer control events such as `PORT_SUBSCRIBED` and
+`PORT_UNSUBSCRIBED` are ignored before MIDI decode. They are not MIDI payload.
 
 ## BLE-MIDI UUIDs
 
@@ -98,6 +118,13 @@ BLE-MIDI service.
 sudo dnf install gcc cmake glib2-devel alsa-lib-devel bluez bluez-tools alsa-utils
 cmake -S . -B build
 cmake --build build
+```
+
+The public build targets are:
+
+```text
+midi-ble-rtd
+midi-ble-rtctl
 ```
 
 ## Control CLI
@@ -193,6 +220,13 @@ Default GO:KEYS config path:
 midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
 ```
 
+Expected startup marker:
+
+```text
+midi-ble-rtd
+Runtime: orchestrator
+```
+
 Check the ALSA port:
 
 ```bash
@@ -216,8 +250,8 @@ arecordmidi -p 128:0 gokeys-input.mid
 
 ## Send MIDI
 
-The daemon creates a duplex ALSA Sequencer port. After the daemon is running,
-send a MIDI file into the same `CLIENT:PORT`:
+The daemon creates an orchestrated duplex ALSA Sequencer port. After the daemon
+is running, send a MIDI file into the same `CLIENT:PORT`:
 
 ```bash
 aplaymidi -p 128:0 test.mid
