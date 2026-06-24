@@ -79,6 +79,9 @@ The core modules define domain objects and primitive operations:
 
 ```text
 mb-session          session state and invariants
+mb-alsa             ALSA Sequencer event classification
+mb-config           runtime config parsing and defaults
+mb-ble-midi         BLE-MIDI UUIDs and short packet helpers
 mb-buffer           adaptive session buffers
 mb-runtime          runtime flow primitives
 mb-duplex-runtime   threaded RX/TX runtime
@@ -88,16 +91,18 @@ mb-log              structured logging
 ```
 
 The current transition still reuses some legacy static helpers from the original
-daemon implementation.  The intended direction is to extract them into explicit
-core modules:
+daemon implementation.  The remaining extraction targets are:
 
 ```text
-mb-config           config parsing
 mb-bluez            Device1 discovery, pair/trust/connect
 mb-gatt             BLE-MIDI service/characteristic, StartNotify, WriteValue
-mb-alsa             ALSA Sequencer client/ports, encode/decode, control events
-mb-ble-midi         BLE-MIDI packet encode/decode
+mb-ble-midi RX      BLE-MIDI notification parser with callback-based MIDI output
+mb-alsa I/O         ALSA Sequencer client/ports and encode/decode ownership
 ```
+
+New functionality should be added to `mb-orchestrator` or an explicit core
+module.  Avoid adding new behavior to `src/midi-ble-rtd.c`; it is legacy core
+that is still included by the orchestrator during extraction.
 
 ## Session ownership rule
 
@@ -117,7 +122,7 @@ orchestrator:
 This separation makes debugging direct:
 
 ```text
-argument/config failure          -> mb-daemon
+argument/config failure          -> mb-daemon / mb-config
 state transition/reconnect issue -> mb-orchestrator / mb-session
 ALSA event/decode issue          -> mb-alsa
 BlueZ/GATT issue                 -> mb-bluez / mb-gatt
@@ -172,7 +177,7 @@ ALSA Sequencer input
   -> ALSA event filter
   -> MIDI bytes
   -> mb-duplex-runtime TX queue
-  -> BLE-MIDI packet encode
+  -> mb-ble-midi packet encode
   -> GATT WriteValue
 ```
 
