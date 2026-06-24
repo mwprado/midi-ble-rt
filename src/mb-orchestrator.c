@@ -14,6 +14,7 @@
 #undef main
 
 #include "mb-alsa.h"
+#include "mb-ble-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
 
@@ -30,8 +31,67 @@ static uint64_t orchestrator_now_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ULL;
 }
 
+static uint16_t orchestrator_ble_midi_timestamp_13bit(void) {
+    gint64 ms = g_get_monotonic_time() / 1000;
+    return (uint16_t)(ms & 0x1fff);
+}
+
 static bool orchestrator_load_config(Config *cfg, const char *path) {
     return mb_config_load((MbConfig *)cfg, path);
+}
+
+static bool orchestrator_ble_midi_write_packet(App *app, const uint8_t *midi, size_t len) {
+    if (!midi || len == 0)
+        return true;
+
+    const size_t max_midi_per_packet = 18;
+    size_t off = 0;
+
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > max_midi_per_packet)
+            chunk = max_midi_per_packet;
+
+        uint8_t packet[20];
+        size_t packet_len = 0;
+        if (!mb_ble_midi_make_packet(orchestrator_ble_midi_timestamp_13bit(),
+                                     &midi[off], chunk,
+                                     packet, sizeof(packet), &packet_len)) {
+            g_printerr("BLE-MIDI packet construction failed.\n");
+            return false;
+        }
+
+        if (app->cfg.print_ble_packets) {
+            g_print("BLE write:");
+            for (size_t i = 0; i < packet_len; i++)
+                g_print(" %02x", packet[i]);
+            g_print("\n");
+        }
+
+        GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
+                                                    packet, packet_len,
+                                                    sizeof(guint8));
+        GVariantBuilder options;
+        g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
+
+        GError *error = NULL;
+        GVariant *ret = g_dbus_connection_call_sync(
+            app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "WriteValue",
+            g_variant_new("(@aya{sv})", value, &options),
+            NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+
+        if (!ret) {
+            g_printerr("WriteValue failed: %s\n", error->message);
+            g_clear_error(&error);
+            return false;
+        }
+
+        g_variant_unref(ret);
+        off += chunk;
+    }
+
+    return true;
 }
 
 static void orchestrator_rx_consume(MbRuntimeFlow *flow,
@@ -58,7 +118,7 @@ static void orchestrator_tx_consume(MbRuntimeFlow *flow,
     MbOrchestrator *orc = user_data;
 
     g_mutex_lock(&orc->gatt_write_lock);
-    ble_midi_write_packet(&orc->app, data, len);
+    orchestrator_ble_midi_write_packet(&orc->app, data, len);
     g_mutex_unlock(&orc->gatt_write_lock);
 }
 
