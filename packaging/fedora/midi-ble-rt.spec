@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.2.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -37,35 +37,20 @@ The first validated target is the Roland GO:KEYS family.
 %install
 %cmake_install
 
-install -D -m 0644 packaging/fedora/midi-ble-rtd.service \
-    %{buildroot}%{_userunitdir}/midi-ble-rtd.service
-
-install -D -m 0644 examples/midi/test-note.mid \
-    %{buildroot}%{_datadir}/%{name}/examples/midi/test-note.mid
-
-install -D -m 0755 scripts/test-alsa-loopback.sh \
-    %{buildroot}%{_datadir}/%{name}/scripts/test-alsa-loopback.sh
-install -D -m 0755 scripts/test-fluidsynth-smoke.sh \
-    %{buildroot}%{_datadir}/%{name}/scripts/test-fluidsynth-smoke.sh
-
-%post
-%systemd_user_post midi-ble-rtd.service
-
-%preun
-%systemd_user_preun midi-ble-rtd.service
-
-%postun
-%systemd_user_postun_with_restart midi-ble-rtd.service
-
 %files
 %license LICENSE
-%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.2.0.md docs/*.md
+%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.4.0.md docs/*.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
-%{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Wed Jun 24 2026 Moacyr Prado <mwprado@gmail.com> - 0.4.0-1
+- Use single public midi-ble-rtd daemon with internal orchestrator runtime.
+- Stop building the experimental midi-ble-rtd-duplex target.
+- Add mb-alsa core helpers and tests for ALSA event classification.
+- Update architecture documentation for daemon, orchestrator and core split.
+
 * Tue Jun 23 2026 Moacyr Prado <mwprado@gmail.com> - 0.2.0-1
 - Add MIDI session state core and daemon session registry.
 - Add unit tests for state transitions, multi-session isolation and address identity.
