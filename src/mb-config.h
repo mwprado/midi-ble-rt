@@ -19,6 +19,8 @@ typedef struct MbConfig {
     bool print_ble_packets;
     bool print_midi_events;
     bool enable_tx;
+    bool stats_enabled;
+    unsigned stats_interval_ms;
 } MbConfig;
 
 bool mb_config_load(MbConfig *cfg, const char *path);
