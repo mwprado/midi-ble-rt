@@ -1,5 +1,7 @@
 #include "mb-config.h"
 
+#include "mb-ble-midi.h"
+
 #include <glib.h>
 #include <string.h>
 
@@ -31,11 +33,11 @@ static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->auto_reconnect = keyfile_get_bool_default(kf, "device", "auto_reconnect", true);
 
     cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
-        "03b80e5a-ede8-4b33-a751-6ce34ec4c700");
+        MB_BLE_MIDI_SERVICE_UUID);
     cfg->io_uuid = keyfile_get_string_default(kf, "gatt", "io_uuid",
-        "7772e5db-3868-4112-a1a9-f2669d106bf3");
+        MB_BLE_MIDI_IO_UUID);
     cfg->io_uuid_alias = keyfile_get_string_default(kf, "gatt", "io_uuid_alias",
-        "00006bf3-0000-1000-8000-00805f9b34fb");
+        MB_BLE_MIDI_ROLAND_IO_UUID_ALIAS);
     cfg->require_notify = keyfile_get_bool_default(kf, "gatt", "require_notify", true);
     cfg->require_write_without_response = keyfile_get_bool_default(kf, "gatt", "require_write_without_response", true);
 
