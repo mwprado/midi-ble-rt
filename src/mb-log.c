@@ -43,6 +43,7 @@ static void mb_log_emit(GLogLevelFlags level,
 
     add_field(fields, &n_fields, "MESSAGE", message ? message : "");
     add_field(fields, &n_fields, "PRIORITY", priority_for_level(level));
+    add_field(fields, &n_fields, "GLIB_DOMAIN", G_LOG_DOMAIN);
     add_field(fields, &n_fields, "SYSLOG_IDENTIFIER", MB_LOG_IDENTIFIER);
 
     if (ctx) {
@@ -54,7 +55,7 @@ static void mb_log_emit(GLogLevelFlags level,
         add_field(fields, &n_fields, "MIDI_BLE_RT_ERROR", ctx->error_name);
     }
 
-    g_log_structured_array(G_LOG_DOMAIN, level, fields, n_fields);
+    g_log_structured_array(level, fields, n_fields);
 }
 
 void mb_log_event(GLogLevelFlags level,
