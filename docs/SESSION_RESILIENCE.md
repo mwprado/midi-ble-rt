@@ -118,6 +118,30 @@ STREAMING
 ERROR
 ```
 
+The stats file uses format `v2`. Packet, byte and drop counters in the TSV are
+**window counters**, not lifetime totals. They represent traffic since the
+previous stats export. After each export attempt, the window counters are reset.
+
+This avoids unbounded lifetime counters in the exported telemetry and makes the
+file represent the current flow instead of the daemon's full history.
+
+Important exported flow fields:
+
+| Field | Meaning |
+| --- | --- |
+| `window_ms` | Duration of the current measurement window. |
+| `rx_packets` / `tx_packets` | Packets observed in the current window. |
+| `rx_bytes` / `tx_bytes` | Bytes observed in the current window. |
+| `rx_drops` / `tx_drops` | Drops observed in the current window. |
+| `rx_packets_per_sec` / `tx_packets_per_sec` | Packet rate over the current window. |
+| `rx_bytes_per_sec` / `tx_bytes_per_sec` | Byte rate over the current window. |
+| `rx_drops_per_sec` / `tx_drops_per_sec` | Drop rate over the current window. |
+| `rx_queue_depth` / `tx_queue_depth` | Current runtime queue depth. |
+
+Rates are calculated from the current export window. Very short windows under
+100 ms report `0.0` rates to avoid misleading spikes caused by immediate session
+transition exports.
+
 The daemon exports a stats snapshot:
 
 - when stats are initialized;
