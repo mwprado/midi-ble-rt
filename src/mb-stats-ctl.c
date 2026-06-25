@@ -119,6 +119,11 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
     g_print("Session:    %s\n", stats_get(t, "label"));
     g_print("Address:    %s\n", stats_get(t, "address"));
     g_print("State:      %s\n", stats_get(t, "state"));
+    if (stats_is_v2(t)) {
+        g_print("ALSA:       %s:%s\n",
+                stats_get(t, "alsa_client_id"),
+                stats_get(t, "alsa_port_id"));
+    }
     g_print("Uptime:     %s ms\n", stats_get(t, "uptime_ms"));
     if (stats_is_v2(t))
         g_print("Window:     %s ms\n", stats_get(t, "window_ms"));
