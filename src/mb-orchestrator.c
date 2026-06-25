@@ -17,18 +17,22 @@
 #include "mb-ble-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
+#include "mb-session.h"
 #include "mb-stats.h"
 
 typedef struct {
     App app;
+    MbSession session;
     MbDuplexRuntime runtime;
     MbStats stats;
     GMutex alsa_lock;
     GMutex gatt_write_lock;
+    GMutex session_lock;
     GMutex stats_lock;
     guint notify_sub_id;
     guint stats_source_id;
     bool runtime_started;
+    bool session_initialized;
 } MbOrchestrator;
 
 static uint64_t orchestrator_now_ns(void) {
@@ -42,6 +46,37 @@ static uint16_t orchestrator_ble_midi_timestamp_13bit(void) {
 
 static bool orchestrator_load_config(Config *cfg, const char *path) {
     return mb_config_load((MbConfig *)cfg, path);
+}
+
+static bool orchestrator_session_event(MbOrchestrator *orc, MbEventType event) {
+    g_mutex_lock(&orc->session_lock);
+    MbSessionState before = orc->session.state;
+    MbErrorCode before_error = orc->session.error;
+    bool ok = mb_session_handle_event(&orc->session, event);
+    MbSessionState after = orc->session.state;
+    MbErrorCode after_error = orc->session.error;
+    g_mutex_unlock(&orc->session_lock);
+
+    if (!ok || before != after || before_error != after_error) {
+        g_print("Session: %s --%s--> %s",
+                mb_session_state_name(before),
+                mb_event_name(event),
+                mb_session_state_name(after));
+        if (after_error != MB_ERR_NONE)
+            g_print(" error=%s", mb_error_name(after_error));
+        if (!ok)
+            g_print(" rejected");
+        g_print("\n");
+    }
+
+    return ok;
+}
+
+static const char *orchestrator_session_state_name(MbOrchestrator *orc) {
+    g_mutex_lock(&orc->session_lock);
+    MbSessionState state = orc->session.state;
+    g_mutex_unlock(&orc->session_lock);
+    return mb_session_state_name(state);
 }
 
 static void orchestrator_stats_rx_packet(MbOrchestrator *orc, size_t bytes, uint64_t now_ns) {
@@ -116,6 +151,7 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
             g_printerr("WriteValue failed: %s\n", error->message);
             g_clear_error(&error);
             orchestrator_stats_tx_drop(orc);
+            orchestrator_session_event(orc, MB_EV_GATT_WRITE_FAILED);
             return false;
         }
 
@@ -173,8 +209,10 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
         snd_seq_event_t *ev = NULL;
         int r = snd_seq_event_input(app->seq, &ev);
         if (r < 0) {
-            if (r != -EAGAIN)
+            if (r != -EAGAIN) {
                 g_printerr("snd_seq_event_input failed: %s\n", snd_strerror(r));
+                orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
+            }
             g_mutex_unlock(&orc->alsa_lock);
             break;
         }
@@ -197,6 +235,8 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
             g_printerr("ALSA MIDI decode failed for event type %d: %s\n", ev->type, snd_strerror((int)n));
             snd_midi_event_reset_decode(app->alsa_midi_decoder);
             g_mutex_unlock(&orc->alsa_lock);
+            orchestrator_stats_tx_drop(orc);
+            orchestrator_session_event(orc, MB_EV_ALSA_DECODE_FAILED);
             continue;
         }
         g_mutex_unlock(&orc->alsa_lock);
@@ -210,6 +250,7 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
         if (!mb_duplex_runtime_push_tx(&orc->runtime, midi, (size_t)n, orchestrator_now_ns())) {
             g_printerr("TX runtime queue push failed; ALSA event dropped.\n");
             orchestrator_stats_tx_drop(orc);
+            orchestrator_session_event(orc, MB_EV_RUNTIME_FAILED);
         }
     }
 
@@ -245,6 +286,7 @@ static void orchestrator_on_properties_changed(GDBusConnection *connection,
             if (!mb_duplex_runtime_push_rx(&orc->runtime, bytes, len, now_ns)) {
                 g_printerr("RX runtime queue push failed; BLE notification dropped.\n");
                 orchestrator_stats_rx_drop(orc);
+                orchestrator_session_event(orc, MB_EV_RUNTIME_FAILED);
             } else {
                 orchestrator_stats_rx_packet(orc, len, now_ns);
             }
@@ -293,12 +335,13 @@ static gboolean orchestrator_stats_export_cb(gpointer user_data) {
     uint64_t now_ns = orchestrator_now_ns();
     const char *label = app->cfg.name && *app->cfg.name ? app->cfg.name : "BLE-MIDI";
     const char *address = app->cfg.address && *app->cfg.address ? app->cfg.address : "-";
+    const char *state = orchestrator_session_state_name(orc);
 
     g_mutex_lock(&orc->stats_lock);
     bool ok = mb_stats_export_tsv(&orc->stats,
                                   label,
                                   address,
-                                  "STREAMING",
+                                  state,
                                   mb_duplex_runtime_rx_depth(&orc->runtime),
                                   mb_duplex_runtime_tx_depth(&orc->runtime),
                                   now_ns,
@@ -340,9 +383,16 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
     g_mutex_lock(&orc->stats_lock);
     mb_stats_clear(&orc->stats);
     g_mutex_unlock(&orc->stats_lock);
+    if (orc->session_initialized) {
+        g_mutex_lock(&orc->session_lock);
+        mb_session_clear(&orc->session);
+        g_mutex_unlock(&orc->session_lock);
+        orc->session_initialized = false;
+    }
     app_cleanup(app);
     g_mutex_clear(&orc->alsa_lock);
     g_mutex_clear(&orc->gatt_write_lock);
+    g_mutex_clear(&orc->session_lock);
     g_mutex_clear(&orc->stats_lock);
 }
 
@@ -371,12 +421,17 @@ int mb_orchestrator_main(int argc, char **argv) {
     App *app = &orc.app;
     g_mutex_init(&orc.alsa_lock);
     g_mutex_init(&orc.gatt_write_lock);
+    g_mutex_init(&orc.session_lock);
     g_mutex_init(&orc.stats_lock);
 
     if (!orchestrator_load_config(&app->cfg, config_path)) {
         orchestrator_cleanup(&orc);
         return 1;
     }
+
+    mb_session_init(&orc.session, NULL, app->cfg.address, app->cfg.name);
+    orc.session.auto_reconnect = app->cfg.auto_reconnect;
+    orc.session_initialized = true;
 
     mb_stats_init(&orc.stats, app->cfg.stats_enabled, app->cfg.stats_interval_ms);
 
@@ -398,6 +453,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     if (!app->bus) {
         g_printerr("Could not connect to system bus: %s\n", error->message);
         g_clear_error(&error);
+        orchestrator_session_event(&orc, MB_EV_FATAL);
         orchestrator_cleanup(&orc);
         return 1;
     }
@@ -405,11 +461,17 @@ int mb_orchestrator_main(int argc, char **argv) {
     app->device_path = find_device(app);
     if (!app->device_path) {
         g_printerr("No matching BlueZ Device1 found. Scan/connect once or check the address.\n");
+        orchestrator_session_event(&orc, MB_EV_TIMEOUT);
         orchestrator_cleanup(&orc);
         return 1;
     }
 
+    g_mutex_lock(&orc.session_lock);
+    mb_session_set_identity(&orc.session, app->device_path, app->cfg.address, app->cfg.name);
+    g_mutex_unlock(&orc.session_lock);
+
     if (app->cfg.pair && !pair_device(app)) {
+        orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
         orchestrator_cleanup(&orc);
         return 1;
     }
@@ -417,19 +479,25 @@ int mb_orchestrator_main(int argc, char **argv) {
     if (app->cfg.trust)
         set_device_trusted(app);
 
+    orchestrator_session_event(&orc, MB_EV_CMD_CONNECT);
     if (!connect_device(app)) {
+        orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
         orchestrator_cleanup(&orc);
         return 1;
     }
+    orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECTED);
 
     if (!wait_services_resolved(app, 15000)) {
+        orchestrator_session_event(&orc, MB_EV_TIMEOUT);
         orchestrator_cleanup(&orc);
         return 1;
     }
+    orchestrator_session_event(&orc, MB_EV_BLUEZ_SERVICES_RESOLVED);
 
     app->service_path = find_ble_midi_service(app);
     if (!app->service_path) {
         g_printerr("BLE-MIDI service not found. Connect MIDI before Audio on Roland GO:KEYS.\n");
+        orchestrator_session_event(&orc, MB_EV_MIDI_SERVICE_NOT_FOUND);
         orchestrator_cleanup(&orc);
         return 1;
     }
@@ -437,29 +505,47 @@ int mb_orchestrator_main(int argc, char **argv) {
     app->char_path = find_ble_midi_characteristic(app);
     if (!app->char_path) {
         g_printerr("BLE-MIDI I/O characteristic not found.\n");
+        orchestrator_session_event(&orc, MB_EV_MIDI_CHAR_NOT_FOUND);
         orchestrator_cleanup(&orc);
         return 1;
     }
 
+    g_mutex_lock(&orc.session_lock);
+    mb_session_set_midi_binding(&orc.session,
+                                app->service_path,
+                                app->char_path,
+                                app->cfg.io_uuid);
+    g_mutex_unlock(&orc.session_lock);
+    orchestrator_session_event(&orc, MB_EV_MIDI_CHAR_FOUND);
+
     if (!alsa_init(app)) {
+        orchestrator_session_event(&orc, MB_EV_ALSA_FAILED);
         orchestrator_cleanup(&orc);
         return 1;
     }
+
+    g_mutex_lock(&orc.session_lock);
+    mb_session_set_alsa_port(&orc.session, app->alsa_port);
+    g_mutex_unlock(&orc.session_lock);
+    orchestrator_session_event(&orc, MB_EV_ALSA_READY);
 
     mb_duplex_runtime_init(&orc.runtime,
                            orchestrator_rx_consume, &orc,
                            orchestrator_tx_consume, &orc);
     if (!mb_duplex_runtime_start(&orc.runtime)) {
         g_printerr("Could not start duplex runtime workers.\n");
+        orchestrator_session_event(&orc, MB_EV_RUNTIME_FAILED);
         orchestrator_cleanup(&orc);
         return 1;
     }
     orc.runtime_started = true;
 
     if (!orchestrator_start_notify(&orc)) {
+        orchestrator_session_event(&orc, MB_EV_NOTIFY_FAILED);
         orchestrator_cleanup(&orc);
         return 1;
     }
+    orchestrator_session_event(&orc, MB_EV_NOTIFY_OK);
 
     if (app->cfg.enable_tx)
         app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, &orc);
