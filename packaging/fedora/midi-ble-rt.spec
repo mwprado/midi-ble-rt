@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -39,13 +39,19 @@ The first validated target is the Roland GO:KEYS family.
 
 %files
 %license LICENSE
-%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.4.0.md docs/*.md
+%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.5.0.md docs/*.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.0-1
+- Add session statistics monitoring.
+- Export runtime statistics to stats.tsv under the user runtime directory.
+- Add midi-ble-rtctl stats and midi-ble-rtctl top.
+- Document the statistics format and operational semantics.
+
 * Wed Jun 24 2026 Moacyr Prado <mwprado@gmail.com> - 0.4.0-1
 - Use single public midi-ble-rtd daemon with internal orchestrator runtime.
 - Stop building the experimental midi-ble-rtd-duplex target.
