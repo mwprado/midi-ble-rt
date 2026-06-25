@@ -30,7 +30,9 @@ typedef struct {
     GMutex session_lock;
     GMutex stats_lock;
     guint notify_sub_id;
+    guint device_sub_id;
     guint stats_source_id;
+    guint health_source_id;
     bool runtime_started;
     bool session_initialized;
 } MbOrchestrator;
@@ -72,11 +74,32 @@ static bool orchestrator_session_event(MbOrchestrator *orc, MbEventType event) {
     return ok;
 }
 
-static const char *orchestrator_session_state_name(MbOrchestrator *orc) {
+static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
     g_mutex_lock(&orc->session_lock);
     MbSessionState state = orc->session.state;
     g_mutex_unlock(&orc->session_lock);
-    return mb_session_state_name(state);
+    return state;
+}
+
+static const char *orchestrator_session_state_name(MbOrchestrator *orc) {
+    return mb_session_state_name(orchestrator_session_state(orc));
+}
+
+static bool orchestrator_session_can_mark_disconnected(MbOrchestrator *orc) {
+    MbSessionState state = orchestrator_session_state(orc);
+    return state != MB_SESSION_IDLE &&
+           state != MB_SESSION_RECONNECTING &&
+           state != MB_SESSION_ERROR;
+}
+
+static void orchestrator_mark_device_disconnected(MbOrchestrator *orc, const char *reason) {
+    if (!orchestrator_session_can_mark_disconnected(orc))
+        return;
+
+    g_print("BlueZ device disconnected%s%s.\n",
+            reason && *reason ? ": " : "",
+            reason && *reason ? reason : "");
+    orchestrator_session_event(orc, MB_EV_BLUEZ_DISCONNECTED);
 }
 
 static void orchestrator_stats_rx_packet(MbOrchestrator *orc, size_t bytes, uint64_t now_ns) {
@@ -257,6 +280,20 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean orchestrator_device_health_cb(gpointer user_data) {
+    MbOrchestrator *orc = user_data;
+    App *app = &orc->app;
+
+    if (!app->device_path || !orchestrator_session_can_mark_disconnected(orc))
+        return G_SOURCE_CONTINUE;
+
+    bool connected = false;
+    if (!get_device_bool_property(app, "Connected", &connected) || !connected)
+        orchestrator_mark_device_disconnected(orc, "health check");
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void orchestrator_on_properties_changed(GDBusConnection *connection,
                                                const gchar *sender_name,
                                                const gchar *object_path,
@@ -271,13 +308,26 @@ static void orchestrator_on_properties_changed(GDBusConnection *connection,
     (void)signal_name;
 
     MbOrchestrator *orc = user_data;
+    App *app = &orc->app;
     const char *iface = NULL;
     GVariant *changed = NULL;
     GVariant *invalidated = NULL;
 
     g_variant_get(parameters, "(&s@a{sv}@as)", &iface, &changed, &invalidated);
 
-    if (g_strcmp0(iface, GATT_CHRC_IFACE) == 0) {
+    if (g_strcmp0(iface, DEVICE_IFACE) == 0 &&
+        app->device_path && g_strcmp0(object_path, app->device_path) == 0) {
+        GVariant *v_connected = g_variant_lookup_value(changed, "Connected", G_VARIANT_TYPE_BOOLEAN);
+        if (v_connected) {
+            gboolean connected = g_variant_get_boolean(v_connected);
+            if (!connected)
+                orchestrator_mark_device_disconnected(orc, "Device1.Connected=false");
+            g_variant_unref(v_connected);
+        }
+    }
+
+    if (g_strcmp0(iface, GATT_CHRC_IFACE) == 0 &&
+        app->char_path && g_strcmp0(object_path, app->char_path) == 0) {
         GVariant *value = g_variant_lookup_value(changed, "Value", G_VARIANT_TYPE("ay"));
         if (value) {
             gsize len = 0;
@@ -298,6 +348,25 @@ static void orchestrator_on_properties_changed(GDBusConnection *connection,
     if (invalidated) g_variant_unref(invalidated);
 }
 
+static bool orchestrator_start_device_watch(MbOrchestrator *orc) {
+    App *app = &orc->app;
+
+    if (!app->device_path)
+        return false;
+
+    orc->device_sub_id = g_dbus_connection_signal_subscribe(
+        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
+        app->device_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+        orchestrator_on_properties_changed, orc, NULL);
+
+    if (orc->device_sub_id == 0) {
+        g_printerr("Failed to subscribe to Device1 PropertiesChanged.\n");
+        return false;
+    }
+
+    return true;
+}
+
 static bool orchestrator_start_notify(MbOrchestrator *orc) {
     App *app = &orc->app;
     GError *error = NULL;
@@ -308,7 +377,7 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
         orchestrator_on_properties_changed, orc, NULL);
 
     if (orc->notify_sub_id == 0) {
-        g_printerr("Failed to subscribe to PropertiesChanged.\n");
+        g_printerr("Failed to subscribe to GattCharacteristic1 PropertiesChanged.\n");
         return false;
     }
 
@@ -364,6 +433,11 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
         orc->stats_source_id = 0;
     }
 
+    if (orc->health_source_id) {
+        g_source_remove(orc->health_source_id);
+        orc->health_source_id = 0;
+    }
+
     if (app->alsa_rx_source_id) {
         g_source_remove(app->alsa_rx_source_id);
         app->alsa_rx_source_id = 0;
@@ -372,6 +446,11 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
     if (orc->notify_sub_id && app->bus) {
         g_dbus_connection_signal_unsubscribe(app->bus, orc->notify_sub_id);
         orc->notify_sub_id = 0;
+    }
+
+    if (orc->device_sub_id && app->bus) {
+        g_dbus_connection_signal_unsubscribe(app->bus, orc->device_sub_id);
+        orc->device_sub_id = 0;
     }
 
     if (orc->runtime_started) {
@@ -470,6 +549,12 @@ int mb_orchestrator_main(int argc, char **argv) {
     mb_session_set_identity(&orc.session, app->device_path, app->cfg.address, app->cfg.name);
     g_mutex_unlock(&orc.session_lock);
 
+    if (!orchestrator_start_device_watch(&orc)) {
+        orchestrator_session_event(&orc, MB_EV_FATAL);
+        orchestrator_cleanup(&orc);
+        return 1;
+    }
+
     if (app->cfg.pair && !pair_device(app)) {
         orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
         orchestrator_cleanup(&orc);
@@ -549,6 +634,8 @@ int mb_orchestrator_main(int argc, char **argv) {
 
     if (app->cfg.enable_tx)
         app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, &orc);
+
+    orc.health_source_id = g_timeout_add(1000, orchestrator_device_health_cb, &orc);
 
     if (app->cfg.stats_enabled)
         orc.stats_source_id = g_timeout_add(app->cfg.stats_interval_ms,
