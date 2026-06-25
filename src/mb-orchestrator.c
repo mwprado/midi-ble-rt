@@ -33,6 +33,7 @@ typedef struct {
     guint device_sub_id;
     guint stats_source_id;
     guint health_source_id;
+    guint reconnect_source_id;
     bool runtime_started;
     bool session_initialized;
 } MbOrchestrator;
@@ -59,6 +60,10 @@ static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
 
 static const char *orchestrator_session_state_name(MbOrchestrator *orc) {
     return mb_session_state_name(orchestrator_session_state(orc));
+}
+
+static bool orchestrator_session_is(MbOrchestrator *orc, MbSessionState expected) {
+    return orchestrator_session_state(orc) == expected;
 }
 
 static void orchestrator_stats_export_snapshot(MbOrchestrator *orc) {
@@ -122,6 +127,15 @@ static bool orchestrator_session_can_mark_disconnected(MbOrchestrator *orc) {
            state != MB_SESSION_ERROR;
 }
 
+static void orchestrator_stop_notify(MbOrchestrator *orc) {
+    App *app = &orc->app;
+
+    if (orc->notify_sub_id && app->bus) {
+        g_dbus_connection_signal_unsubscribe(app->bus, orc->notify_sub_id);
+        orc->notify_sub_id = 0;
+    }
+}
+
 static void orchestrator_mark_device_disconnected(MbOrchestrator *orc, const char *reason) {
     if (!orchestrator_session_can_mark_disconnected(orc))
         return;
@@ -129,6 +143,7 @@ static void orchestrator_mark_device_disconnected(MbOrchestrator *orc, const cha
     g_print("BlueZ device disconnected%s%s.\n",
             reason && *reason ? ": " : "",
             reason && *reason ? reason : "");
+    orchestrator_stop_notify(orc);
     orchestrator_session_event(orc, MB_EV_BLUEZ_DISCONNECTED);
 }
 
@@ -401,6 +416,8 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
     App *app = &orc->app;
     GError *error = NULL;
 
+    orchestrator_stop_notify(orc);
+
     orc->notify_sub_id = g_dbus_connection_signal_subscribe(
         app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
         app->char_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -433,6 +450,116 @@ static gboolean orchestrator_stats_export_cb(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
+static void orchestrator_ensure_periodic_sources(MbOrchestrator *orc) {
+    App *app = &orc->app;
+
+    if (app->cfg.enable_tx && app->alsa_rx_source_id == 0)
+        app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, orc);
+
+    if (orc->health_source_id == 0)
+        orc->health_source_id = g_timeout_add(1000, orchestrator_device_health_cb, orc);
+
+    if (app->cfg.stats_enabled && orc->stats_source_id == 0)
+        orc->stats_source_id = g_timeout_add(app->cfg.stats_interval_ms,
+                                             orchestrator_stats_export_cb,
+                                             orc);
+}
+
+static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
+    App *app = &orc->app;
+    MbSessionState state = orchestrator_session_state(orc);
+
+    if (state == MB_SESSION_STREAMING)
+        return true;
+
+    if (state == MB_SESSION_RECONNECTING) {
+        orchestrator_session_event(orc, MB_EV_RECONNECT_TIMER);
+    } else if (state == MB_SESSION_IDLE || state == MB_SESSION_SCANNING) {
+        orchestrator_session_event(orc, MB_EV_CMD_CONNECT);
+    } else if (state != MB_SESSION_CONNECTING) {
+        return false;
+    }
+
+    if (!connect_device(app)) {
+        orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECT_FAILED);
+        return false;
+    }
+    orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECTED);
+
+    if (!wait_services_resolved(app, 15000)) {
+        orchestrator_session_event(orc, MB_EV_TIMEOUT);
+        return false;
+    }
+    orchestrator_session_event(orc, MB_EV_BLUEZ_SERVICES_RESOLVED);
+
+    g_clear_pointer(&app->service_path, g_free);
+    g_clear_pointer(&app->char_path, g_free);
+
+    app->service_path = find_ble_midi_service(app);
+    if (!app->service_path) {
+        g_printerr("BLE-MIDI service not found. Connect MIDI before Audio on Roland GO:KEYS.\n");
+        orchestrator_session_event(orc, MB_EV_MIDI_SERVICE_NOT_FOUND);
+        return false;
+    }
+
+    app->char_path = find_ble_midi_characteristic(app);
+    if (!app->char_path) {
+        g_printerr("BLE-MIDI I/O characteristic not found.\n");
+        orchestrator_session_event(orc, MB_EV_MIDI_CHAR_NOT_FOUND);
+        return false;
+    }
+
+    g_mutex_lock(&orc->session_lock);
+    mb_session_set_midi_binding(&orc->session,
+                                app->service_path,
+                                app->char_path,
+                                app->cfg.io_uuid);
+    g_mutex_unlock(&orc->session_lock);
+    orchestrator_session_event(orc, MB_EV_MIDI_CHAR_FOUND);
+
+    if (!app->seq && !alsa_init(app)) {
+        orchestrator_session_event(orc, MB_EV_ALSA_FAILED);
+        return false;
+    }
+
+    g_mutex_lock(&orc->session_lock);
+    mb_session_set_alsa_port(&orc->session, app->alsa_port);
+    g_mutex_unlock(&orc->session_lock);
+    orchestrator_session_event(orc, MB_EV_ALSA_READY);
+
+    if (!orc->runtime_started) {
+        mb_duplex_runtime_init(&orc->runtime,
+                               orchestrator_rx_consume, orc,
+                               orchestrator_tx_consume, orc);
+        if (!mb_duplex_runtime_start(&orc->runtime)) {
+            g_printerr("Could not start duplex runtime workers.\n");
+            orchestrator_session_event(orc, MB_EV_RUNTIME_FAILED);
+            return false;
+        }
+        orc->runtime_started = true;
+    }
+
+    if (!orchestrator_start_notify(orc)) {
+        orchestrator_session_event(orc, MB_EV_NOTIFY_FAILED);
+        return false;
+    }
+    orchestrator_session_event(orc, MB_EV_NOTIFY_OK);
+
+    orchestrator_ensure_periodic_sources(orc);
+    return orchestrator_session_is(orc, MB_SESSION_STREAMING);
+}
+
+static gboolean orchestrator_reconnect_cb(gpointer user_data) {
+    MbOrchestrator *orc = user_data;
+
+    if (orchestrator_session_is(orc, MB_SESSION_RECONNECTING)) {
+        g_print("Reconnect timer fired.\n");
+        orchestrator_try_start_streaming(orc);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void orchestrator_cleanup(MbOrchestrator *orc) {
     App *app = &orc->app;
 
@@ -448,15 +575,17 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
         orc->health_source_id = 0;
     }
 
+    if (orc->reconnect_source_id) {
+        g_source_remove(orc->reconnect_source_id);
+        orc->reconnect_source_id = 0;
+    }
+
     if (app->alsa_rx_source_id) {
         g_source_remove(app->alsa_rx_source_id);
         app->alsa_rx_source_id = 0;
     }
 
-    if (orc->notify_sub_id && app->bus) {
-        g_dbus_connection_signal_unsubscribe(app->bus, orc->notify_sub_id);
-        orc->notify_sub_id = 0;
-    }
+    orchestrator_stop_notify(orc);
 
     if (orc->device_sub_id && app->bus) {
         g_dbus_connection_signal_unsubscribe(app->bus, orc->device_sub_id);
@@ -568,92 +697,29 @@ int mb_orchestrator_main(int argc, char **argv) {
 
     if (app->cfg.pair && !pair_device(app)) {
         orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
-        orchestrator_cleanup(&orc);
-        return 1;
+        if (!orchestrator_session_is(&orc, MB_SESSION_RECONNECTING)) {
+            orchestrator_cleanup(&orc);
+            return 1;
+        }
     }
 
     if (app->cfg.trust)
         set_device_trusted(app);
 
-    orchestrator_session_event(&orc, MB_EV_CMD_CONNECT);
-    if (!connect_device(app)) {
-        orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-    orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECTED);
+    app->loop = g_main_loop_new(NULL, FALSE);
+    orc.reconnect_source_id = g_timeout_add(10000, orchestrator_reconnect_cb, &orc);
 
-    if (!wait_services_resolved(app, 15000)) {
-        orchestrator_session_event(&orc, MB_EV_TIMEOUT);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-    orchestrator_session_event(&orc, MB_EV_BLUEZ_SERVICES_RESOLVED);
-
-    app->service_path = find_ble_midi_service(app);
-    if (!app->service_path) {
-        g_printerr("BLE-MIDI service not found. Connect MIDI before Audio on Roland GO:KEYS.\n");
-        orchestrator_session_event(&orc, MB_EV_MIDI_SERVICE_NOT_FOUND);
+    bool streaming = orchestrator_try_start_streaming(&orc);
+    if (!streaming && !orchestrator_session_is(&orc, MB_SESSION_RECONNECTING)) {
         orchestrator_cleanup(&orc);
         return 1;
     }
 
-    app->char_path = find_ble_midi_characteristic(app);
-    if (!app->char_path) {
-        g_printerr("BLE-MIDI I/O characteristic not found.\n");
-        orchestrator_session_event(&orc, MB_EV_MIDI_CHAR_NOT_FOUND);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-
-    g_mutex_lock(&orc.session_lock);
-    mb_session_set_midi_binding(&orc.session,
-                                app->service_path,
-                                app->char_path,
-                                app->cfg.io_uuid);
-    g_mutex_unlock(&orc.session_lock);
-    orchestrator_session_event(&orc, MB_EV_MIDI_CHAR_FOUND);
-
-    if (!alsa_init(app)) {
-        orchestrator_session_event(&orc, MB_EV_ALSA_FAILED);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-
-    g_mutex_lock(&orc.session_lock);
-    mb_session_set_alsa_port(&orc.session, app->alsa_port);
-    g_mutex_unlock(&orc.session_lock);
-    orchestrator_session_event(&orc, MB_EV_ALSA_READY);
-
-    mb_duplex_runtime_init(&orc.runtime,
-                           orchestrator_rx_consume, &orc,
-                           orchestrator_tx_consume, &orc);
-    if (!mb_duplex_runtime_start(&orc.runtime)) {
-        g_printerr("Could not start duplex runtime workers.\n");
-        orchestrator_session_event(&orc, MB_EV_RUNTIME_FAILED);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-    orc.runtime_started = true;
-
-    if (!orchestrator_start_notify(&orc)) {
-        orchestrator_session_event(&orc, MB_EV_NOTIFY_FAILED);
-        orchestrator_cleanup(&orc);
-        return 1;
-    }
-    orchestrator_session_event(&orc, MB_EV_NOTIFY_OK);
-
-    if (app->cfg.enable_tx)
-        app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, &orc);
-
-    orc.health_source_id = g_timeout_add(1000, orchestrator_device_health_cb, &orc);
-
-    if (app->cfg.stats_enabled)
+    if (app->cfg.stats_enabled && orc.stats_source_id == 0)
         orc.stats_source_id = g_timeout_add(app->cfg.stats_interval_ms,
                                             orchestrator_stats_export_cb,
                                             &orc);
 
-    app->loop = g_main_loop_new(NULL, FALSE);
     g_main_loop_run(app->loop);
 
     orchestrator_cleanup(&orc);
