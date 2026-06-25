@@ -21,6 +21,7 @@ add_library(midi-ble-rt-core
     src/mb-runtime.c
     src/mb-session.c
     src/mb-slice-ring.c
+    src/mb-stats.c
 )
 
 target_include_directories(midi-ble-rt-core
@@ -37,7 +38,12 @@ add_executable(midi-ble-rtd
 )
 
 add_executable(midi-ble-rtctl
+    src/mb-stats-ctl.c
     src/midi-ble-rtctl.c
+)
+
+set_source_files_properties(src/midi-ble-rtctl.c
+    PROPERTIES COMPILE_DEFINITIONS "main=midi_ble_rtctl_bluez_main"
 )
 
 target_include_directories(midi-ble-rtd PRIVATE ${DEPS_INCLUDE_DIRS})
@@ -45,7 +51,7 @@ target_link_libraries(midi-ble-rtd PRIVATE midi-ble-rt-core ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rtd PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
 target_include_directories(midi-ble-rtctl PRIVATE ${DEPS_INCLUDE_DIRS})
-target_link_libraries(midi-ble-rtctl PRIVATE ${DEPS_LIBRARIES})
+target_link_libraries(midi-ble-rtctl PRIVATE midi-ble-rt-core ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rtctl PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)

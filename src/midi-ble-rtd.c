@@ -54,6 +54,8 @@ typedef struct {
     bool print_ble_packets;
     bool print_midi_events;
     bool enable_tx;
+    bool stats_enabled;
+    unsigned stats_interval_ms;
 } Config;
 
 typedef struct {

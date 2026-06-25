@@ -1,0 +1,55 @@
+#ifndef MB_STATS_H
+#define MB_STATS_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <glib.h>
+
+G_BEGIN_DECLS
+
+typedef struct {
+    uint64_t rx_packets;
+    uint64_t tx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t rx_drops;
+    uint64_t tx_drops;
+    uint64_t last_rx_ns;
+    uint64_t last_tx_ns;
+    uint64_t rx_gap_avg_ns;
+    uint64_t rx_gap_max_ns;
+    uint64_t tx_gap_avg_ns;
+    uint64_t tx_gap_max_ns;
+} MbSessionStats;
+
+typedef struct {
+    bool enabled;
+    unsigned interval_ms;
+    uint64_t started_ns;
+    char *path;
+    MbSessionStats session;
+} MbStats;
+
+void mb_stats_init(MbStats *stats, bool enabled, unsigned interval_ms);
+void mb_stats_clear(MbStats *stats);
+
+void mb_stats_rx_packet(MbStats *stats, size_t bytes, uint64_t now_ns);
+void mb_stats_tx_packet(MbStats *stats, size_t bytes, uint64_t now_ns);
+void mb_stats_rx_drop(MbStats *stats);
+void mb_stats_tx_drop(MbStats *stats);
+
+char *mb_stats_default_path(void);
+bool mb_stats_export_tsv(const MbStats *stats,
+                         const char *label,
+                         const char *address,
+                         const char *state,
+                         unsigned rx_queue_depth,
+                         unsigned tx_queue_depth,
+                         uint64_t now_ns,
+                         GError **error);
+
+G_END_DECLS
+
+#endif /* MB_STATS_H */

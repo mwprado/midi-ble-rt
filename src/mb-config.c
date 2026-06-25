@@ -25,6 +25,18 @@ static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char
     return value;
 }
 
+static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const char *key, unsigned fallback) {
+    GError *error = NULL;
+    guint64 value = g_key_file_get_uint64(kf, group, key, &error);
+    if (error) {
+        g_clear_error(&error);
+        return fallback;
+    }
+    if (value == 0 || value > 60000)
+        return fallback;
+    return (unsigned)value;
+}
+
 static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->address = keyfile_get_string_default(kf, "device", "address", "");
     cfg->name = keyfile_get_string_default(kf, "device", "name", "");
@@ -47,6 +59,8 @@ static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
     cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
     cfg->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", true);
+    cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
+    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
 }
 
 bool mb_config_load(MbConfig *cfg, const char *path) {
