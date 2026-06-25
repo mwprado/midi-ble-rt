@@ -16,6 +16,10 @@ connect_order = default
 # implemented in midi-ble-rtd.
 pair = no
 trust = yes
+
+# Keep the daemon alive on recoverable BlueZ/GATT failures.
+# With auto_reconnect=yes, connection timeout moves the session to RECONNECTING
+# and the orchestrator retries every 10 seconds.
 auto_reconnect = yes
 
 [gatt]
