@@ -57,11 +57,17 @@ const char *mb_error_name(MbErrorCode error) {
         case MB_ERR_BLUEZ_UNAVAILABLE: return "BLUEZ_UNAVAILABLE";
         case MB_ERR_ADAPTER_POWERED_OFF: return "ADAPTER_POWERED_OFF";
         case MB_ERR_CONNECT_FAILED: return "CONNECT_FAILED";
+        case MB_ERR_CONNECT_TIMEOUT: return "CONNECT_TIMEOUT";
         case MB_ERR_SERVICES_TIMEOUT: return "SERVICES_TIMEOUT";
         case MB_ERR_MIDI_SERVICE_NOT_FOUND: return "MIDI_SERVICE_NOT_FOUND";
         case MB_ERR_MIDI_CHAR_NOT_FOUND: return "MIDI_CHAR_NOT_FOUND";
         case MB_ERR_NOTIFY_FAILED: return "NOTIFY_FAILED";
+        case MB_ERR_NOTIFY_TIMEOUT: return "NOTIFY_TIMEOUT";
+        case MB_ERR_GATT_WRITE_FAILED: return "GATT_WRITE_FAILED";
         case MB_ERR_ALSA_FAILED: return "ALSA_FAILED";
+        case MB_ERR_ALSA_IO_FAILED: return "ALSA_IO_FAILED";
+        case MB_ERR_ALSA_DECODE_FAILED: return "ALSA_DECODE_FAILED";
+        case MB_ERR_RUNTIME_FAILED: return "RUNTIME_FAILED";
         case MB_ERR_DISCONNECTED: return "DISCONNECTED";
         case MB_ERR_INVALID_TRANSITION: return "INVALID_TRANSITION";
         case MB_ERR_INTERNAL: return "INTERNAL";
@@ -80,13 +86,18 @@ const char *mb_event_name(MbEventType event) {
         case MB_EV_BLUEZ_DISCONNECTED: return "BLUEZ_DISCONNECTED";
         case MB_EV_BLUEZ_SERVICES_RESOLVED: return "BLUEZ_SERVICES_RESOLVED";
         case MB_EV_BLUEZ_ADAPTER_OFF: return "BLUEZ_ADAPTER_OFF";
+        case MB_EV_BLUEZ_CONNECT_FAILED: return "BLUEZ_CONNECT_FAILED";
         case MB_EV_MIDI_SERVICE_NOT_FOUND: return "MIDI_SERVICE_NOT_FOUND";
         case MB_EV_MIDI_CHAR_FOUND: return "MIDI_CHAR_FOUND";
         case MB_EV_MIDI_CHAR_NOT_FOUND: return "MIDI_CHAR_NOT_FOUND";
         case MB_EV_ALSA_READY: return "ALSA_READY";
         case MB_EV_ALSA_FAILED: return "ALSA_FAILED";
+        case MB_EV_ALSA_IO_FAILED: return "ALSA_IO_FAILED";
+        case MB_EV_ALSA_DECODE_FAILED: return "ALSA_DECODE_FAILED";
         case MB_EV_NOTIFY_OK: return "NOTIFY_OK";
         case MB_EV_NOTIFY_FAILED: return "NOTIFY_FAILED";
+        case MB_EV_GATT_WRITE_FAILED: return "GATT_WRITE_FAILED";
+        case MB_EV_RUNTIME_FAILED: return "RUNTIME_FAILED";
         case MB_EV_RECONNECT_TIMER: return "RECONNECT_TIMER";
         case MB_EV_TIMEOUT: return "TIMEOUT";
         case MB_EV_FATAL: return "FATAL";
@@ -174,6 +185,22 @@ static void mb_session_enter_error(MbSession *session, MbErrorCode error) {
     session->error = error;
 }
 
+static void mb_session_enter_reconnecting_or_error(MbSession *session,
+                                                   MbErrorCode error,
+                                                   bool keep_alsa_port) {
+    mb_session_reset_runtime(session, keep_alsa_port);
+    if (session->auto_reconnect) {
+        session->state = MB_SESSION_RECONNECTING;
+        session->error = error;
+    } else {
+        mb_session_enter_error(session, error);
+    }
+}
+
+static void mb_session_note_nonfatal_error(MbSession *session, MbErrorCode error) {
+    session->error = error;
+}
+
 bool mb_session_handle_event(MbSession *session, MbEventType event) {
     g_return_val_if_fail(session != NULL, false);
 
@@ -196,17 +223,35 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
         return true;
     }
 
+    if (event == MB_EV_RUNTIME_FAILED) {
+        mb_session_enter_error(session, MB_ERR_RUNTIME_FAILED);
+        return true;
+    }
+
     if (event == MB_EV_BLUEZ_ADAPTER_OFF) {
         mb_session_reset_runtime(session, false);
         mb_session_enter_error(session, MB_ERR_ADAPTER_POWERED_OFF);
         return true;
     }
 
-    if (event == MB_EV_TIMEOUT) {
-        if (session->state == MB_SESSION_WAIT_SERVICES)
-            mb_session_enter_error(session, MB_ERR_SERVICES_TIMEOUT);
+    if (event == MB_EV_BLUEZ_CONNECT_FAILED) {
+        if (session->state == MB_SESSION_CONNECTING)
+            mb_session_enter_reconnecting_or_error(session, MB_ERR_CONNECT_FAILED, false);
         else
+            mb_session_enter_error(session, MB_ERR_CONNECT_FAILED);
+        return true;
+    }
+
+    if (event == MB_EV_TIMEOUT) {
+        if (session->state == MB_SESSION_CONNECTING) {
+            mb_session_enter_reconnecting_or_error(session, MB_ERR_CONNECT_TIMEOUT, false);
+        } else if (session->state == MB_SESSION_WAIT_SERVICES) {
+            mb_session_enter_reconnecting_or_error(session, MB_ERR_SERVICES_TIMEOUT, true);
+        } else if (session->state == MB_SESSION_ENABLING_NOTIFY) {
+            mb_session_enter_reconnecting_or_error(session, MB_ERR_NOTIFY_TIMEOUT, true);
+        } else {
             mb_session_enter_error(session, MB_ERR_INTERNAL);
+        }
         return true;
     }
 
@@ -226,7 +271,30 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
     }
 
     if (event == MB_EV_NOTIFY_FAILED) {
-        mb_session_enter_error(session, MB_ERR_NOTIFY_FAILED);
+        mb_session_enter_reconnecting_or_error(session, MB_ERR_NOTIFY_FAILED, true);
+        return true;
+    }
+
+    if (event == MB_EV_GATT_WRITE_FAILED) {
+        mb_session_enter_reconnecting_or_error(session, MB_ERR_GATT_WRITE_FAILED, true);
+        return true;
+    }
+
+    if (event == MB_EV_ALSA_IO_FAILED) {
+        if (session->state == MB_SESSION_STREAMING) {
+            mb_session_note_nonfatal_error(session, MB_ERR_ALSA_IO_FAILED);
+            return true;
+        }
+        mb_session_enter_error(session, MB_ERR_ALSA_IO_FAILED);
+        return true;
+    }
+
+    if (event == MB_EV_ALSA_DECODE_FAILED) {
+        if (session->state == MB_SESSION_STREAMING) {
+            mb_session_note_nonfatal_error(session, MB_ERR_ALSA_DECODE_FAILED);
+            return true;
+        }
+        mb_session_enter_error(session, MB_ERR_ALSA_DECODE_FAILED);
         return true;
     }
 
@@ -262,7 +330,7 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
                 return true;
             }
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_enter_error(session, MB_ERR_CONNECT_FAILED);
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_CONNECT_FAILED, false);
                 return true;
             }
             break;
@@ -275,9 +343,7 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
                 return true;
             }
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_reset_runtime(session, true);
-                session->state = session->auto_reconnect ? MB_SESSION_RECONNECTING : MB_SESSION_IDLE;
-                session->error = session->auto_reconnect ? MB_ERR_DISCONNECTED : MB_ERR_NONE;
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_DISCONNECTED, true);
                 return true;
             }
             break;
@@ -289,9 +355,7 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
                 return true;
             }
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_reset_runtime(session, true);
-                session->state = session->auto_reconnect ? MB_SESSION_RECONNECTING : MB_SESSION_IDLE;
-                session->error = session->auto_reconnect ? MB_ERR_DISCONNECTED : MB_ERR_NONE;
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_DISCONNECTED, true);
                 return true;
             }
             break;
@@ -306,9 +370,7 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
                 return true;
             }
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_reset_runtime(session, true);
-                session->state = session->auto_reconnect ? MB_SESSION_RECONNECTING : MB_SESSION_IDLE;
-                session->error = session->auto_reconnect ? MB_ERR_DISCONNECTED : MB_ERR_NONE;
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_DISCONNECTED, true);
                 return true;
             }
             break;
@@ -321,18 +383,14 @@ bool mb_session_handle_event(MbSession *session, MbEventType event) {
                 return true;
             }
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_reset_runtime(session, true);
-                session->state = session->auto_reconnect ? MB_SESSION_RECONNECTING : MB_SESSION_IDLE;
-                session->error = session->auto_reconnect ? MB_ERR_DISCONNECTED : MB_ERR_NONE;
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_DISCONNECTED, true);
                 return true;
             }
             break;
 
         case MB_SESSION_STREAMING:
             if (event == MB_EV_BLUEZ_DISCONNECTED) {
-                mb_session_reset_runtime(session, true);
-                session->state = session->auto_reconnect ? MB_SESSION_RECONNECTING : MB_SESSION_IDLE;
-                session->error = session->auto_reconnect ? MB_ERR_DISCONNECTED : MB_ERR_NONE;
+                mb_session_enter_reconnecting_or_error(session, MB_ERR_DISCONNECTED, true);
                 return true;
             }
             break;

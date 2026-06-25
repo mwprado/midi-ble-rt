@@ -71,6 +71,127 @@ static void test_disconnect_enters_reconnecting_and_preserves_identity(void) {
     mb_session_clear(&session);
 }
 
+static void test_connect_timeout_enters_reconnecting(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_CMD_CONNECT));
+    g_assert_true(mb_session_handle_event(&session, MB_EV_TIMEOUT));
+
+    g_assert_cmpint(session.state, ==, MB_SESSION_RECONNECTING);
+    g_assert_cmpint(session.error, ==, MB_ERR_CONNECT_TIMEOUT);
+    g_assert_false(session.bluez_connected);
+    g_assert_false(session.alsa_ready);
+
+    mb_session_clear(&session);
+}
+
+static void test_services_timeout_enters_reconnecting_and_preserves_alsa(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_CMD_CONNECT));
+    g_assert_true(mb_session_handle_event(&session, MB_EV_BLUEZ_CONNECTED));
+    mb_session_set_alsa_port(&session, 3);
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_TIMEOUT));
+
+    g_assert_cmpint(session.state, ==, MB_SESSION_RECONNECTING);
+    g_assert_cmpint(session.error, ==, MB_ERR_SERVICES_TIMEOUT);
+    g_assert_false(session.bluez_connected);
+    g_assert_false(session.services_resolved);
+    g_assert_true(session.alsa_ready);
+    g_assert_cmpint(session.alsa_port_id, ==, 3);
+
+    mb_session_clear(&session);
+}
+
+static void test_notify_failure_enters_reconnecting(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_CMD_CONNECT));
+    g_assert_true(mb_session_handle_event(&session, MB_EV_BLUEZ_CONNECTED));
+    g_assert_true(mb_session_handle_event(&session, MB_EV_BLUEZ_SERVICES_RESOLVED));
+    mb_session_set_midi_binding(&session,
+                                "/org/bluez/hci0/dev_A/service0001",
+                                "/org/bluez/hci0/dev_A/service0001/char0002",
+                                "00006bf3-0000-1000-8000-00805f9b34fb");
+    g_assert_true(mb_session_handle_event(&session, MB_EV_MIDI_CHAR_FOUND));
+    mb_session_set_alsa_port(&session, 3);
+    g_assert_true(mb_session_handle_event(&session, MB_EV_ALSA_READY));
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_NOTIFY_FAILED));
+
+    g_assert_cmpint(session.state, ==, MB_SESSION_RECONNECTING);
+    g_assert_cmpint(session.error, ==, MB_ERR_NOTIFY_FAILED);
+    g_assert_false(session.notify_enabled);
+    g_assert_true(session.alsa_ready);
+
+    mb_session_clear(&session);
+}
+
+static void test_gatt_write_failure_enters_reconnecting(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    drive_to_streaming(&session);
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_GATT_WRITE_FAILED));
+    g_assert_cmpint(session.state, ==, MB_SESSION_RECONNECTING);
+    g_assert_cmpint(session.error, ==, MB_ERR_GATT_WRITE_FAILED);
+    g_assert_false(session.bluez_connected);
+    g_assert_false(session.notify_enabled);
+    g_assert_true(session.alsa_ready);
+
+    mb_session_clear(&session);
+}
+
+static void test_alsa_decode_failure_is_nonfatal_while_streaming(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    drive_to_streaming(&session);
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_ALSA_DECODE_FAILED));
+    g_assert_cmpint(session.state, ==, MB_SESSION_STREAMING);
+    g_assert_cmpint(session.error, ==, MB_ERR_ALSA_DECODE_FAILED);
+    g_assert_true(mb_session_is_streaming_ready(&session));
+
+    mb_session_clear(&session);
+}
+
+static void test_runtime_failure_enters_error(void) {
+    MbSession session;
+    mb_session_init(&session,
+                    "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                    "AA:BB:CC:DD:EE:FF",
+                    "GO:KEYS");
+
+    drive_to_streaming(&session);
+
+    g_assert_true(mb_session_handle_event(&session, MB_EV_RUNTIME_FAILED));
+    g_assert_cmpint(session.state, ==, MB_SESSION_ERROR);
+    g_assert_cmpint(session.error, ==, MB_ERR_RUNTIME_FAILED);
+
+    mb_session_clear(&session);
+}
+
 static void test_two_sessions_are_independent(void) {
     MbDaemon daemon;
     mb_daemon_init(&daemon);
@@ -217,6 +338,12 @@ int main(int argc, char **argv) {
 
     g_test_add_func("/mb-session/single-session-happy-path", test_single_session_happy_path);
     g_test_add_func("/mb-session/disconnect-reconnect", test_disconnect_enters_reconnecting_and_preserves_identity);
+    g_test_add_func("/mb-session/connect-timeout-reconnect", test_connect_timeout_enters_reconnecting);
+    g_test_add_func("/mb-session/services-timeout-reconnect", test_services_timeout_enters_reconnecting_and_preserves_alsa);
+    g_test_add_func("/mb-session/notify-failure-reconnect", test_notify_failure_enters_reconnecting);
+    g_test_add_func("/mb-session/gatt-write-failure-reconnect", test_gatt_write_failure_enters_reconnecting);
+    g_test_add_func("/mb-session/alsa-decode-failure-nonfatal", test_alsa_decode_failure_is_nonfatal_while_streaming);
+    g_test_add_func("/mb-session/runtime-failure-error", test_runtime_failure_enters_error);
     g_test_add_func("/mb-session/two-sessions-independent", test_two_sessions_are_independent);
     g_test_add_func("/mb-session/identical-keyboards-different-addresses", test_identical_keyboards_with_different_addresses_are_distinct);
     g_test_add_func("/mb-session/duplicate-address-reuses-session", test_duplicate_address_reuses_session_and_reindexes_path);
