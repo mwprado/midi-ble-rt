@@ -17,8 +17,10 @@ consume the ALSA MIDI ports exported by this daemon.
 The first validated target is the Roland GO:KEYS family.
 
 For developer architecture notes, state diagrams, multi-keyboard identity rules
-and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md).  For the daemon layer
-split, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md). For the daemon layer
+split, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For timeout,
+reconnect and session telemetry behavior, see
+[`docs/SESSION_RESILIENCE.md`](docs/SESSION_RESILIENCE.md).
 
 ## Architecture overview
 
@@ -45,7 +47,7 @@ midi-ble-rtd
           -> core modules / session model / runtime queues
 ```
 
-There is one public daemon binary: `midi-ble-rtd`.  The previous
+There is one public daemon binary: `midi-ble-rtd`. The previous
 `midi-ble-rtd-duplex` validation path has been absorbed into the daemon's
 internal orchestrator layer and is no longer a separate installed daemon target.
 
@@ -235,6 +237,31 @@ aseqdump -p CLIENT:PORT
 ```
 
 Use the numeric `CLIENT:PORT` shown by `aconnect -l`, for example `128:0`.
+
+## Auto reconnect and session timings
+
+By default, the example configs enable:
+
+```ini
+[device]
+auto_reconnect = yes
+```
+
+With auto reconnect enabled, connection failures and recoverable BlueZ/GATT
+failures move the daemon to `RECONNECTING` instead of exiting. The daemon then
+tries to reconnect every 10 seconds. Current operational timeouts are documented
+in [`docs/SESSION_RESILIENCE.md`](docs/SESSION_RESILIENCE.md): `Device1.Connect()`
+uses 30 seconds, `ServicesResolved` uses 15 seconds, `StartNotify` uses 15 seconds,
+`WriteValue` uses 5 seconds, and the device health check runs every 1 second.
+
+The stats file should reflect the session state immediately after transitions:
+
+```text
+/run/user/$UID/midi-ble-rt/stats.tsv
+```
+
+Expected states during recovery are `CONNECTING`, `RECONNECTING` and then
+`STREAMING` after the keyboard becomes available again.
 
 ## Receive MIDI
 
