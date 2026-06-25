@@ -50,30 +50,6 @@ static bool orchestrator_load_config(Config *cfg, const char *path) {
     return mb_config_load((MbConfig *)cfg, path);
 }
 
-static bool orchestrator_session_event(MbOrchestrator *orc, MbEventType event) {
-    g_mutex_lock(&orc->session_lock);
-    MbSessionState before = orc->session.state;
-    MbErrorCode before_error = orc->session.error;
-    bool ok = mb_session_handle_event(&orc->session, event);
-    MbSessionState after = orc->session.state;
-    MbErrorCode after_error = orc->session.error;
-    g_mutex_unlock(&orc->session_lock);
-
-    if (!ok || before != after || before_error != after_error) {
-        g_print("Session: %s --%s--> %s",
-                mb_session_state_name(before),
-                mb_event_name(event),
-                mb_session_state_name(after));
-        if (after_error != MB_ERR_NONE)
-            g_print(" error=%s", mb_error_name(after_error));
-        if (!ok)
-            g_print(" rejected");
-        g_print("\n");
-    }
-
-    return ok;
-}
-
 static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
     g_mutex_lock(&orc->session_lock);
     MbSessionState state = orc->session.state;
@@ -83,6 +59,60 @@ static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
 
 static const char *orchestrator_session_state_name(MbOrchestrator *orc) {
     return mb_session_state_name(orchestrator_session_state(orc));
+}
+
+static void orchestrator_stats_export_snapshot(MbOrchestrator *orc) {
+    if (!orc || !orc->stats.enabled)
+        return;
+
+    App *app = &orc->app;
+    GError *error = NULL;
+    uint64_t now_ns = orchestrator_now_ns();
+    const char *label = app->cfg.name && *app->cfg.name ? app->cfg.name : "BLE-MIDI";
+    const char *address = app->cfg.address && *app->cfg.address ? app->cfg.address : "-";
+    const char *state = orchestrator_session_state_name(orc);
+
+    g_mutex_lock(&orc->stats_lock);
+    bool ok = mb_stats_export_tsv(&orc->stats,
+                                  label,
+                                  address,
+                                  state,
+                                  mb_duplex_runtime_rx_depth(&orc->runtime),
+                                  mb_duplex_runtime_tx_depth(&orc->runtime),
+                                  now_ns,
+                                  &error);
+    g_mutex_unlock(&orc->stats_lock);
+
+    if (!ok) {
+        g_printerr("Stats export failed: %s\n", error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+}
+
+static bool orchestrator_session_event(MbOrchestrator *orc, MbEventType event) {
+    g_mutex_lock(&orc->session_lock);
+    MbSessionState before = orc->session.state;
+    MbErrorCode before_error = orc->session.error;
+    bool ok = mb_session_handle_event(&orc->session, event);
+    MbSessionState after = orc->session.state;
+    MbErrorCode after_error = orc->session.error;
+    g_mutex_unlock(&orc->session_lock);
+
+    bool changed = !ok || before != after || before_error != after_error;
+    if (changed) {
+        g_print("Session: %s --%s--> %s",
+                mb_session_state_name(before),
+                mb_event_name(event),
+                mb_session_state_name(after));
+        if (after_error != MB_ERR_NONE)
+            g_print(" error=%s", mb_error_name(after_error));
+        if (!ok)
+            g_print(" rejected");
+        g_print("\n");
+        orchestrator_stats_export_snapshot(orc);
+    }
+
+    return ok;
 }
 
 static bool orchestrator_session_can_mark_disconnected(MbOrchestrator *orc) {
@@ -399,34 +429,14 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
 
 static gboolean orchestrator_stats_export_cb(gpointer user_data) {
     MbOrchestrator *orc = user_data;
-    App *app = &orc->app;
-    GError *error = NULL;
-    uint64_t now_ns = orchestrator_now_ns();
-    const char *label = app->cfg.name && *app->cfg.name ? app->cfg.name : "BLE-MIDI";
-    const char *address = app->cfg.address && *app->cfg.address ? app->cfg.address : "-";
-    const char *state = orchestrator_session_state_name(orc);
-
-    g_mutex_lock(&orc->stats_lock);
-    bool ok = mb_stats_export_tsv(&orc->stats,
-                                  label,
-                                  address,
-                                  state,
-                                  mb_duplex_runtime_rx_depth(&orc->runtime),
-                                  mb_duplex_runtime_tx_depth(&orc->runtime),
-                                  now_ns,
-                                  &error);
-    g_mutex_unlock(&orc->stats_lock);
-
-    if (!ok) {
-        g_printerr("Stats export failed: %s\n", error ? error->message : "unknown error");
-        g_clear_error(&error);
-    }
-
+    orchestrator_stats_export_snapshot(orc);
     return G_SOURCE_CONTINUE;
 }
 
 static void orchestrator_cleanup(MbOrchestrator *orc) {
     App *app = &orc->app;
+
+    orchestrator_stats_export_snapshot(orc);
 
     if (orc->stats_source_id) {
         g_source_remove(orc->stats_source_id);
@@ -513,6 +523,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     orc.session_initialized = true;
 
     mb_stats_init(&orc.stats, app->cfg.stats_enabled, app->cfg.stats_interval_ms);
+    orchestrator_stats_export_snapshot(&orc);
 
     g_print("midi-ble-rtd\n");
     g_print("Runtime: orchestrator\n");
