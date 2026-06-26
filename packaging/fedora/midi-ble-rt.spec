@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.5.2
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -39,13 +39,20 @@ The first validated target is the Roland GO:KEYS family.
 
 %files
 %license LICENSE
-%doc README.md DEVELOPERS.md RELEASE_NOTES_v0.5.0.md docs/*.md
+%doc README.md DEVELOPERS.md RELEASE_NOTES_v*.md docs/*.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.0-1
+- Include internal code cleanup after the stable RPM release.
+- Extract BlueZ, BLE-MIDI GATT and ALSA port helper modules.
+- Add stats v3 with separate ALSA RX and ALSA TX fields.
+- Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
+- Preserve existing BLE-MIDI runtime behavior.
+
 * Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.5.2-1
 - Add stats v3 with separate ALSA RX and ALSA TX fields.
 - Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
@@ -82,7 +89,7 @@ The first validated target is the Roland GO:KEYS family.
 - Point Source0 to GitHub tag tarball for COPR SCM/spec builds.
 
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.2
-- Switch package license to MIT and install LICENSE as %%license.
+- Switch package license to MIT and install LICENSE as %license.
 
 * Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.1
 - Initial COPR-oriented Fedora package.
