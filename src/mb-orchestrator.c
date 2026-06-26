@@ -21,6 +21,7 @@
 #include "mb-alsa.h"
 #include "mb-bluez.h"
 #include "mb-ble-midi.h"
+#include "mb-gatt-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
 #include "mb-session.h"
@@ -212,28 +213,15 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
             g_print("\n");
         }
 
-        GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
-                                                    packet, packet_len,
-                                                    sizeof(guint8));
-        GVariantBuilder options;
-        g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-        g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
-
-        GError *error = NULL;
-        GVariant *ret = g_dbus_connection_call_sync(
-            app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "WriteValue",
-            g_variant_new("(@aya{sv})", value, &options),
-            NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-        if (!ret) {
-            g_printerr("WriteValue failed: %s\n", error->message);
-            g_clear_error(&error);
+        if (!mb_gatt_midi_write_value_command(app->bus,
+                                               app->char_path,
+                                               packet,
+                                               packet_len,
+                                               5000)) {
             orchestrator_stats_tx_drop(orc);
             orchestrator_session_event(orc, MB_EV_GATT_WRITE_FAILED);
             return false;
         }
-
-        g_variant_unref(ret);
         orchestrator_stats_tx_packet(orc, chunk, orchestrator_now_ns());
         off += chunk;
     }

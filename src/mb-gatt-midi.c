@@ -170,3 +170,44 @@ char *mb_gatt_midi_find_characteristic(GDBusConnection *bus,
 
     return best;
 }
+
+bool mb_gatt_midi_write_value_command(GDBusConnection *bus,
+                                      const char *char_path,
+                                      const uint8_t *packet,
+                                      size_t packet_len,
+                                      int timeout_ms) {
+    if (!bus || !char_path || !packet || packet_len == 0)
+        return false;
+
+    GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
+                                                packet,
+                                                packet_len,
+                                                sizeof(guint8));
+
+    GVariantBuilder options;
+    g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
+
+    GError *error = NULL;
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus,
+        BLUEZ_BUS,
+        char_path,
+        GATT_CHRC_IFACE,
+        "WriteValue",
+        g_variant_new("(@aya{sv})", value, &options),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        timeout_ms,
+        NULL,
+        &error);
+
+    if (!ret) {
+        g_printerr("WriteValue failed: %s\n", error ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    return true;
+}
