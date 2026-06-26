@@ -27,10 +27,12 @@ Completed in the cleanup series:
 - Shared daemon app/context helpers were moved to `mb-app.[ch]`.
 - The monolithic `src/midi-ble-rtd.c` source was removed.
 - The hidden `#include "midi-ble-rtd.c"` pattern was removed.
+- CI was added to build the project and run CTest on pushes and pull requests.
 
 Remaining cleanup before merge:
 
-- Build locally and run CTest on `remove-legacy-core`.
+- Check GitHub Actions results for `remove-legacy-core`.
+- Build locally and run CTest on `remove-legacy-core` when hardware time is available.
 - Replace the temporary compatibility shims in `mb-legacy-core.h` with direct `mb_app_*` calls in `mb-orchestrator.c`.
 - Delete `mb-legacy-core.h` after the orchestrator no longer includes it.
 
@@ -45,7 +47,15 @@ Remaining cleanup before merge:
 
 ## Validation
 
-Before merge, build the project and run the CTest suite.
+CI validation is defined in `.github/workflows/ci.yml` and runs:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Local validation before merge:
 
 ```sh
 cmake --build build
