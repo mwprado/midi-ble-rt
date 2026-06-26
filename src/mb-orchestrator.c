@@ -16,9 +16,7 @@
 
 #include "mb-orchestrator.h"
 
-#define main midi_ble_rtd_legacy_main
-#include "midi-ble-rtd.c"
-#undef main
+#include "mb-legacy-core.h"
 
 #include "mb-alsa.h"
 #include "mb-ble-midi.h"
