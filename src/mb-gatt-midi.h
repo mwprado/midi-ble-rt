@@ -22,4 +22,9 @@ bool mb_gatt_midi_write_value_command(GDBusConnection *bus,
                                       size_t packet_len,
                                       int timeout_ms);
 
+bool mb_gatt_midi_start_notify(GDBusConnection *bus,
+                               const char *char_path,
+                               int timeout_ms,
+                               GError **error);
+
 #endif /* MB_GATT_MIDI_H */

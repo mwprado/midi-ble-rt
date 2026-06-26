@@ -211,3 +211,35 @@ bool mb_gatt_midi_write_value_command(GDBusConnection *bus,
     g_variant_unref(ret);
     return true;
 }
+
+bool mb_gatt_midi_start_notify(GDBusConnection *bus,
+                               const char *char_path,
+                               int timeout_ms,
+                               GError **error) {
+    if (!bus || !char_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid StartNotify arguments");
+        return false;
+    }
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus,
+        BLUEZ_BUS,
+        char_path,
+        GATT_CHRC_IFACE,
+        "StartNotify",
+        NULL,
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        timeout_ms,
+        NULL,
+        error);
+
+    if (!ret)
+        return false;
+
+    g_variant_unref(ret);
+    return true;
+}

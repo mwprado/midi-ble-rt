@@ -426,18 +426,12 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
         return false;
     }
 
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "StartNotify",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("StartNotify failed: %s\n", error->message);
+    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, 15000, &error)) {
+        g_printerr("StartNotify failed: %s\n", error ? error->message : "unknown error");
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
         g_clear_error(&error);
         return false;
     }
-
-    g_variant_unref(ret);
     g_print("StartNotify ok. Orchestrated ALSA MIDI port is ready.\n");
     return true;
 }

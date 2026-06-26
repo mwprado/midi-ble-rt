@@ -567,19 +567,13 @@ static bool start_notify(App *app) {
     g_print("Subscribing to BlueZ PropertiesChanged for %s.\n", app->char_path);
     g_print("Calling StartNotify on %s.\n", app->char_path);
 
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "StartNotify",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("StartNotify failed: %s\n", error->message);
+    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, 15000, &error)) {
+        g_printerr("StartNotify failed: %s\n", error ? error->message : "unknown error");
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
         g_printerr("If TX works but RX is silent after reconnects, restart bluetooth and midi-ble-rtd to clear stale BlueZ GATT state.\n");
         g_clear_error(&error);
         return false;
     }
-
-    g_variant_unref(ret);
     g_print("StartNotify ok on %s. ALSA MIDI port is ready.\n", app->char_path);
     return true;
 }
