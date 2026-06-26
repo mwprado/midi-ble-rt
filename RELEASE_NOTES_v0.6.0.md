@@ -1,4 +1,4 @@
-# midi-ble-rt v0.6.0
+# midi-ble-rt v0.6.2
 
 Release focused on internal cleanup and operational telemetry.
 
