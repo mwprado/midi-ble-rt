@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "mb-bluez.h"
+#include "mb-gatt-midi.h"
 
 typedef struct {
     char *address;
@@ -289,46 +290,7 @@ static bool wait_services_resolved(App *app, int timeout_ms) {
 }
 
 static char *find_ble_midi_service(App *app) {
-    GVariant *objects = get_managed_objects(app);
-    if (!objects)
-        return NULL;
-
-    GVariantIter iter;
-    const char *path = NULL;
-    GVariant *ifaces = NULL;
-    char *found = NULL;
-
-    g_variant_iter_init(&iter, objects);
-    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
-        if (!path_has_prefix(path, app->device_path)) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *props = g_variant_lookup_value(ifaces, GATT_SERVICE_IFACE, G_VARIANT_TYPE("a{sv}"));
-        if (!props) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *v_uuid = g_variant_lookup_value(props, "UUID", G_VARIANT_TYPE_STRING);
-        const char *uuid = v_uuid ? g_variant_get_string(v_uuid, NULL) : NULL;
-
-        if (uuid_equal(uuid, app->cfg.service_uuid)) {
-            found = g_strdup(path);
-            g_print("Found BLE-MIDI service: %s\n", found);
-        }
-
-        if (v_uuid) g_variant_unref(v_uuid);
-        g_variant_unref(props);
-        g_variant_unref(ifaces);
-
-        if (found)
-            break;
-    }
-
-    g_variant_unref(objects);
-    return found;
+    return mb_gatt_midi_find_service(app->bus, app->device_path, app->cfg.service_uuid);
 }
 
 static char *find_ble_midi_characteristic(App *app) {
