@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "mb-bluez.h"
+#include "mb-config.h"
 #include "mb-alsa-port.h"
 #include "mb-alsa.h"
 #include "mb-gatt-midi.h"
@@ -75,71 +76,12 @@ typedef struct {
     uint8_t running_status;
 } App;
 
-static char *keyfile_get_string_default(GKeyFile *kf, const char *group, const char *key, const char *fallback) {
-    GError *error = NULL;
-    char *value = g_key_file_get_string(kf, group, key, &error);
-    if (error) {
-        g_clear_error(&error);
-        return g_strdup(fallback);
-    }
-    return value;
-}
-
-static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char *key, bool fallback) {
-    GError *error = NULL;
-    gboolean value = g_key_file_get_boolean(kf, group, key, &error);
-    if (error) {
-        g_clear_error(&error);
-        return fallback;
-    }
-    return value;
-}
-
 static bool load_config(Config *cfg, const char *path) {
-    GKeyFile *kf = g_key_file_new();
-    GError *error = NULL;
-
-    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
-        g_printerr("Failed to load config %s: %s\n", path, error->message);
-        g_clear_error(&error);
-        g_key_file_unref(kf);
-        return false;
-    }
-
-    cfg->address = keyfile_get_string_default(kf, "device", "address", "");
-    cfg->name = keyfile_get_string_default(kf, "device", "name", "");
-    cfg->pair = keyfile_get_bool_default(kf, "device", "pair", false);
-    cfg->trust = keyfile_get_bool_default(kf, "device", "trust", true);
-    cfg->auto_reconnect = keyfile_get_bool_default(kf, "device", "auto_reconnect", true);
-
-    cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
-        "03b80e5a-ede8-4b33-a751-6ce34ec4c700");
-    cfg->io_uuid = keyfile_get_string_default(kf, "gatt", "io_uuid",
-        "7772e5db-3868-4112-a1a9-f2669d106bf3");
-    cfg->io_uuid_alias = keyfile_get_string_default(kf, "gatt", "io_uuid_alias",
-        "00006bf3-0000-1000-8000-00805f9b34fb");
-    cfg->require_notify = keyfile_get_bool_default(kf, "gatt", "require_notify", true);
-    cfg->require_write_without_response = keyfile_get_bool_default(kf, "gatt", "require_write_without_response", true);
-
-    cfg->alsa_client_name = keyfile_get_string_default(kf, "alsa", "client_name", "midi-ble-rt");
-    cfg->alsa_port_name = keyfile_get_string_default(kf, "alsa", "port_name", "BLE-MIDI In");
-
-    cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
-    cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
-    cfg->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", true);
-
-    g_key_file_unref(kf);
-    return true;
+    return mb_config_load((MbConfig *)cfg, path);
 }
 
 static void free_config(Config *cfg) {
-    g_free(cfg->address);
-    g_free(cfg->name);
-    g_free(cfg->service_uuid);
-    g_free(cfg->io_uuid);
-    g_free(cfg->io_uuid_alias);
-    g_free(cfg->alsa_client_name);
-    g_free(cfg->alsa_port_name);
+    mb_config_clear((MbConfig *)cfg);
 }
 
 static bool uuid_equal(const char *a, const char *b) {
