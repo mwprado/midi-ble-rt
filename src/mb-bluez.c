@@ -120,3 +120,22 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
     g_print("Device Connect() ok.\n");
     return true;
 }
+
+bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_path, int timeout_ms) {
+    const int step_ms = 100;
+    int elapsed = 0;
+
+    while (elapsed < timeout_ms) {
+        bool resolved = false;
+        if (mb_bluez_get_device_bool_property(bus, device_path, "ServicesResolved", &resolved) && resolved) {
+            g_print("ServicesResolved=true.\n");
+            return true;
+        }
+
+        g_usleep(step_ms * 1000);
+        elapsed += step_ms;
+    }
+
+    g_printerr("Timed out waiting for ServicesResolved=true.\n");
+    return false;
+}

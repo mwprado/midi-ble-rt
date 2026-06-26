@@ -285,22 +285,7 @@ static bool connect_device(App *app) {
 }
 
 static bool wait_services_resolved(App *app, int timeout_ms) {
-    const int step_ms = 100;
-    int elapsed = 0;
-
-    while (elapsed < timeout_ms) {
-        bool resolved = false;
-        if (get_device_bool_property(app, "ServicesResolved", &resolved) && resolved) {
-            g_print("ServicesResolved=true.\n");
-            return true;
-        }
-
-        g_usleep(step_ms * 1000);
-        elapsed += step_ms;
-    }
-
-    g_printerr("Timed out waiting for ServicesResolved=true.\n");
-    return false;
+    return mb_bluez_wait_services_resolved(app->bus, app->device_path, timeout_ms);
 }
 
 static char *find_ble_midi_service(App *app) {
