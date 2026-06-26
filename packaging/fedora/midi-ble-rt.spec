@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.5.1
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -31,7 +31,7 @@ The first validated target is the Roland GO:KEYS family.
 %autosetup -n %{name}-%{version}
 
 %build
-%cmake
+%cmake -DBUILD_SHARED_LIBS=OFF
 %cmake_build
 
 %install
@@ -46,6 +46,10 @@ The first validated target is the Roland GO:KEYS family.
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.1-2
+- Build the internal midi-ble-rt-core library statically.
+- Avoid a broken runtime dependency on libmidi-ble-rt-core.so()(64bit).
+
 * Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.0-1
 - Add session statistics monitoring.
 - Export runtime statistics to stats.tsv under the user runtime directory.
