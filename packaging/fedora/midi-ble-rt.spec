@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.5.2
-Release:        2%{?dist}
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -46,6 +46,12 @@ The first validated target is the Roland GO:KEYS family.
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.5.2-1
+- Add stats v3 with separate ALSA RX and ALSA TX fields.
+- Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
+- Include code cleanup: BlueZ/GATT/ALSA helper extraction and legacy boundary reduction.
+- Preserve existing BLE-MIDI runtime behavior.
+
 * Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.1-2
 - Build the internal midi-ble-rt-core library statically.
 - Avoid a broken runtime dependency on libmidi-ble-rt-core.so()(64bit).
