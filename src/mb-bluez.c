@@ -44,3 +44,22 @@ bool mb_bluez_get_device_bool_property(GDBusConnection *bus, const char *device_
     g_variant_unref(ret);
     return true;
 }
+
+bool mb_bluez_set_device_trusted(GDBusConnection *bus, const char *device_path) {
+    GError *error = NULL;
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus, BLUEZ_BUS, device_path, PROPERTIES_IFACE, "Set",
+        g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(TRUE)),
+        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+
+    if (!ret) {
+        g_printerr("Set Trusted=true failed: %s\n", error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Trusted=true set.\n");
+    return true;
+}

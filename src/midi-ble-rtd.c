@@ -273,22 +273,7 @@ static bool get_device_bool_property(App *app, const char *property, bool *out) 
 }
 
 static bool set_device_trusted(App *app) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, PROPERTIES_IFACE, "Set",
-        g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(TRUE)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Set Trusted=true failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Trusted=true set.\n");
-    return true;
+    return mb_bluez_set_device_trusted(app->bus, app->device_path);
 }
 
 static bool pair_device(App *app) {
