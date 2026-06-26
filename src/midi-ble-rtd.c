@@ -281,37 +281,7 @@ static bool pair_device(App *app) {
 }
 
 static bool connect_device(App *app) {
-    bool connected = false;
-    if (get_device_bool_property(app, "Connected", &connected) && connected) {
-        g_print("Device already connected.\n");
-        return true;
-    }
-
-    GError *error = NULL;
-    g_print("Device Connected=false; calling Device1.Connect()...\n");
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, DEVICE_IFACE, "Connect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
-
-    if (!ret) {
-        const char *remote = g_dbus_error_get_remote_error(error);
-        if (remote &&
-            (g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0 ||
-             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0)) {
-            g_print("Device already connected or in progress.\n");
-            g_clear_error(&error);
-            return true;
-        }
-
-        g_printerr("Device Connect() failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Device Connect() ok.\n");
-    return true;
+    return mb_bluez_connect_device(app->bus, app->device_path);
 }
 
 static bool wait_services_resolved(App *app, int timeout_ms) {

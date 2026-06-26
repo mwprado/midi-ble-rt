@@ -86,3 +86,37 @@ bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
     g_print("Device Pair() ok.\n");
     return true;
 }
+
+bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
+    bool connected = false;
+    if (mb_bluez_get_device_bool_property(bus, device_path, "Connected", &connected) && connected) {
+        g_print("Device already connected.\n");
+        return true;
+    }
+
+    GError *error = NULL;
+    g_print("Device Connected=false; calling Device1.Connect()...\n");
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Connect",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
+
+    if (!ret) {
+        const char *remote = g_dbus_error_get_remote_error(error);
+        if (remote &&
+            (g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0 ||
+             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0)) {
+            g_print("Device already connected or in progress.\n");
+            g_clear_error(&error);
+            return true;
+        }
+
+        g_printerr("Device Connect() failed: %s\n", error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Device Connect() ok.\n");
+    return true;
+}
