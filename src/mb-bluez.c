@@ -63,3 +63,26 @@ bool mb_bluez_set_device_trusted(GDBusConnection *bus, const char *device_path) 
     g_print("Trusted=true set.\n");
     return true;
 }
+
+bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
+    bool paired = false;
+    if (mb_bluez_get_device_bool_property(bus, device_path, "Paired", &paired) && paired) {
+        g_print("Device already paired.\n");
+        return true;
+    }
+
+    GError *error = NULL;
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
+
+    if (!ret) {
+        g_printerr("Device Pair() failed: %s\n", error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Device Pair() ok.\n");
+    return true;
+}

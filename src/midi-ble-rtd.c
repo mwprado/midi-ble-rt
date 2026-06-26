@@ -277,26 +277,7 @@ static bool set_device_trusted(App *app) {
 }
 
 static bool pair_device(App *app) {
-    bool paired = false;
-    if (get_device_bool_property(app, "Paired", &paired) && paired) {
-        g_print("Device already paired.\n");
-        return true;
-    }
-
-    GError *error = NULL;
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Device Pair() failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Device Pair() ok.\n");
-    return true;
+    return mb_bluez_pair_device(app->bus, app->device_path);
 }
 
 static bool connect_device(App *app) {

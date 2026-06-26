@@ -23,5 +23,6 @@
 GVariant *mb_bluez_get_managed_objects(GDBusConnection *bus);
 bool mb_bluez_get_device_bool_property(GDBusConnection *bus, const char *device_path, const char *property, bool *out);
 bool mb_bluez_set_device_trusted(GDBusConnection *bus, const char *device_path);
+bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path);
 
 #endif /* MB_BLUEZ_H */
