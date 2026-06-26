@@ -19,6 +19,7 @@
 #include "mb-legacy-core.h"
 
 #include "mb-alsa.h"
+#include "mb-bluez.h"
 #include "mb-ble-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"

@@ -28,12 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BLUEZ_BUS              "org.bluez"
-#define OBJECT_MANAGER_IFACE   "org.freedesktop.DBus.ObjectManager"
-#define PROPERTIES_IFACE       "org.freedesktop.DBus.Properties"
-#define DEVICE_IFACE           "org.bluez.Device1"
-#define GATT_SERVICE_IFACE     "org.bluez.GattService1"
-#define GATT_CHRC_IFACE        "org.bluez.GattCharacteristic1"
+#include "mb-bluez.h"
 
 typedef struct {
     char *address;
