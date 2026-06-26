@@ -1,10 +1,17 @@
 /*
  * Runtime/session orchestrator for midi-ble-rtd.
  *
- * This layer owns the threaded duplex data path.  It currently reuses the
- * legacy daemon core by including midi-ble-rtd.c with its main() renamed; the
- * next refactor step is to move those lower-level static helpers into explicit
- * core modules.  The public binary is now a single daemon: midi-ble-rtd.
+ * Responsibility boundary:
+ *   - owns the high-level session lifecycle;
+ *   - connects BlueZ/GATT discovery to the runtime dataplane;
+ *   - connects ALSA Sequencer I/O to BLE-MIDI transport;
+ *   - exports operational stats.
+ *
+ * Temporary cleanup debt:
+ *   This file still includes midi-ble-rtd.c after renaming its main().
+ *   That keeps the validated behavior intact while the legacy helpers are
+ *   extracted into explicit modules.  Do not add new functionality through
+ *   this coupling; remove the coupling in small cleanup commits.
  */
 
 #include "mb-orchestrator.h"
