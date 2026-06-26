@@ -122,8 +122,10 @@ bool mb_stats_export_tsv(MbStats *stats,
                          const char *label,
                          const char *address,
                          const char *state,
-                         int alsa_client_id,
-                         int alsa_port_id,
+                         int alsa_rx_client_id,
+                         int alsa_rx_port_id,
+                         int alsa_tx_client_id,
+                         int alsa_tx_port_id,
                          unsigned rx_queue_depth,
                          unsigned tx_queue_depth,
                          uint64_t now_ns,
@@ -151,14 +153,16 @@ bool mb_stats_export_tsv(MbStats *stats,
     uint64_t window_ms = ns_to_ms(window_ns);
 
     char *content = g_strdup_printf(
-        "v2\n"
-        "label\taddress\tstate\talsa_client_id\talsa_port_id\tuptime_ms\twindow_ms\trx_packets\ttx_packets\trx_bytes\ttx_bytes\trx_drops\ttx_drops\trx_packets_per_sec\ttx_packets_per_sec\trx_bytes_per_sec\ttx_bytes_per_sec\trx_drops_per_sec\ttx_drops_per_sec\tlast_rx_ms\tlast_tx_ms\trx_gap_avg_ms\trx_gap_max_ms\ttx_gap_avg_ms\ttx_gap_max_ms\trx_queue_depth\ttx_queue_depth\n"
-        "%s\t%s\t%s\t%d\t%d\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%u\t%u\n",
+        "v3\n"
+        "label\taddress\tstate\talsa_rx_client_id\talsa_rx_port_id\talsa_tx_client_id\talsa_tx_port_id\tuptime_ms\twindow_ms\trx_packets\ttx_packets\trx_bytes\ttx_bytes\trx_drops\ttx_drops\trx_packets_per_sec\ttx_packets_per_sec\trx_bytes_per_sec\ttx_bytes_per_sec\trx_drops_per_sec\ttx_drops_per_sec\tlast_rx_ms\tlast_tx_ms\trx_gap_avg_ms\trx_gap_max_ms\ttx_gap_avg_ms\ttx_gap_max_ms\trx_queue_depth\ttx_queue_depth\n"
+        "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%u\t%u\n",
         label && *label ? label : "-",
         address && *address ? address : "-",
         state && *state ? state : "-",
-        alsa_client_id,
-        alsa_port_id,
+        alsa_rx_client_id,
+        alsa_rx_port_id,
+        alsa_tx_client_id,
+        alsa_tx_port_id,
         uptime_ms,
         window_ms,
         s->rx_packets,

@@ -83,16 +83,26 @@ static void orchestrator_stats_export_snapshot(MbOrchestrator *orc) {
     const char *label = app->cfg.name && *app->cfg.name ? app->cfg.name : "BLE-MIDI";
     const char *address = app->cfg.address && *app->cfg.address ? app->cfg.address : "-";
     const char *state = orchestrator_session_state_name(orc);
-    int alsa_client_id = app->seq ? snd_seq_client_id(app->seq) : -1;
-    int alsa_port_id = app->seq ? app->alsa_port : -1;
+
+    /*
+     * The current ALSA port is duplex, so RX and TX point to the same
+     * client:port today.  Keep the exported model split so future RX/TX
+     * ports do not require a stats format redesign.
+     */
+    int alsa_rx_client_id = app->seq ? snd_seq_client_id(app->seq) : -1;
+    int alsa_rx_port_id = app->seq ? app->alsa_port : -1;
+    int alsa_tx_client_id = app->seq ? snd_seq_client_id(app->seq) : -1;
+    int alsa_tx_port_id = app->seq ? app->alsa_port : -1;
 
     g_mutex_lock(&orc->stats_lock);
     bool ok = mb_stats_export_tsv(&orc->stats,
                                   label,
                                   address,
                                   state,
-                                  alsa_client_id,
-                                  alsa_port_id,
+                                  alsa_rx_client_id,
+                                  alsa_rx_port_id,
+                                  alsa_tx_client_id,
+                                  alsa_tx_port_id,
                                   mb_duplex_runtime_rx_depth(&orc->runtime),
                                   mb_duplex_runtime_tx_depth(&orc->runtime),
                                   now_ns,

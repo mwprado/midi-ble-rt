@@ -46,6 +46,13 @@ static bool stats_is_v2(const StatsTable *t) {
     return t && g_strcmp0(t->version, "v2") == 0;
 }
 
+static bool stats_is_v3(const StatsTable *t) {
+    return t && g_strcmp0(t->version, "v3") == 0;
+}
+
+static bool stats_has_window(const StatsTable *t) {
+    return stats_is_v2(t) || stats_is_v3(t);
+}
 static const char *stats_get(const StatsTable *t, const char *key) {
     if (!t || !key)
         return "-";
@@ -87,7 +94,8 @@ static bool read_stats_table(const char *path, StatsTable *out) {
 
     bool supported = lines &&
                      (g_strcmp0(lines[0], "v1") == 0 ||
-                      g_strcmp0(lines[0], "v2") == 0) &&
+                      g_strcmp0(lines[0], "v2") == 0 ||
+                      g_strcmp0(lines[0], "v3") == 0) &&
                      lines[1] && lines[2];
     if (!supported) {
         g_printerr("Unsupported or incomplete stats file: %s\n", path);
@@ -119,17 +127,26 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
     g_print("Session:    %s\n", stats_get(t, "label"));
     g_print("Address:    %s\n", stats_get(t, "address"));
     g_print("State:      %s\n", stats_get(t, "state"));
-    if (stats_is_v2(t)) {
+
+    if (stats_is_v3(t)) {
+        g_print("ALSA RX:    %s:%s\n",
+                stats_get(t, "alsa_rx_client_id"),
+                stats_get(t, "alsa_rx_port_id"));
+        g_print("ALSA TX:    %s:%s\n",
+                stats_get(t, "alsa_tx_client_id"),
+                stats_get(t, "alsa_tx_port_id"));
+    } else if (stats_is_v2(t)) {
         g_print("ALSA:       %s:%s\n",
                 stats_get(t, "alsa_client_id"),
                 stats_get(t, "alsa_port_id"));
     }
+
     g_print("Uptime:     %s ms\n", stats_get(t, "uptime_ms"));
-    if (stats_is_v2(t))
+    if (stats_has_window(t))
         g_print("Window:     %s ms\n", stats_get(t, "window_ms"));
     g_print("\n");
 
-    if (stats_is_v2(t)) {
+    if (stats_has_window(t)) {
         g_print("%-8s %12s %12s %12s %12s %12s %12s %12s\n",
                 "DIR", "PKT_WIN", "B_WIN", "DROP_WIN", "PKT/s", "B/s", "DROP/s", "QDEPTH");
         g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s %12s %12s\n",
@@ -168,6 +185,7 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
                 stats_get(t, "last_tx_ms"),
                 stats_get(t, "tx_queue_depth"));
     }
+
     g_print("\n");
 
     g_print("%-8s %12s %12s %12s\n", "DIR", "LAST_MS", "GAP_AVG_MS", "GAP_MAX_MS");
@@ -182,7 +200,6 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
             stats_get(t, "tx_gap_avg_ms"),
             stats_get(t, "tx_gap_max_ms"));
 }
-
 static int cmd_stats_print(const char *path) {
     StatsTable t;
     if (!read_stats_table(path, &t))
