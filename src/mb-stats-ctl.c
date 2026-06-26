@@ -17,6 +17,7 @@
 int midi_ble_rtctl_bluez_main(int argc, char **argv);
 
 typedef struct {
+    char *version;
     char **header;
     char **value;
     gsize n_header;
@@ -35,9 +36,14 @@ static gsize strv_len(char **v) {
 static void stats_table_clear(StatsTable *t) {
     if (!t)
         return;
+    g_free(t->version);
     g_strfreev(t->header);
     g_strfreev(t->value);
     memset(t, 0, sizeof(*t));
+}
+
+static bool stats_is_v2(const StatsTable *t) {
+    return t && g_strcmp0(t->version, "v2") == 0;
 }
 
 static const char *stats_get(const StatsTable *t, const char *key) {
@@ -57,6 +63,11 @@ static guint64 stats_u64(const StatsTable *t, const char *key) {
     return g_ascii_strtoull(s, NULL, 10);
 }
 
+static const char *stats_rate(const StatsTable *t, const char *key) {
+    const char *s = stats_get(t, key);
+    return s && *s ? s : "0.000";
+}
+
 static bool read_stats_table(const char *path, StatsTable *out) {
     char *content = NULL;
     GError *error = NULL;
@@ -74,12 +85,19 @@ static bool read_stats_table(const char *path, StatsTable *out) {
     char **lines = g_strsplit(content, "\n", 0);
     g_free(content);
 
-    if (!lines || g_strcmp0(lines[0], "v1") != 0 || !lines[1] || !lines[2]) {
+    bool supported = lines &&
+                     (g_strcmp0(lines[0], "v1") == 0 ||
+                      g_strcmp0(lines[0], "v2") == 0) &&
+                     lines[1] && lines[2];
+    if (!supported) {
         g_printerr("Unsupported or incomplete stats file: %s\n", path);
+        if (lines && lines[0])
+            g_printerr("Stats version found: %s\n", lines[0]);
         g_strfreev(lines);
         return false;
     }
 
+    out->version = g_strdup(lines[0]);
     out->header = g_strsplit(lines[1], "\t", 0);
     out->value = g_strsplit(lines[2], "\t", 0);
     out->n_header = strv_len(out->header);
@@ -97,33 +115,72 @@ static bool read_stats_table(const char *path, StatsTable *out) {
 
 static void print_stats_aligned(const char *path, const StatsTable *t) {
     g_print("Stats file: %s\n", path);
+    g_print("Format:     %s\n", t->version ? t->version : "-");
     g_print("Session:    %s\n", stats_get(t, "label"));
     g_print("Address:    %s\n", stats_get(t, "address"));
     g_print("State:      %s\n", stats_get(t, "state"));
+    if (stats_is_v2(t)) {
+        g_print("ALSA:       %s:%s\n",
+                stats_get(t, "alsa_client_id"),
+                stats_get(t, "alsa_port_id"));
+    }
     g_print("Uptime:     %s ms\n", stats_get(t, "uptime_ms"));
+    if (stats_is_v2(t))
+        g_print("Window:     %s ms\n", stats_get(t, "window_ms"));
     g_print("\n");
 
-    g_print("%-8s %12s %12s %12s %12s %12s\n",
-            "DIR", "PACKETS", "BYTES", "DROPS", "LAST_MS", "QDEPTH");
-    g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s\n",
+    if (stats_is_v2(t)) {
+        g_print("%-8s %12s %12s %12s %12s %12s %12s %12s\n",
+                "DIR", "PKT_WIN", "B_WIN", "DROP_WIN", "PKT/s", "B/s", "DROP/s", "QDEPTH");
+        g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s %12s %12s\n",
+                "RX",
+                stats_u64(t, "rx_packets"),
+                stats_u64(t, "rx_bytes"),
+                stats_u64(t, "rx_drops"),
+                stats_rate(t, "rx_packets_per_sec"),
+                stats_rate(t, "rx_bytes_per_sec"),
+                stats_rate(t, "rx_drops_per_sec"),
+                stats_get(t, "rx_queue_depth"));
+        g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s %12s %12s\n",
+                "TX",
+                stats_u64(t, "tx_packets"),
+                stats_u64(t, "tx_bytes"),
+                stats_u64(t, "tx_drops"),
+                stats_rate(t, "tx_packets_per_sec"),
+                stats_rate(t, "tx_bytes_per_sec"),
+                stats_rate(t, "tx_drops_per_sec"),
+                stats_get(t, "tx_queue_depth"));
+    } else {
+        g_print("%-8s %12s %12s %12s %12s %12s\n",
+                "DIR", "PACKETS", "BYTES", "DROPS", "LAST_MS", "QDEPTH");
+        g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s\n",
+                "RX",
+                stats_u64(t, "rx_packets"),
+                stats_u64(t, "rx_bytes"),
+                stats_u64(t, "rx_drops"),
+                stats_get(t, "last_rx_ms"),
+                stats_get(t, "rx_queue_depth"));
+        g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s\n",
+                "TX",
+                stats_u64(t, "tx_packets"),
+                stats_u64(t, "tx_bytes"),
+                stats_u64(t, "tx_drops"),
+                stats_get(t, "last_tx_ms"),
+                stats_get(t, "tx_queue_depth"));
+    }
+    g_print("\n");
+
+    g_print("%-8s %12s %12s %12s\n", "DIR", "LAST_MS", "GAP_AVG_MS", "GAP_MAX_MS");
+    g_print("%-8s %12s %12s %12s\n",
             "RX",
-            stats_u64(t, "rx_packets"),
-            stats_u64(t, "rx_bytes"),
-            stats_u64(t, "rx_drops"),
             stats_get(t, "last_rx_ms"),
-            stats_get(t, "rx_queue_depth"));
-    g_print("%-8s %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12" G_GUINT64_FORMAT " %12s %12s\n",
+            stats_get(t, "rx_gap_avg_ms"),
+            stats_get(t, "rx_gap_max_ms"));
+    g_print("%-8s %12s %12s %12s\n",
             "TX",
-            stats_u64(t, "tx_packets"),
-            stats_u64(t, "tx_bytes"),
-            stats_u64(t, "tx_drops"),
             stats_get(t, "last_tx_ms"),
-            stats_get(t, "tx_queue_depth"));
-    g_print("\n");
-
-    g_print("%-8s %12s %12s\n", "DIR", "GAP_AVG_MS", "GAP_MAX_MS");
-    g_print("%-8s %12s %12s\n", "RX", stats_get(t, "rx_gap_avg_ms"), stats_get(t, "rx_gap_max_ms"));
-    g_print("%-8s %12s %12s\n", "TX", stats_get(t, "tx_gap_avg_ms"), stats_get(t, "tx_gap_max_ms"));
+            stats_get(t, "tx_gap_avg_ms"),
+            stats_get(t, "tx_gap_max_ms"));
 }
 
 static int cmd_stats_print(const char *path) {

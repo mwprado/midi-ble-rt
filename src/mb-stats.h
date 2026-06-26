@@ -10,12 +10,16 @@
 G_BEGIN_DECLS
 
 typedef struct {
+    /* Window counters. They are reset after each stats export. */
     uint64_t rx_packets;
     uint64_t tx_packets;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
     uint64_t rx_drops;
     uint64_t tx_drops;
+    uint64_t window_started_ns;
+
+    /* Timing diagnostics since daemon start. */
     uint64_t last_rx_ns;
     uint64_t last_tx_ns;
     uint64_t rx_gap_avg_ns;
@@ -41,10 +45,12 @@ void mb_stats_rx_drop(MbStats *stats);
 void mb_stats_tx_drop(MbStats *stats);
 
 char *mb_stats_default_path(void);
-bool mb_stats_export_tsv(const MbStats *stats,
+bool mb_stats_export_tsv(MbStats *stats,
                          const char *label,
                          const char *address,
                          const char *state,
+                         int alsa_client_id,
+                         int alsa_port_id,
                          unsigned rx_queue_depth,
                          unsigned tx_queue_depth,
                          uint64_t now_ns,
