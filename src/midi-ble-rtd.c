@@ -28,12 +28,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BLUEZ_BUS              "org.bluez"
-#define OBJECT_MANAGER_IFACE   "org.freedesktop.DBus.ObjectManager"
-#define PROPERTIES_IFACE       "org.freedesktop.DBus.Properties"
-#define DEVICE_IFACE           "org.bluez.Device1"
-#define GATT_SERVICE_IFACE     "org.bluez.GattService1"
-#define GATT_CHRC_IFACE        "org.bluez.GattCharacteristic1"
+#include "mb-bluez.h"
+#include "mb-config.h"
+#include "mb-alsa-port.h"
+#include "mb-alsa.h"
+#include "mb-gatt-midi.h"
 
 typedef struct {
     char *address;
@@ -77,79 +76,16 @@ typedef struct {
     uint8_t running_status;
 } App;
 
-static char *keyfile_get_string_default(GKeyFile *kf, const char *group, const char *key, const char *fallback) {
-    GError *error = NULL;
-    char *value = g_key_file_get_string(kf, group, key, &error);
-    if (error) {
-        g_clear_error(&error);
-        return g_strdup(fallback);
-    }
-    return value;
-}
-
-static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char *key, bool fallback) {
-    GError *error = NULL;
-    gboolean value = g_key_file_get_boolean(kf, group, key, &error);
-    if (error) {
-        g_clear_error(&error);
-        return fallback;
-    }
-    return value;
-}
-
 static bool load_config(Config *cfg, const char *path) {
-    GKeyFile *kf = g_key_file_new();
-    GError *error = NULL;
-
-    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
-        g_printerr("Failed to load config %s: %s\n", path, error->message);
-        g_clear_error(&error);
-        g_key_file_unref(kf);
-        return false;
-    }
-
-    cfg->address = keyfile_get_string_default(kf, "device", "address", "");
-    cfg->name = keyfile_get_string_default(kf, "device", "name", "");
-    cfg->pair = keyfile_get_bool_default(kf, "device", "pair", false);
-    cfg->trust = keyfile_get_bool_default(kf, "device", "trust", true);
-    cfg->auto_reconnect = keyfile_get_bool_default(kf, "device", "auto_reconnect", true);
-
-    cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
-        "03b80e5a-ede8-4b33-a751-6ce34ec4c700");
-    cfg->io_uuid = keyfile_get_string_default(kf, "gatt", "io_uuid",
-        "7772e5db-3868-4112-a1a9-f2669d106bf3");
-    cfg->io_uuid_alias = keyfile_get_string_default(kf, "gatt", "io_uuid_alias",
-        "00006bf3-0000-1000-8000-00805f9b34fb");
-    cfg->require_notify = keyfile_get_bool_default(kf, "gatt", "require_notify", true);
-    cfg->require_write_without_response = keyfile_get_bool_default(kf, "gatt", "require_write_without_response", true);
-
-    cfg->alsa_client_name = keyfile_get_string_default(kf, "alsa", "client_name", "midi-ble-rt");
-    cfg->alsa_port_name = keyfile_get_string_default(kf, "alsa", "port_name", "BLE-MIDI In");
-
-    cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
-    cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
-    cfg->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", true);
-
-    g_key_file_unref(kf);
-    return true;
+    return mb_config_load((MbConfig *)cfg, path);
 }
 
 static void free_config(Config *cfg) {
-    g_free(cfg->address);
-    g_free(cfg->name);
-    g_free(cfg->service_uuid);
-    g_free(cfg->io_uuid);
-    g_free(cfg->io_uuid_alias);
-    g_free(cfg->alsa_client_name);
-    g_free(cfg->alsa_port_name);
+    mb_config_clear((MbConfig *)cfg);
 }
 
 static bool uuid_equal(const char *a, const char *b) {
     return a && b && g_ascii_strcasecmp(a, b) == 0;
-}
-
-static bool path_has_prefix(const char *path, const char *prefix) {
-    return path && prefix && g_str_has_prefix(path, prefix);
 }
 
 static bool string_contains_casefold(const char *haystack, const char *needle) {
@@ -165,38 +101,7 @@ static bool string_contains_casefold(const char *haystack, const char *needle) {
 }
 
 static GVariant *get_managed_objects(App *app) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, "/", OBJECT_MANAGER_IFACE, "GetManagedObjects",
-        NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-        G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("GetManagedObjects failed: %s\n", error->message);
-        g_clear_error(&error);
-        return NULL;
-    }
-
-    GVariant *objects = g_variant_get_child_value(ret, 0);
-    g_variant_unref(ret);
-    return objects;
-}
-
-static bool string_array_contains_exact(GVariant *array, const char *value) {
-    if (!array)
-        return false;
-
-    GVariantIter iter;
-    const char *s = NULL;
-
-    g_variant_iter_init(&iter, array);
-    while (g_variant_iter_next(&iter, "&s", &s)) {
-        if (g_strcmp0(s, value) == 0)
-            return true;
-    }
-
-    return false;
+    return mb_bluez_get_managed_objects(app->bus);
 }
 
 static bool string_array_contains_uuid(GVariant *array, const char *uuid) {
@@ -289,300 +194,44 @@ static char *find_device(App *app) {
 }
 
 static bool get_device_bool_property(App *app, const char *property, bool *out) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, PROPERTIES_IFACE, "Get",
-        g_variant_new("(ss)", DEVICE_IFACE, property),
-        G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Get Device1.%s failed: %s\n", property, error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    GVariant *value = NULL;
-    g_variant_get(ret, "(v)", &value);
-    *out = g_variant_get_boolean(value);
-
-    g_variant_unref(value);
-    g_variant_unref(ret);
-    return true;
+    return mb_bluez_get_device_bool_property(app->bus, app->device_path, property, out);
 }
 
 static bool set_device_trusted(App *app) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, PROPERTIES_IFACE, "Set",
-        g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(TRUE)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Set Trusted=true failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Trusted=true set.\n");
-    return true;
+    return mb_bluez_set_device_trusted(app->bus, app->device_path);
 }
 
 static bool pair_device(App *app) {
-    bool paired = false;
-    if (get_device_bool_property(app, "Paired", &paired) && paired) {
-        g_print("Device already paired.\n");
-        return true;
-    }
-
-    GError *error = NULL;
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Device Pair() failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Device Pair() ok.\n");
-    return true;
+    return mb_bluez_pair_device(app->bus, app->device_path);
 }
 
 static bool connect_device(App *app) {
-    bool connected = false;
-    if (get_device_bool_property(app, "Connected", &connected) && connected) {
-        g_print("Device already connected.\n");
-        return true;
-    }
-
-    GError *error = NULL;
-    g_print("Device Connected=false; calling Device1.Connect()...\n");
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, DEVICE_IFACE, "Connect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
-
-    if (!ret) {
-        const char *remote = g_dbus_error_get_remote_error(error);
-        if (remote &&
-            (g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0 ||
-             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0)) {
-            g_print("Device already connected or in progress.\n");
-            g_clear_error(&error);
-            return true;
-        }
-
-        g_printerr("Device Connect() failed: %s\n", error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    g_variant_unref(ret);
-    g_print("Device Connect() ok.\n");
-    return true;
+    return mb_bluez_connect_device(app->bus, app->device_path);
 }
 
 static bool wait_services_resolved(App *app, int timeout_ms) {
-    const int step_ms = 100;
-    int elapsed = 0;
-
-    while (elapsed < timeout_ms) {
-        bool resolved = false;
-        if (get_device_bool_property(app, "ServicesResolved", &resolved) && resolved) {
-            g_print("ServicesResolved=true.\n");
-            return true;
-        }
-
-        g_usleep(step_ms * 1000);
-        elapsed += step_ms;
-    }
-
-    g_printerr("Timed out waiting for ServicesResolved=true.\n");
-    return false;
+    return mb_bluez_wait_services_resolved(app->bus, app->device_path, timeout_ms);
 }
 
 static char *find_ble_midi_service(App *app) {
-    GVariant *objects = get_managed_objects(app);
-    if (!objects)
-        return NULL;
-
-    GVariantIter iter;
-    const char *path = NULL;
-    GVariant *ifaces = NULL;
-    char *found = NULL;
-
-    g_variant_iter_init(&iter, objects);
-    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
-        if (!path_has_prefix(path, app->device_path)) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *props = g_variant_lookup_value(ifaces, GATT_SERVICE_IFACE, G_VARIANT_TYPE("a{sv}"));
-        if (!props) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *v_uuid = g_variant_lookup_value(props, "UUID", G_VARIANT_TYPE_STRING);
-        const char *uuid = v_uuid ? g_variant_get_string(v_uuid, NULL) : NULL;
-
-        if (uuid_equal(uuid, app->cfg.service_uuid)) {
-            found = g_strdup(path);
-            g_print("Found BLE-MIDI service: %s\n", found);
-        }
-
-        if (v_uuid) g_variant_unref(v_uuid);
-        g_variant_unref(props);
-        g_variant_unref(ifaces);
-
-        if (found)
-            break;
-    }
-
-    g_variant_unref(objects);
-    return found;
+    return mb_gatt_midi_find_service(app->bus, app->device_path, app->cfg.service_uuid);
 }
 
 static char *find_ble_midi_characteristic(App *app) {
-    GVariant *objects = get_managed_objects(app);
-    if (!objects)
-        return NULL;
-
-    GVariantIter iter;
-    const char *path = NULL;
-    GVariant *ifaces = NULL;
-    char *best = NULL;
-    int best_score = -1;
-
-    g_variant_iter_init(&iter, objects);
-    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
-        if (!path_has_prefix(path, app->device_path)) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *props = g_variant_lookup_value(ifaces, GATT_CHRC_IFACE, G_VARIANT_TYPE("a{sv}"));
-        if (!props) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        GVariant *v_uuid = g_variant_lookup_value(props, "UUID", G_VARIANT_TYPE_STRING);
-        GVariant *v_service = g_variant_lookup_value(props, "Service", G_VARIANT_TYPE_OBJECT_PATH);
-        GVariant *v_flags = g_variant_lookup_value(props, "Flags", G_VARIANT_TYPE("as"));
-        GVariant *v_mtu = g_variant_lookup_value(props, "MTU", G_VARIANT_TYPE_UINT16);
-
-        const char *uuid = v_uuid ? g_variant_get_string(v_uuid, NULL) : NULL;
-        const char *service = v_service ? g_variant_get_string(v_service, NULL) : NULL;
-        guint16 mtu = v_mtu ? g_variant_get_uint16(v_mtu) : 0;
-
-        bool in_service = g_strcmp0(service, app->service_path) == 0;
-        bool official = uuid_equal(uuid, app->cfg.io_uuid);
-        bool alias = uuid_equal(uuid, app->cfg.io_uuid_alias);
-        bool notify = string_array_contains_exact(v_flags, "notify");
-        bool indicate = string_array_contains_exact(v_flags, "indicate");
-        bool write_cmd = string_array_contains_exact(v_flags, "write-without-response");
-        bool write_req = string_array_contains_exact(v_flags, "write");
-        bool read = string_array_contains_exact(v_flags, "read");
-
-        if (in_service) {
-            int score = 0;
-            if (official) score += 1000;
-            if (alias) score += 950;
-            if (notify || indicate) score += 100;
-            if (write_cmd) score += 100;
-            if (write_req) score += 20;
-            if (read) score += 20;
-            if (!official && !alias && (notify || indicate) && write_cmd) score += 500;
-
-            g_print("Characteristic under BLE-MIDI service: %s\n", path);
-            g_print("  UUID: %s%s%s\n", uuid ? uuid : "(none)",
-                    official ? " [official]" : "",
-                    alias ? " [alias]" : "");
-            g_print("  Flags:");
-            if (v_flags) {
-                GVariantIter flags_iter;
-                const char *flag = NULL;
-                g_variant_iter_init(&flags_iter, v_flags);
-                while (g_variant_iter_next(&flags_iter, "&s", &flag))
-                    g_print(" %s", flag);
-            }
-            g_print("\n");
-            if (mtu)
-                g_print("  MTU: %u\n", mtu);
-            g_print("  Score: %d\n", score);
-
-            if (score > best_score) {
-                g_free(best);
-                best = g_strdup(path);
-                best_score = score;
-            }
-        }
-
-        if (v_uuid) g_variant_unref(v_uuid);
-        if (v_service) g_variant_unref(v_service);
-        if (v_flags) g_variant_unref(v_flags);
-        if (v_mtu) g_variant_unref(v_mtu);
-        g_variant_unref(props);
-        g_variant_unref(ifaces);
-    }
-
-    g_variant_unref(objects);
-
-    if (best)
-        g_print("Selected BLE-MIDI I/O characteristic: %s\n", best);
-
-    return best;
+    return mb_gatt_midi_find_characteristic(app->bus,
+                                            app->device_path,
+                                            app->service_path,
+                                            app->cfg.io_uuid,
+                                            app->cfg.io_uuid_alias);
 }
 
 static bool alsa_init(App *app) {
-    int err = snd_seq_open(&app->seq, "default", SND_SEQ_OPEN_DUPLEX, SND_SEQ_NONBLOCK);
-    if (err < 0) {
-        g_printerr("snd_seq_open(default) failed: %s\n", snd_strerror(err));
-        return false;
-    }
-
-    snd_seq_set_client_name(app->seq, app->cfg.alsa_client_name);
-
-    app->alsa_port = snd_seq_create_simple_port(
-        app->seq,
-        app->cfg.alsa_port_name,
-        SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ |
-        SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE,
-        SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
-
-    if (app->alsa_port < 0) {
-        g_printerr("snd_seq_create_simple_port failed: %s\n", snd_strerror(app->alsa_port));
-        return false;
-    }
-
-    err = snd_midi_event_new(2048, &app->alsa_midi_encoder);
-    if (err < 0) {
-        g_printerr("snd_midi_event_new encoder failed: %s\n", snd_strerror(err));
-        return false;
-    }
-
-    err = snd_midi_event_new(2048, &app->alsa_midi_decoder);
-    if (err < 0) {
-        g_printerr("snd_midi_event_new decoder failed: %s\n", snd_strerror(err));
-        return false;
-    }
-
-    snd_midi_event_init(app->alsa_midi_encoder);
-    snd_midi_event_init(app->alsa_midi_decoder);
-
-    g_print("ALSA Sequencer duplex port created: %s:%s\n",
-            app->cfg.alsa_client_name, app->cfg.alsa_port_name);
-    g_print("  READ  side: BLE-MIDI -> ALSA clients, e.g. aseqdump -p <client>:<port>\n");
-    g_print("  WRITE side: ALSA clients -> BLE-MIDI, e.g. aplaymidi -p <client>:<port> file.mid\n");
-    return true;
+    return mb_alsa_port_open_duplex(&app->seq,
+                                    &app->alsa_port,
+                                    &app->alsa_midi_encoder,
+                                    &app->alsa_midi_decoder,
+                                    app->cfg.alsa_client_name,
+                                    app->cfg.alsa_port_name);
 }
 
 static void alsa_emit_midi_byte(App *app, uint8_t byte) {
@@ -746,26 +395,13 @@ static bool ble_midi_write_packet(App *app, const uint8_t *midi, size_t len) {
             g_print("\n");
         }
 
-        GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
-                                                    packet, packet_len,
-                                                    sizeof(guint8));
-        GVariantBuilder options;
-        g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-        g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
-
-        GError *error = NULL;
-        GVariant *ret = g_dbus_connection_call_sync(
-            app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "WriteValue",
-            g_variant_new("(@aya{sv})", value, &options),
-            NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-        if (!ret) {
-            g_printerr("WriteValue failed: %s\n", error->message);
-            g_clear_error(&error);
+        if (!mb_gatt_midi_write_value_command(app->bus,
+                                               app->char_path,
+                                               packet,
+                                               packet_len,
+                                               5000)) {
             return false;
         }
-
-        g_variant_unref(ret);
         off += chunk;
     }
 
@@ -777,64 +413,6 @@ static void print_midi_bytes(const char *prefix, const uint8_t *bytes, size_t le
     for (size_t i = 0; i < len; i++)
         g_print(" %02x", bytes[i]);
     g_print("\n");
-}
-
-static bool alsa_event_is_midi_payload(const snd_seq_event_t *ev) {
-    switch (ev->type) {
-        case SND_SEQ_EVENT_NOTE:
-        case SND_SEQ_EVENT_NOTEON:
-        case SND_SEQ_EVENT_NOTEOFF:
-        case SND_SEQ_EVENT_KEYPRESS:
-        case SND_SEQ_EVENT_CONTROLLER:
-        case SND_SEQ_EVENT_PGMCHANGE:
-        case SND_SEQ_EVENT_CHANPRESS:
-        case SND_SEQ_EVENT_PITCHBEND:
-        case SND_SEQ_EVENT_CONTROL14:
-        case SND_SEQ_EVENT_NONREGPARAM:
-        case SND_SEQ_EVENT_REGPARAM:
-        case SND_SEQ_EVENT_SONGPOS:
-        case SND_SEQ_EVENT_SONGSEL:
-        case SND_SEQ_EVENT_QFRAME:
-        case SND_SEQ_EVENT_TIMESIGN:
-        case SND_SEQ_EVENT_KEYSIGN:
-        case SND_SEQ_EVENT_START:
-        case SND_SEQ_EVENT_CONTINUE:
-        case SND_SEQ_EVENT_STOP:
-        case SND_SEQ_EVENT_SETPOS_TICK:
-        case SND_SEQ_EVENT_SETPOS_TIME:
-        case SND_SEQ_EVENT_TEMPO:
-        case SND_SEQ_EVENT_CLOCK:
-        case SND_SEQ_EVENT_TICK:
-        case SND_SEQ_EVENT_TUNE_REQUEST:
-        case SND_SEQ_EVENT_RESET:
-        case SND_SEQ_EVENT_SENSING:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static const char *alsa_event_type_name(int type) {
-    switch (type) {
-        case SND_SEQ_EVENT_PORT_SUBSCRIBED:
-            return "PORT_SUBSCRIBED";
-        case SND_SEQ_EVENT_PORT_UNSUBSCRIBED:
-            return "PORT_UNSUBSCRIBED";
-        case SND_SEQ_EVENT_CLIENT_START:
-            return "CLIENT_START";
-        case SND_SEQ_EVENT_CLIENT_EXIT:
-            return "CLIENT_EXIT";
-        case SND_SEQ_EVENT_CLIENT_CHANGE:
-            return "CLIENT_CHANGE";
-        case SND_SEQ_EVENT_PORT_START:
-            return "PORT_START";
-        case SND_SEQ_EVENT_PORT_EXIT:
-            return "PORT_EXIT";
-        case SND_SEQ_EVENT_PORT_CHANGE:
-            return "PORT_CHANGE";
-        default:
-            return "non-MIDI/control";
-    }
 }
 
 static gboolean alsa_rx_poll_cb(gpointer user_data) {
@@ -858,10 +436,10 @@ static gboolean alsa_rx_poll_cb(gpointer user_data) {
         if (!ev)
             break;
 
-        if (!alsa_event_is_midi_payload(ev)) {
+        if (!mb_alsa_event_is_midi_payload(ev)) {
             if (app->cfg.print_midi_events)
                 g_print("Ignoring ALSA Sequencer control event type %d (%s).\n",
-                        ev->type, alsa_event_type_name(ev->type));
+                        ev->type, mb_alsa_event_type_name(ev->type));
             continue;
         }
 
@@ -918,10 +496,10 @@ static void on_properties_changed(GDBusConnection *connection, const gchar *send
 static bool start_notify(App *app) {
     GError *error = NULL;
 
-    guint sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->char_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        on_properties_changed, app, NULL);
+    guint sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                         app->char_path,
+                                                         on_properties_changed,
+                                                         app);
 
     if (sub_id == 0) {
         g_printerr("Failed to subscribe to PropertiesChanged.\n");
@@ -931,19 +509,13 @@ static bool start_notify(App *app) {
     g_print("Subscribing to BlueZ PropertiesChanged for %s.\n", app->char_path);
     g_print("Calling StartNotify on %s.\n", app->char_path);
 
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "StartNotify",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("StartNotify failed: %s\n", error->message);
+    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, 15000, &error)) {
+        g_printerr("StartNotify failed: %s\n", error ? error->message : "unknown error");
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
         g_printerr("If TX works but RX is silent after reconnects, restart bluetooth and midi-ble-rtd to clear stale BlueZ GATT state.\n");
         g_clear_error(&error);
         return false;
     }
-
-    g_variant_unref(ret);
     g_print("StartNotify ok on %s. ALSA MIDI port is ready.\n", app->char_path);
     return true;
 }
@@ -951,12 +523,9 @@ static bool start_notify(App *app) {
 static void app_cleanup(App *app) {
     if (app->alsa_rx_source_id)
         g_source_remove(app->alsa_rx_source_id);
-    if (app->alsa_midi_decoder)
-        snd_midi_event_free(app->alsa_midi_decoder);
-    if (app->alsa_midi_encoder)
-        snd_midi_event_free(app->alsa_midi_encoder);
-    if (app->seq)
-        snd_seq_close(app->seq);
+    mb_alsa_port_close(&app->seq,
+                       &app->alsa_midi_encoder,
+                       &app->alsa_midi_decoder);
     if (app->loop)
         g_main_loop_unref(app->loop);
     if (app->bus)

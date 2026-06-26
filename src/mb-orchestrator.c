@@ -1,20 +1,27 @@
 /*
  * Runtime/session orchestrator for midi-ble-rtd.
  *
- * This layer owns the threaded duplex data path.  It currently reuses the
- * legacy daemon core by including midi-ble-rtd.c with its main() renamed; the
- * next refactor step is to move those lower-level static helpers into explicit
- * core modules.  The public binary is now a single daemon: midi-ble-rtd.
+ * Responsibility boundary:
+ *   - owns the high-level session lifecycle;
+ *   - connects BlueZ/GATT discovery to the runtime dataplane;
+ *   - connects ALSA Sequencer I/O to BLE-MIDI transport;
+ *   - exports operational stats.
+ *
+ * Temporary cleanup debt:
+ *   This file still includes midi-ble-rtd.c after renaming its main().
+ *   That keeps the validated behavior intact while the legacy helpers are
+ *   extracted into explicit modules.  Do not add new functionality through
+ *   this coupling; remove the coupling in small cleanup commits.
  */
 
 #include "mb-orchestrator.h"
 
-#define main midi_ble_rtd_legacy_main
-#include "midi-ble-rtd.c"
-#undef main
+#include "mb-legacy-core.h"
 
 #include "mb-alsa.h"
+#include "mb-bluez.h"
 #include "mb-ble-midi.h"
+#include "mb-gatt-midi.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
 #include "mb-session.h"
@@ -206,28 +213,15 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
             g_print("\n");
         }
 
-        GVariant *value = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE,
-                                                    packet, packet_len,
-                                                    sizeof(guint8));
-        GVariantBuilder options;
-        g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-        g_variant_builder_add(&options, "{sv}", "type", g_variant_new_string("command"));
-
-        GError *error = NULL;
-        GVariant *ret = g_dbus_connection_call_sync(
-            app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "WriteValue",
-            g_variant_new("(@aya{sv})", value, &options),
-            NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-        if (!ret) {
-            g_printerr("WriteValue failed: %s\n", error->message);
-            g_clear_error(&error);
+        if (!mb_gatt_midi_write_value_command(app->bus,
+                                               app->char_path,
+                                               packet,
+                                               packet_len,
+                                               5000)) {
             orchestrator_stats_tx_drop(orc);
             orchestrator_session_event(orc, MB_EV_GATT_WRITE_FAILED);
             return false;
         }
-
-        g_variant_unref(ret);
         orchestrator_stats_tx_packet(orc, chunk, orchestrator_now_ns());
         off += chunk;
     }
@@ -403,10 +397,10 @@ static bool orchestrator_start_device_watch(MbOrchestrator *orc) {
     if (!app->device_path)
         return false;
 
-    orc->device_sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->device_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        orchestrator_on_properties_changed, orc, NULL);
+    orc->device_sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                              app->device_path,
+                                                              orchestrator_on_properties_changed,
+                                                              orc);
 
     if (orc->device_sub_id == 0) {
         g_printerr("Failed to subscribe to Device1 PropertiesChanged.\n");
@@ -422,28 +416,22 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
 
     orchestrator_stop_notify(orc);
 
-    orc->notify_sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->char_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        orchestrator_on_properties_changed, orc, NULL);
+    orc->notify_sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                              app->char_path,
+                                                              orchestrator_on_properties_changed,
+                                                              orc);
 
     if (orc->notify_sub_id == 0) {
         g_printerr("Failed to subscribe to GattCharacteristic1 PropertiesChanged.\n");
         return false;
     }
 
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->char_path, GATT_CHRC_IFACE, "StartNotify",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("StartNotify failed: %s\n", error->message);
+    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, 15000, &error)) {
+        g_printerr("StartNotify failed: %s\n", error ? error->message : "unknown error");
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
         g_clear_error(&error);
         return false;
     }
-
-    g_variant_unref(ret);
     g_print("StartNotify ok. Orchestrated ALSA MIDI port is ready.\n");
     return true;
 }
