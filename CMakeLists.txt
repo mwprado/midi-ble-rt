@@ -10,7 +10,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
 
-add_library(midi-ble-rt-core
+add_library(midi-ble-rt-core STATIC
     src/mb-alsa.c
     src/mb-ble-midi.c
     src/mb-buffer.c
