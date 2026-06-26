@@ -554,10 +554,10 @@ static void on_properties_changed(GDBusConnection *connection, const gchar *send
 static bool start_notify(App *app) {
     GError *error = NULL;
 
-    guint sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->char_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        on_properties_changed, app, NULL);
+    guint sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                         app->char_path,
+                                                         on_properties_changed,
+                                                         app);
 
     if (sub_id == 0) {
         g_printerr("Failed to subscribe to PropertiesChanged.\n");

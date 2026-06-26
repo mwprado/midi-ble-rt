@@ -139,3 +139,23 @@ bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_pa
     g_printerr("Timed out waiting for ServicesResolved=true.\n");
     return false;
 }
+
+guint mb_bluez_subscribe_properties_changed(GDBusConnection *bus,
+                                            const char *object_path,
+                                            GDBusSignalCallback callback,
+                                            gpointer user_data) {
+    if (!bus || !object_path || !callback)
+        return 0;
+
+    return g_dbus_connection_signal_subscribe(
+        bus,
+        BLUEZ_BUS,
+        PROPERTIES_IFACE,
+        "PropertiesChanged",
+        object_path,
+        NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE,
+        callback,
+        user_data,
+        NULL);
+}

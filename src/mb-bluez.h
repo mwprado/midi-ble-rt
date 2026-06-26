@@ -27,4 +27,9 @@ bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path);
 bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path);
 bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_path, int timeout_ms);
 
+guint mb_bluez_subscribe_properties_changed(GDBusConnection *bus,
+                                            const char *object_path,
+                                            GDBusSignalCallback callback,
+                                            gpointer user_data);
+
 #endif /* MB_BLUEZ_H */

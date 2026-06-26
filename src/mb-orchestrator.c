@@ -397,10 +397,10 @@ static bool orchestrator_start_device_watch(MbOrchestrator *orc) {
     if (!app->device_path)
         return false;
 
-    orc->device_sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->device_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        orchestrator_on_properties_changed, orc, NULL);
+    orc->device_sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                              app->device_path,
+                                                              orchestrator_on_properties_changed,
+                                                              orc);
 
     if (orc->device_sub_id == 0) {
         g_printerr("Failed to subscribe to Device1 PropertiesChanged.\n");
@@ -416,10 +416,10 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
 
     orchestrator_stop_notify(orc);
 
-    orc->notify_sub_id = g_dbus_connection_signal_subscribe(
-        app->bus, BLUEZ_BUS, PROPERTIES_IFACE, "PropertiesChanged",
-        app->char_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
-        orchestrator_on_properties_changed, orc, NULL);
+    orc->notify_sub_id = mb_bluez_subscribe_properties_changed(app->bus,
+                                                              app->char_path,
+                                                              orchestrator_on_properties_changed,
+                                                              orc);
 
     if (orc->notify_sub_id == 0) {
         g_printerr("Failed to subscribe to GattCharacteristic1 PropertiesChanged.\n");
