@@ -146,10 +146,6 @@ static bool uuid_equal(const char *a, const char *b) {
     return a && b && g_ascii_strcasecmp(a, b) == 0;
 }
 
-static bool path_has_prefix(const char *path, const char *prefix) {
-    return path && prefix && g_str_has_prefix(path, prefix);
-}
-
 static bool string_contains_casefold(const char *haystack, const char *needle) {
     if (!haystack || !needle || !*needle)
         return false;
@@ -164,22 +160,6 @@ static bool string_contains_casefold(const char *haystack, const char *needle) {
 
 static GVariant *get_managed_objects(App *app) {
     return mb_bluez_get_managed_objects(app->bus);
-}
-
-static bool string_array_contains_exact(GVariant *array, const char *value) {
-    if (!array)
-        return false;
-
-    GVariantIter iter;
-    const char *s = NULL;
-
-    g_variant_iter_init(&iter, array);
-    while (g_variant_iter_next(&iter, "&s", &s)) {
-        if (g_strcmp0(s, value) == 0)
-            return true;
-    }
-
-    return false;
 }
 
 static bool string_array_contains_uuid(GVariant *array, const char *uuid) {
