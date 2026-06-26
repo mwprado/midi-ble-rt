@@ -581,12 +581,9 @@ static bool start_notify(App *app) {
 static void app_cleanup(App *app) {
     if (app->alsa_rx_source_id)
         g_source_remove(app->alsa_rx_source_id);
-    if (app->alsa_midi_decoder)
-        snd_midi_event_free(app->alsa_midi_decoder);
-    if (app->alsa_midi_encoder)
-        snd_midi_event_free(app->alsa_midi_encoder);
-    if (app->seq)
-        snd_seq_close(app->seq);
+    mb_alsa_port_close(&app->seq,
+                       &app->alsa_midi_encoder,
+                       &app->alsa_midi_decoder);
     if (app->loop)
         g_main_loop_unref(app->loop);
     if (app->bus)

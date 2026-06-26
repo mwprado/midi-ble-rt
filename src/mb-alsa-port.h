@@ -19,4 +19,8 @@ bool mb_alsa_port_open_duplex(snd_seq_t **seq,
                               const char *client_name,
                               const char *port_name);
 
+void mb_alsa_port_close(snd_seq_t **seq,
+                        snd_midi_event_t **encoder,
+                        snd_midi_event_t **decoder);
+
 #endif /* MB_ALSA_PORT_H */

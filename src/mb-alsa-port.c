@@ -50,3 +50,22 @@ bool mb_alsa_port_open_duplex(snd_seq_t **seq,
 
     return true;
 }
+
+void mb_alsa_port_close(snd_seq_t **seq,
+                        snd_midi_event_t **encoder,
+                        snd_midi_event_t **decoder) {
+    if (decoder && *decoder) {
+        snd_midi_event_free(*decoder);
+        *decoder = NULL;
+    }
+
+    if (encoder && *encoder) {
+        snd_midi_event_free(*encoder);
+        *encoder = NULL;
+    }
+
+    if (seq && *seq) {
+        snd_seq_close(*seq);
+        *seq = NULL;
+    }
+}
