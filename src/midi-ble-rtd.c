@@ -160,22 +160,7 @@ static bool string_contains_casefold(const char *haystack, const char *needle) {
 }
 
 static GVariant *get_managed_objects(App *app) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, "/", OBJECT_MANAGER_IFACE, "GetManagedObjects",
-        NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-        G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("GetManagedObjects failed: %s\n", error->message);
-        g_clear_error(&error);
-        return NULL;
-    }
-
-    GVariant *objects = g_variant_get_child_value(ret, 0);
-    g_variant_unref(ret);
-    return objects;
+    return mb_bluez_get_managed_objects(app->bus);
 }
 
 static bool string_array_contains_exact(GVariant *array, const char *value) {
