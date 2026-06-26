@@ -269,27 +269,7 @@ static char *find_device(App *app) {
 }
 
 static bool get_device_bool_property(App *app, const char *property, bool *out) {
-    GError *error = NULL;
-
-    GVariant *ret = g_dbus_connection_call_sync(
-        app->bus, BLUEZ_BUS, app->device_path, PROPERTIES_IFACE, "Get",
-        g_variant_new("(ss)", DEVICE_IFACE, property),
-        G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-
-    if (!ret) {
-        g_printerr("Get Device1.%s failed: %s\n", property, error->message);
-        g_clear_error(&error);
-        return false;
-    }
-
-    GVariant *value = NULL;
-    g_variant_get(ret, "(v)", &value);
-    *out = g_variant_get_boolean(value);
-
-    g_variant_unref(value);
-    g_variant_unref(ret);
-    return true;
+    return mb_bluez_get_device_bool_property(app->bus, app->device_path, property, out);
 }
 
 static bool set_device_trusted(App *app) {
