@@ -61,6 +61,13 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.3-2
+- Consolidate cleanup branches into master.
+- Keep midi-ble-rt-core as an internal statically linked library.
+- Avoid runtime dependency on libmidi-ble-rt-core.so.
+- Add generic BLE-MIDI device documentation.
+- Confirm Fedora RPM installation works on real laptop setup.
+
 * Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.2-2
 - Harden Fedora package against private core shared-library dependency.
 - Keep midi-ble-rt-core linked statically into installed executables.
