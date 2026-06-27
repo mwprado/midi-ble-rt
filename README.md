@@ -14,13 +14,15 @@ GATT `WriteValue`.
 The core BLE-MIDI data path does not depend on PipeWire. PipeWire is expected to
 consume the ALSA MIDI ports exported by this daemon.
 
-The first validated target is the Roland GO:KEYS family.
+The first validated hardware target is the Roland GO:KEYS family, but the
+project target is any usable BLE-MIDI instrument, controller, module or adapter.
 
-For developer architecture notes, state diagrams, multi-keyboard identity rules
-and test internals, see [`DEVELOPERS.md`](DEVELOPERS.md). For the daemon layer
-split, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For timeout,
-reconnect and session telemetry behavior, see
-[`docs/SESSION_RESILIENCE.md`](docs/SESSION_RESILIENCE.md).
+For a generic device tutorial using the standard BLE-MIDI configuration, see
+[`docs/GENERIC_BLE_MIDI_DEVICE.md`](docs/GENERIC_BLE_MIDI_DEVICE.md). For
+developer architecture notes, state diagrams, multi-device identity rules and
+test internals, see [`DEVELOPERS.md`](DEVELOPERS.md). For the daemon layer split,
+see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For timeout, reconnect and
+session telemetry behavior, see [`docs/SESSION_RESILIENCE.md`](docs/SESSION_RESILIENCE.md).
 
 ## Architecture overview
 
@@ -32,7 +34,7 @@ BLE-MIDI device <-> BlueZ/GATT <-> midi-ble-rtd <-> ALSA Sequencer <-> PipeWire/
 
 ```mermaid
 flowchart LR
-    K[BLE-MIDI keyboard] <--> B[BlueZ / GATT]
+    M[BLE-MIDI device] <--> B[BlueZ / GATT]
     B <--> D[midi-ble-rtd]
     D <--> A[ALSA Sequencer]
     A <--> P[PipeWire / WirePlumber / aseqdump / aplaymidi / DAW]
@@ -202,10 +204,16 @@ midi-ble-rtctl probe CB:81:F4:62:FF:07
 ## Generic BLE-MIDI config
 
 Use the generic config first when testing an unknown standards-compliant
-BLE-MIDI keyboard:
+BLE-MIDI instrument, controller, module or adapter:
 
 ```text
 config/standard-ble-midi.ini.example
+```
+
+For a complete generic device tutorial, see:
+
+```text
+docs/GENERIC_BLE_MIDI_DEVICE.md
 ```
 
 Copy it to your user config directory and replace the address:
@@ -264,6 +272,14 @@ Default GO:KEYS config path:
 
 ## Run data plane
 
+For a generic BLE-MIDI device:
+
+```bash
+midi-ble-rtd --config ~/.config/midi-ble-rt/standard-ble-midi.ini
+```
+
+For a Roland GO:KEYS device-specific config:
+
 ```bash
 midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
 ```
@@ -307,7 +323,7 @@ The stats file should reflect the session state immediately after transitions:
 ```
 
 Expected states during recovery are `CONNECTING`, `RECONNECTING` and then
-`STREAMING` after the keyboard becomes available again.
+`STREAMING` after the device becomes available again.
 
 ## Receive MIDI
 
@@ -318,7 +334,7 @@ aseqdump -p 128:0
 or record a MIDI file:
 
 ```bash
-arecordmidi -p 128:0 gokeys-input.mid
+arecordmidi -p 128:0 generic-input.mid
 ```
 
 ## Send MIDI
@@ -343,7 +359,7 @@ Transmit can be disabled in the config:
 enable_tx = no
 ```
 
-## Multiple keyboards
+## Multiple devices
 
 The session core is designed for:
 
@@ -351,12 +367,12 @@ The session core is designed for:
 1 daemon = 1 ALSA client + N MIDI sessions + N ALSA ports
 ```
 
-For identical keyboards, such as two GO:KEYS units, do not rely on name or alias.
-Use Bluetooth addresses:
+For identical devices, such as two equal controllers or two GO:KEYS units, do not
+rely on name or alias. Use Bluetooth addresses:
 
 ```text
-gokeys-1 -> 11:22:33:44:55:66
-gokeys-2 -> AA:BB:CC:DD:EE:FF
+device-1 -> 11:22:33:44:55:66
+device-2 -> AA:BB:CC:DD:EE:FF
 ```
 
 The label is human-facing. The address is the technical identity.
@@ -380,13 +396,13 @@ Hardware-free tests are documented in:
 docs/TESTING.md
 ```
 
-Validate ALSA MIDI write/read without GO:KEYS:
+Validate ALSA MIDI write/read without a BLE-MIDI device:
 
 ```bash
 scripts/test-alsa-loopback.sh
 ```
 
-Validate the example MIDI file through FluidSynth without GO:KEYS:
+Validate the example MIDI file through FluidSynth without a BLE-MIDI device:
 
 ```bash
 scripts/test-fluidsynth-smoke.sh
