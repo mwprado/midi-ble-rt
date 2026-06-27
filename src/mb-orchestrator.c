@@ -6,23 +6,17 @@
  *   - connects BlueZ/GATT discovery to the runtime dataplane;
  *   - connects ALSA Sequencer I/O to BLE-MIDI transport;
  *   - exports operational stats.
- *
- * Temporary cleanup debt:
- *   This file still includes midi-ble-rtd.c after renaming its main().
- *   That keeps the validated behavior intact while the legacy helpers are
- *   extracted into explicit modules.  Do not add new functionality through
- *   this coupling; remove the coupling in small cleanup commits.
  */
 
 #include "mb-orchestrator.h"
 
-#include "mb-legacy-core.h"
+#include <errno.h>
 
 #include "mb-alsa.h"
+#include "mb-app.h"
 #include "mb-bluez.h"
 #include "mb-ble-midi.h"
 #include "mb-gatt-midi.h"
-#include "mb-config.h"
 #include "mb-duplex-runtime.h"
 #include "mb-session.h"
 #include "mb-stats.h"
@@ -55,7 +49,7 @@ static uint16_t orchestrator_ble_midi_timestamp_13bit(void) {
 }
 
 static bool orchestrator_load_config(Config *cfg, const char *path) {
-    return mb_config_load((MbConfig *)cfg, path);
+    return mb_app_load_config(cfg, path);
 }
 
 static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
@@ -249,7 +243,7 @@ static void orchestrator_rx_consume(MbRuntimeFlow *flow,
     MbOrchestrator *orc = user_data;
 
     g_mutex_lock(&orc->alsa_lock);
-    ble_midi_decode_packet(&orc->app, data, len);
+    mb_app_ble_midi_decode_packet(&orc->app, data, len);
     g_mutex_unlock(&orc->alsa_lock);
 }
 
@@ -321,7 +315,7 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
             continue;
 
         if (app->cfg.print_midi_events)
-            print_midi_bytes("ALSA->BLE MIDI:", midi, (size_t)n);
+            mb_app_print_midi_bytes("ALSA->BLE MIDI:", midi, (size_t)n);
 
         if (!mb_duplex_runtime_push_tx(&orc->runtime, midi, (size_t)n, orchestrator_now_ns())) {
             g_printerr("TX runtime queue push failed; ALSA event dropped.\n");
@@ -341,7 +335,7 @@ static gboolean orchestrator_device_health_cb(gpointer user_data) {
         return G_SOURCE_CONTINUE;
 
     bool connected = false;
-    if (!get_device_bool_property(app, "Connected", &connected) || !connected)
+    if (!mb_app_get_device_bool_property(app, "Connected", &connected) || !connected)
         orchestrator_mark_device_disconnected(orc, "health check");
 
     return G_SOURCE_CONTINUE;
@@ -482,13 +476,13 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
         return false;
     }
 
-    if (!connect_device(app)) {
+    if (!mb_app_connect_device(app)) {
         orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECT_FAILED);
         return false;
     }
     orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECTED);
 
-    if (!wait_services_resolved(app, 15000)) {
+    if (!mb_app_wait_services_resolved(app, 15000)) {
         orchestrator_session_event(orc, MB_EV_TIMEOUT);
         return false;
     }
@@ -497,14 +491,14 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
     g_clear_pointer(&app->service_path, g_free);
     g_clear_pointer(&app->char_path, g_free);
 
-    app->service_path = find_ble_midi_service(app);
+    app->service_path = mb_app_find_ble_midi_service(app);
     if (!app->service_path) {
         g_printerr("BLE-MIDI service not found. Connect MIDI before Audio on Roland GO:KEYS.\n");
         orchestrator_session_event(orc, MB_EV_MIDI_SERVICE_NOT_FOUND);
         return false;
     }
 
-    app->char_path = find_ble_midi_characteristic(app);
+    app->char_path = mb_app_find_ble_midi_characteristic(app);
     if (!app->char_path) {
         g_printerr("BLE-MIDI I/O characteristic not found.\n");
         orchestrator_session_event(orc, MB_EV_MIDI_CHAR_NOT_FOUND);
@@ -519,7 +513,7 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
     g_mutex_unlock(&orc->session_lock);
     orchestrator_session_event(orc, MB_EV_MIDI_CHAR_FOUND);
 
-    if (!app->seq && !alsa_init(app)) {
+    if (!app->seq && !mb_app_alsa_init(app)) {
         orchestrator_session_event(orc, MB_EV_ALSA_FAILED);
         return false;
     }
@@ -609,7 +603,7 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
         g_mutex_unlock(&orc->session_lock);
         orc->session_initialized = false;
     }
-    app_cleanup(app);
+    mb_app_cleanup(app);
     g_mutex_clear(&orc->alsa_lock);
     g_mutex_clear(&orc->gatt_write_lock);
     g_mutex_clear(&orc->session_lock);
@@ -679,7 +673,7 @@ int mb_orchestrator_main(int argc, char **argv) {
         return 1;
     }
 
-    app->device_path = find_device(app);
+    app->device_path = mb_app_find_device(app);
     if (!app->device_path) {
         g_printerr("No matching BlueZ Device1 found. Scan/connect once or check the address.\n");
         orchestrator_session_event(&orc, MB_EV_TIMEOUT);
@@ -697,7 +691,7 @@ int mb_orchestrator_main(int argc, char **argv) {
         return 1;
     }
 
-    if (app->cfg.pair && !pair_device(app)) {
+    if (app->cfg.pair && !mb_app_pair_device(app)) {
         orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
         if (!orchestrator_session_is(&orc, MB_SESSION_RECONNECTING)) {
             orchestrator_cleanup(&orc);
@@ -706,7 +700,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     }
 
     if (app->cfg.trust)
-        set_device_trusted(app);
+        mb_app_set_device_trusted(app);
 
     app->loop = g_main_loop_new(NULL, FALSE);
     orc.reconnect_source_id = g_timeout_add(10000, orchestrator_reconnect_cb, &orc);
