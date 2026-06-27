@@ -1,0 +1,16 @@
+[device]
+id = standard-ble-midi
+enabled = yes
+address = AA:BB:CC:DD:EE:FF
+name = BLE-MIDI
+profile = standard_ble_midi
+autoconnect = no
+alsa_port_name = Standard BLE-MIDI Device
+
+[policy]
+pair = no
+trust = yes
+auto_reconnect = yes
+
+[midi]
+enable_tx = yes
