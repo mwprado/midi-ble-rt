@@ -154,6 +154,12 @@ Installed example configs are under:
 /usr/share/midi-ble-rt/config/
 ```
 
+## Packaging TODO
+
+Ubuntu/Debian packaging is planned but not published yet. The intended next
+package target is a `.deb` package with Debian metadata under `debian/`, so the
+project can be installed on Ubuntu without building manually from source.
+
 ## Build on Fedora
 
 ```bash
