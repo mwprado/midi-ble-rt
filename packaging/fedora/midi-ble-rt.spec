@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.6.2
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -9,6 +9,7 @@ Source0:        %{url}/archive/refs/tags/v%{version}.tar.gz#/%{name}-%{version}.
 
 BuildRequires:  gcc
 BuildRequires:  cmake
+BuildRequires:  binutils
 BuildRequires:  pkgconfig(glib-2.0)
 BuildRequires:  pkgconfig(gio-2.0)
 BuildRequires:  pkgconfig(alsa)
@@ -25,17 +26,31 @@ It uses BlueZ as a generic BLE/GATT transport, subscribes to BLE-MIDI
 notifications, exposes an ALSA Sequencer port, and can write MIDI messages back
 to the BLE-MIDI device through GATT WriteValue.
 
-The first validated target is the Roland GO:KEYS family.
+The first validated hardware target is the Roland GO:KEYS family, but the
+project target is any usable BLE-MIDI instrument, controller, module or adapter.
 
 %prep
 %autosetup -n %{name}-%{version}
 
 %build
-%cmake -DBUILD_SHARED_LIBS=OFF
+%cmake -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
 %cmake_build
 
 %install
 %cmake_install
+
+%check
+# midi-ble-rt-core is an internal implementation library. The installed
+# executables must not depend on a private libmidi-ble-rt-core.so runtime object.
+for bin in \
+    %{buildroot}%{_bindir}/midi-ble-rtd \
+    %{buildroot}%{_bindir}/midi-ble-rtctl
+ do
+    if readelf -d "$bin" | grep -q 'libmidi-ble-rt-core'; then
+        echo "error: $bin has a runtime dependency on private libmidi-ble-rt-core" >&2
+        exit 1
+    fi
+ done
 
 %files
 %license LICENSE
@@ -46,6 +61,12 @@ The first validated target is the Roland GO:KEYS family.
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.2-2
+- Harden Fedora package against private core shared-library dependency.
+- Keep midi-ble-rt-core linked statically into installed executables.
+- Add RPM check to fail the build if libmidi-ble-rt-core.so appears as a runtime dependency.
+- Disable test target builds in RPM packaging.
+
 * Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.0-1
 - Include internal code cleanup after the stable RPM release.
 - Extract BlueZ, BLE-MIDI GATT and ALSA port helper modules.
