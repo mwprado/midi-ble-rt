@@ -1,114 +1,216 @@
 # Project roadmap
 
-This roadmap organizes `midi-ble-rt` as a practical Linux BLE-MIDI stack with a daemon, a control CLI, device profiles and optional realtime transport improvements.
+This roadmap tracks `midi-ble-rt` after the `v0.6.3` cleanup and RPM packaging baseline.
+
+`midi-ble-rt` is a Linux BLE-MIDI/GATT to ALSA Sequencer bridge. Roland GO:KEYS is the first validated hardware target, but the project target is any usable BLE-MIDI instrument, controller, module or adapter.
 
 The project should evolve in this order:
 
 ```text
-reliable daemon first
-control CLI second
-multiple keyboards third
-low-jitter/realtime path after the basics are stable
+release hygiene first
+generic BLE-MIDI validation second
+multi-device runtime third
+complete control CLI fourth
+stable 1.0 after packaging, service mode and device validation are boring
+low-jitter/realtime and polished duplex after the basics are stable
 ```
 
-## Phase 0 — Consolidated proof
+## Current baseline — v0.6.3 / RPM 0.6.3-2
 
 Status: current repository baseline.
-
-Goal: prove the technical chain.
-
-```text
-Roland GO:KEYS
-→ BlueZ generic GATT
-→ BLE-MIDI service
-→ Roland 00006bf3... characteristic alias
-→ StartNotify
-→ BLE-MIDI decoder
-→ ALSA Sequencer
-→ aseqdump / DAW
-```
 
 Done:
 
 ```text
-config .ini
+master consolidated
+pending cleanup branches merged or retired
+v0.6.3 tag aligned with master
+Fedora spec Version/Release/changelog aligned at 0.6.3-2
+midi-ble-rt-core kept as an internal statically linked implementation library
+RPM check rejects runtime dependency on private libmidi-ble-rt-core.so
+remove-legacy-core cleanup incorporated
+remove-duplex-wrapper cleanup incorporated
+session-stats-top incorporated
+generic BLE-MIDI device tutorial added
+Roland GO:KEYS treated as validated hardware, not as the only project target
+```
+
+Known baseline capabilities:
+
+```text
 BlueZ system D-Bus connection
 Device1 selection
-trust
-connect
+trust/connect flow
 ServicesResolved wait
 GATT service discovery
-characteristic scoring
-StartNotify
-ALSA Sequencer source port
-minimal BLE-MIDI decoder
-SELinux notes
+BLE-MIDI service and characteristic selection
+StartNotify data path
+ALSA Sequencer port
+BLE-MIDI RX decode
+basic ALSA -> BLE-MIDI TX path
+runtime statistics in stats.tsv
+midi-ble-rtctl stats/top
+Fedora RPM packaging
+user systemd unit packaging
 ```
 
-Exit criteria:
+Immediate invariant:
+
+```text
+Installed executables must not require libmidi-ble-rt-core.so.
+```
+
+Validation command:
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/midi-ble-rtd --config config/roland-gokeys.ini.example
-aconnect -l
-aseqdump -p "midi-ble-rt"
+rpm -qp --requires midi-ble-rt-0.6.3-2*.rpm | grep midi-ble-rt-core
 ```
 
-Version target: `v0.0` / proof of concept.
+Expected result: no output.
 
-## Phase 1 — Bench daemon
+## Immediate release hygiene
 
-Goal: make `midi-ble-rtd` reliable for manual use.
+Goal: make `v0.6.3` reproducible and unambiguous as a packaged release.
 
 Tasks:
 
 ```text
-split source into modules
-validate require_notify and require_write_without_response
-improve error messages
-improve parser diagnostics
-make logs consistent
-keep ALSA port stable during runtime
-handle clean shutdown
-```
-
-Suggested structure:
-
-```text
-src/
-  main.c
-  config.c
-  bluez_device.c
-  gatt_discovery.c
-  alsa_seq.c
-  ble_midi_decode.c
-  log.c
+confirm COPR builds midi-ble-rt-0.6.3-2
+confirm RPM requires do not include libmidi-ble-rt-core.so
+confirm regular Fedora installation
+confirm rpm-ostree installation
+confirm service files are installed in the expected user unit path
+run post-install smoke test with a real BLE-MIDI device
+record any COPR/rpm-ostree notes in documentation
 ```
 
 Exit criteria:
 
 ```text
-builds cleanly
-runs without GNOME
-creates one ALSA port
-delivers Note On/Off reliably
-failure messages explain the next action
+COPR publishes 0.6.3-2 for the target Fedora release
+RPM installs without private core-library dependency errors
+midi-ble-rtd --version or --help works from the installed package
+midi-ble-rtctl --help works from the installed package
+basic runtime smoke test succeeds with the validated GO:KEYS setup
 ```
 
-Version target: `v0.1`.
+Version target: `v0.6.3` release closure, then `v0.6.4` only if packaging fixes are required.
 
-## Phase 2 — Control CLI: scan/list/probe
+## v0.7 — Generic BLE-MIDI device validation
 
-Goal: add `midi-ble-rtctl` as a fast BlueZ-oriented MIDI tool.
+Goal: validate the standard BLE-MIDI path beyond Roland GO:KEYS.
 
-First commands:
+The generic profile should prefer the official BLE-MIDI UUIDs:
+
+```text
+service_uuid = 03b80e5a-ede8-4b33-a751-6ce34ec4c700
+io_uuid      = 7772e5db-3868-4112-a1a9-f2669d106bf3
+```
+
+Tasks:
+
+```text
+keep standard-ble-midi.ini as the main generic example
+validate one non-Roland BLE-MIDI device
+separate standard_ble_midi behavior from roland_gokeys quirks
+keep Roland-specific UUID aliases out of the generic profile
+replace user-facing keyboard-only wording with device/instrument/controller/module/adapter wording
+add a small compatibility matrix
+make profile selection visible in probe/status output where useful
+```
+
+Exit criteria:
+
+```text
+Roland GO:KEYS still works
+one standard non-Roland BLE-MIDI device works without vendor-specific alias
+standard BLE-MIDI tutorial matches the tested flow
+README describes the project as generic BLE-MIDI infrastructure
+```
+
+Version target: `v0.7`.
+
+## v0.8 — Multi-device runtime
+
+Goal: run more than one BLE-MIDI device at the same time.
+
+Model:
+
+```text
+one daemon process
+multiple DeviceSession objects
+one GATT notify subscription per device
+one ALSA port per device
+one profile/quirk policy per device
+```
+
+Expected ALSA shape:
+
+```text
+client 128: 'midi-ble-rt' [type=user]
+    0 'Roland GO:KEYS BLE-MIDI'
+    1 'Standard BLE-MIDI Device'
+    2 'CME WIDI Master BLE-MIDI'
+```
+
+Configuration direction:
+
+```ini
+[device.roland-gokeys]
+address = CB:81:F4:62:FF:07
+profile = roland_gokeys
+autoconnect = yes
+alsa_port_name = Roland GO:KEYS BLE-MIDI
+
+[device.standard-1]
+address = AA:BB:CC:DD:EE:FF
+profile = standard_ble_midi
+autoconnect = no
+alsa_port_name = Standard BLE-MIDI Device
+```
+
+Tasks:
+
+```text
+validate two simultaneous BLE-MIDI devices
+keep device identity address-based, not name-based
+expose one ALSA port per device
+keep one device failure isolated from the others
+show per-device state in stats/top/status
+document naming policy for identical or renamed devices
+```
+
+Exit criteria:
+
+```text
+two configured devices produce two ALSA ports
+one device can disconnect/reconnect without killing the other
+CLI status shows each session independently
+reconnect preserves stable identity where possible
+```
+
+Version target: `v0.8`.
+
+## v0.9 — Complete control CLI
+
+Goal: make normal operation possible without manually driving `bluetoothctl`.
+
+Required commands:
 
 ```bash
-midi-ble-rtctl scan
-midi-ble-rtctl list
+midi-ble-rtctl scan --midi-only
+midi-ble-rtctl list --midi-only
 midi-ble-rtctl info DEVICE
 midi-ble-rtctl probe DEVICE
+midi-ble-rtctl connect DEVICE
+midi-ble-rtctl disconnect DEVICE
+midi-ble-rtctl forget DEVICE
+midi-ble-rtctl pair DEVICE
+midi-ble-rtctl trust DEVICE
+midi-ble-rtctl untrust DEVICE
+midi-ble-rtctl status
+midi-ble-rtctl stats
+midi-ble-rtctl top
 ```
 
 Behavior:
@@ -120,258 +222,64 @@ show known BlueZ devices
 connect temporarily for GATT inspection when probing
 infer possible profile/quirk
 print selected BLE-MIDI service and characteristic
+apply pair/trust/connect policy through profile rules
+report useful next-action errors
 ```
 
 Exit criteria:
 
 ```text
-user can discover GO:KEYS address without bluetoothctl
-user can see candidate profile
-user can confirm 00006bf3... from the CLI
+user can discover a BLE-MIDI device without bluetoothctl
+user can validate GATT service and characteristic
+user can connect a known device through profile policy
+errors explain the next corrective action
 ```
 
-Version target: `v0.2`.
+Version target: `v0.9`.
 
-## Phase 3 — Profile-aware connect/disconnect/forget
+## v1.0 — Stable public release
 
-Goal: make `connect` encode device quirks and BlueZ setup policy.
+Goal: stable public release for normal Linux/Fedora use.
 
-Commands:
-
-```bash
-midi-ble-rtctl connect DEVICE
-midi-ble-rtctl disconnect DEVICE
-midi-ble-rtctl forget DEVICE
-midi-ble-rtctl pair DEVICE
-midi-ble-rtctl trust DEVICE
-midi-ble-rtctl untrust DEVICE
-```
-
-For Roland GO:KEYS, `connect` should do:
+Minimum requirements:
 
 ```text
-find Device1
-Pair if required and not paired
-Set Trusted=true
-Device1.Connect
-Wait ServicesResolved=true
-Validate BLE-MIDI service
-Accept official I/O characteristic or Roland 00006bf3 alias
-Start daemon stream or spawn daemon instance
-Create/keep ALSA port
+Fedora RPM is reproducible through COPR
+no runtime dependency on private internal libraries
+regular Fedora install works
+rpm-ostree install works
+systemd user service works
+SELinux behavior is documented or policy is supplied
+Roland GO:KEYS is validated
+at least one standard BLE-MIDI device is validated
+midi-ble-rtctl scan/list/probe/connect/disconnect/forget is stable
+pair/trust/connect policy works through profiles
+reconnect works
+ALSA ports are predictable
+RX works
+basic TX works
+logs and stats are useful for troubleshooting
 ```
 
-Quirk policy should decide whether `pair`, `trust` and MIDI-first connection are mandatory.
-
-Exit criteria:
+Conservative release split:
 
 ```text
-fresh BlueZ device can be prepared without bluetoothctl
-connect go-keys applies pair/trust/connect automatically
-forget removes device from BlueZ and local config
+1.0 = reliable daemon + CLI + profiles + reconnect + packaging
+1.1 = AcquireNotify and realtime improvements
+1.2 = polished bidirectional MIDI
 ```
 
-Version target: `v0.3`.
+## v1.1 — Low-jitter transport and realtime hygiene
 
-## Phase 4 — Agent1 authorization
+Goal: reduce local daemon-side jitter after BLE delivery. This is optimization, not a prerequisite for basic usefulness.
 
-Goal: remove dependency on external `bluetoothctl agent`.
-
-Implement:
-
-```text
-org.bluez.Agent1
-AgentManager1.RegisterAgent
-AgentManager1.RequestDefaultAgent
-RequestConfirmation
-RequestAuthorization
-AuthorizeService
-Release
-Cancel
-```
-
-Initial policy:
-
-```text
-NoInputNoOutput
-accept only configured device/profile
-reject unknown devices unless explicitly confirmed
-```
-
-Exit criteria:
-
-```text
-delete the device from BlueZ
-run midi-ble-rtctl connect roland-gokeys
-pair/trust/connect/StartNotify succeeds without bluetoothctl
-```
-
-Version target: `v0.4`.
-
-## Phase 5 — Multi-keyboard daemon sessions
-
-Goal: support more than one BLE-MIDI keyboard/controller at the same time.
-
-Model:
-
-```text
-one daemon process
-multiple DeviceSession objects
-one GATT notify subscription per device
-one ALSA port per device
-one profile/quirk per device
-```
-
-Expected ALSA shape:
-
-```text
-client 128: 'midi-ble-rt' [type=user]
-    0 'Roland GO:KEYS BLE-MIDI'
-    1 'Korg microKEY Air BLE-MIDI'
-    2 'CME WIDI Master BLE-MIDI'
-```
-
-Configuration:
-
-```ini
-[device.roland-gokeys]
-address = CB:81:F4:62:FF:07
-profile = roland_gokeys
-autoconnect = yes
-alsa_port_name = Roland GO:KEYS BLE-MIDI
-
-[device.korg-air]
-address = AA:BB:CC:DD:EE:FF
-profile = standard_ble_midi
-autoconnect = no
-alsa_port_name = Korg microKEY Air BLE-MIDI
-```
-
-Exit criteria:
-
-```text
-two configured keyboards produce two ALSA ports
-one device can disconnect/reconnect without killing the other
-CLI status shows each session independently
-```
-
-Version target: `v0.5`.
-
-## Phase 6 — Reconnect and service mode
-
-Goal: make `midi-ble-rtd` a real background service.
-
-Tasks:
-
-```text
-observe Device1.Connected changes
-observe InterfacesRemoved
-detect notify loss
-backoff reconnect
-reuse ALSA port or recreate predictably
-systemd unit hardening
-journalctl-friendly logs
-SELinux enforcing validation
-```
-
-Policy:
-
-```ini
-[device.roland-gokeys]
-autoconnect = yes
-reconnect_initial_delay_ms = 500
-reconnect_max_delay_ms = 10000
-```
-
-Exit criteria:
-
-```text
-start service
-turn keyboard off
-service keeps running
-turn keyboard on
-stream returns
-ALSA identity remains usable
-```
-
-Version target: `v0.6`.
-
-## Phase 7 — Device profiles and quirk library
-
-Goal: make the project useful beyond Roland.
-
-Profiles:
-
-```text
-standard_ble_midi
-roland_gokeys
-korg_air
-yamaha_ble_midi
-cme_widi
-kawai_ble_midi
-```
-
-Each profile should define:
-
-```text
-service_uuid
-io_uuid
-aliases
-required flags
-pair policy
-trust policy
-connect order
-known warnings
-parser quirks if any
-```
-
-Exit criteria:
-
-```text
-standard BLE-MIDI profile works
-Roland GO:KEYS profile works
-profile can be selected by config or CLI
-new profile can be added without editing core daemon code
-```
-
-Version target: `v0.7`.
-
-## Phase 8 — MIDI bidirectional path
-
-Goal: support ALSA -> BLE-MIDI writes.
-
-Tasks:
-
-```text
-make ALSA port duplex
-read ALSA input events
-encode MIDI bytes into BLE-MIDI packets
-WriteValue or AcquireWrite
-MTU-aware packetization
-timestamp handling
-```
-
-Exit criteria:
-
-```text
-DAW sends Program Change / notes to keyboard
-keyboard responds
-input stream remains stable
-```
-
-Version target: `v0.8`.
-
-## Phase 9 — Low-jitter transport: AcquireNotify and RT
-
-Goal: reduce local jitter after BLE delivery.
-
-Current path:
+Current fallback path:
 
 ```text
 BLE notify -> bluetoothd -> D-Bus PropertiesChanged -> daemon -> ALSA
 ```
 
-Target path:
+Possible target path:
 
 ```text
 BLE notify -> bluetoothd -> AcquireNotify fd -> daemon RT thread -> ALSA
@@ -380,14 +288,16 @@ BLE notify -> bluetoothd -> AcquireNotify fd -> daemon RT thread -> ALSA
 Tasks:
 
 ```text
-AcquireNotify fallback design
-read thread for notification fd
-preallocated buffers
-no malloc/free in hot path
-no printf in hot path
-mlockall(MCL_CURRENT | MCL_FUTURE)
-SCHED_FIFO only for MIDI dispatch thread
-latency/jitter counters
+measure current daemon-side latency/jitter
+keep StartNotify as a stable fallback
+design AcquireNotify fallback behavior
+add read thread for notification fd when available
+use preallocated buffers in hot paths
+avoid malloc/free in hot paths
+avoid printf/log formatting in hot paths
+evaluate mlockall(MCL_CURRENT | MCL_FUTURE)
+evaluate SCHED_FIFO only for MIDI dispatch thread
+add latency/jitter counters
 ```
 
 Exit criteria:
@@ -396,35 +306,68 @@ Exit criteria:
 StartNotify remains fallback
 AcquireNotify works when BlueZ exposes it
 metrics show lower daemon-side jitter
-system remains stable
+system remains stable without requiring RT privileges for normal use
 ```
 
-Version target: `v0.9`.
+Version target: `v1.1`.
 
-## Phase 10 — Release 1.0
+## v1.2 — Polished bidirectional MIDI
 
-Goal: stable public release.
+Goal: make ALSA -> BLE-MIDI robust, not merely functional.
 
-Minimum requirements:
+Tasks:
 
 ```text
-GO:KEYS validated
-one standard BLE-MIDI device validated
-midi-ble-rtctl scan/list/probe/connect/disconnect/forget stable
-pair/trust/connect policy by profile
-Agent1 works
-multi-device sessions work
-reconnect works
-SELinux enforcing documented or policy supplied
-systemd service works
-ALSA ports predictable
-logs are useful
+stress-test aplaymidi
+validate Note On/Off bursts
+validate Program Change
+validate Control Change
+handle input-only devices cleanly
+improve MTU-aware packetization
+refine BLE-MIDI timestamp handling
+expose TX counters and errors in stats
 ```
 
-Conservative release split:
+Exit criteria:
 
 ```text
-1.0 = reliable daemon + CLI + profiles + reconnect
-1.1 = AcquireNotify and realtime improvements
-1.2 = bidirectional MIDI polished
+DAW sends notes/control messages to the device reliably
+input stream remains stable while TX is active
+unsupported TX devices fail safely and visibly
+statistics separate ALSA RX, ALSA TX, BLE RX and BLE TX clearly
+```
+
+Version target: `v1.2`.
+
+## Historical mapping
+
+The earlier roadmap used these phases:
+
+```text
+Phase 0  — consolidated proof
+Phase 1  — bench daemon
+Phase 2  — control CLI scan/list/probe
+Phase 3  — profile-aware connect/disconnect/forget
+Phase 4  — Agent1 authorization
+Phase 5  — multi-keyboard daemon sessions
+Phase 6  — reconnect and service mode
+Phase 7  — device profiles and quirk library
+Phase 8  — MIDI bidirectional path
+Phase 9  — low-jitter transport: AcquireNotify and RT
+Phase 10 — release 1.0
+```
+
+Post-`v0.6.3`, this map is interpreted as follows:
+
+```text
+Phases 0-1 are historical baseline.
+Phase 2 is partially implemented and continues under v0.9 CLI work.
+Phase 3 remains part of v0.9 CLI/profile policy work.
+Phase 4 remains useful but is not required before generic-device validation.
+Phase 5 becomes v0.8 multi-device runtime.
+Phase 6 becomes packaging/service/reconnect validation toward v1.0.
+Phase 7 becomes v0.7 generic BLE-MIDI validation.
+Phase 8 becomes v1.2 polished bidirectional MIDI.
+Phase 9 becomes v1.1 low-jitter/realtime work.
+Phase 10 remains the public v1.0 target.
 ```
