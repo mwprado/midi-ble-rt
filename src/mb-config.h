@@ -41,8 +41,8 @@ typedef struct MbConfig {
      * Multi-device configuration model.
      *
      * Existing single-device configs using [device] remain valid. When no
-     * devices.d/*.ini entries are loaded, a single compatibility device is
-     * synthesized from [device] if address is set.
+     * INI entries from the devices.d directory are loaded, a single
+     * compatibility device is synthesized from [device] if address is set.
      */
     GPtrArray *devices; /* element type: MbDeviceConfig* */
 } MbConfig;
