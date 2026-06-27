@@ -3,6 +3,7 @@
 #include "mb-ble-midi.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 static char *keyfile_get_string_default(GKeyFile *kf, const char *group, const char *key, const char *fallback) {
@@ -37,6 +38,32 @@ static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const 
     return (unsigned)value;
 }
 
+static const char *str_nonempty_or(const char *value, const char *fallback) {
+    return value && *value ? value : fallback;
+}
+
+static void mb_device_config_free(gpointer data) {
+    MbDeviceConfig *device = data;
+    if (!device)
+        return;
+
+    g_free(device->id);
+    g_free(device->address);
+    g_free(device->name);
+    g_free(device->profile);
+    g_free(device->alsa_port_name);
+    g_free(device);
+}
+
+static GPtrArray *mb_config_new_device_array(void) {
+    return g_ptr_array_new_with_free_func(mb_device_config_free);
+}
+
+static void mb_config_ensure_device_array(MbConfig *cfg) {
+    if (!cfg->devices)
+        cfg->devices = mb_config_new_device_array();
+}
+
 static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->address = keyfile_get_string_default(kf, "device", "address", "");
     cfg->name = keyfile_get_string_default(kf, "device", "name", "");
@@ -63,6 +90,77 @@ static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
 }
 
+static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
+    cfg->address = g_strdup("");
+    cfg->name = g_strdup("");
+    cfg->pair = keyfile_get_bool_default(kf, "defaults", "pair", false);
+    cfg->trust = keyfile_get_bool_default(kf, "defaults", "trust", true);
+    cfg->auto_reconnect = keyfile_get_bool_default(kf, "defaults", "auto_reconnect", true);
+
+    cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
+        MB_BLE_MIDI_SERVICE_UUID);
+    cfg->io_uuid = keyfile_get_string_default(kf, "gatt", "io_uuid",
+        MB_BLE_MIDI_IO_UUID);
+    cfg->io_uuid_alias = keyfile_get_string_default(kf, "gatt", "io_uuid_alias", "");
+    cfg->require_notify = keyfile_get_bool_default(kf, "gatt", "require_notify", true);
+    cfg->require_write_without_response = keyfile_get_bool_default(kf, "gatt", "require_write_without_response", true);
+
+    cfg->alsa_client_name = keyfile_get_string_default(kf, "daemon", "client_name", "midi-ble-rt");
+    cfg->alsa_port_name = keyfile_get_string_default(kf, "alsa", "port_name", "BLE-MIDI");
+
+    cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
+    cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
+    cfg->enable_tx = keyfile_get_bool_default(kf, "defaults", "enable_tx", true);
+    cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
+    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
+}
+
+static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
+                                                      const MbConfig *defaults,
+                                                      const char *fallback_id) {
+    MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
+
+    device->id = keyfile_get_string_default(kf, "device", "id", fallback_id ? fallback_id : "device");
+    device->address = keyfile_get_string_default(kf, "device", "address", "");
+    device->name = keyfile_get_string_default(kf, "device", "name", "");
+    device->profile = keyfile_get_string_default(kf, "device", "profile", "standard_ble_midi");
+    device->alsa_port_name = keyfile_get_string_default(kf, "device", "alsa_port_name",
+        str_nonempty_or(defaults ? defaults->alsa_port_name : NULL, "BLE-MIDI"));
+    device->enabled = keyfile_get_bool_default(kf, "device", "enabled", true);
+    device->autoconnect = keyfile_get_bool_default(kf, "device", "autoconnect", false);
+    device->pair = keyfile_get_bool_default(kf, "policy", "pair", defaults ? defaults->pair : false);
+    device->trust = keyfile_get_bool_default(kf, "policy", "trust", defaults ? defaults->trust : true);
+    device->auto_reconnect = keyfile_get_bool_default(kf, "policy", "auto_reconnect",
+        defaults ? defaults->auto_reconnect : true);
+    device->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", defaults ? defaults->enable_tx : true);
+
+    return device;
+}
+
+static void mb_config_add_compat_device(MbConfig *cfg) {
+    if (!cfg || !cfg->address || !*cfg->address)
+        return;
+
+    mb_config_ensure_device_array(cfg);
+    if (cfg->devices->len > 0)
+        return;
+
+    MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
+    device->id = g_strdup("device");
+    device->address = g_strdup(cfg->address);
+    device->name = g_strdup(str_nonempty_or(cfg->name, ""));
+    device->profile = g_strdup("standard_ble_midi");
+    device->alsa_port_name = g_strdup(str_nonempty_or(cfg->alsa_port_name, "BLE-MIDI"));
+    device->enabled = true;
+    device->autoconnect = true;
+    device->pair = cfg->pair;
+    device->trust = cfg->trust;
+    device->auto_reconnect = cfg->auto_reconnect;
+    device->enable_tx = cfg->enable_tx;
+
+    g_ptr_array_add(cfg->devices, device);
+}
+
 bool mb_config_load(MbConfig *cfg, const char *path) {
     if (!cfg || !path)
         return false;
@@ -81,6 +179,77 @@ bool mb_config_load(MbConfig *cfg, const char *path) {
     memset(&tmp, 0, sizeof(tmp));
     mb_config_load_defaults_from_key_file(&tmp, kf);
     g_key_file_unref(kf);
+    mb_config_add_compat_device(&tmp);
+
+    mb_config_clear(cfg);
+    *cfg = tmp;
+    return true;
+}
+
+bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
+    if (!cfg || !dir_path)
+        return false;
+
+    char *daemon_path = g_build_filename(dir_path, "daemon.ini", NULL);
+    GKeyFile *daemon_kf = g_key_file_new();
+    GError *error = NULL;
+
+    if (!g_key_file_load_from_file(daemon_kf, daemon_path, G_KEY_FILE_NONE, &error)) {
+        g_printerr("Failed to load daemon config %s: %s\n", daemon_path, error->message);
+        g_clear_error(&error);
+        g_key_file_unref(daemon_kf);
+        g_free(daemon_path);
+        return false;
+    }
+
+    MbConfig tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    mb_config_load_daemon_from_key_file(&tmp, daemon_kf);
+    tmp.devices = mb_config_new_device_array();
+    g_key_file_unref(daemon_kf);
+    g_free(daemon_path);
+
+    char *devices_dir = g_build_filename(dir_path, "devices.d", NULL);
+    GDir *dir = g_dir_open(devices_dir, 0, &error);
+    if (!dir) {
+        g_printerr("Failed to open devices directory %s: %s\n", devices_dir, error->message);
+        g_clear_error(&error);
+        g_free(devices_dir);
+        mb_config_clear(&tmp);
+        return false;
+    }
+
+    const char *name = NULL;
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        if (!g_str_has_suffix(name, ".ini"))
+            continue;
+
+        char *path = g_build_filename(devices_dir, name, NULL);
+        GKeyFile *device_kf = g_key_file_new();
+        error = NULL;
+        if (!g_key_file_load_from_file(device_kf, path, G_KEY_FILE_NONE, &error)) {
+            g_printerr("Skipping device config %s: %s\n", path, error->message);
+            g_clear_error(&error);
+            g_key_file_unref(device_kf);
+            g_free(path);
+            continue;
+        }
+
+        char *fallback_id = g_strndup(name, strlen(name) - 4);
+        MbDeviceConfig *device = mb_device_config_from_key_file(device_kf, &tmp, fallback_id);
+        g_free(fallback_id);
+        g_key_file_unref(device_kf);
+        g_free(path);
+
+        if (device->enabled && device->address && *device->address) {
+            g_ptr_array_add(tmp.devices, device);
+        } else {
+            mb_device_config_free(device);
+        }
+    }
+
+    g_dir_close(dir);
+    g_free(devices_dir);
 
     mb_config_clear(cfg);
     *cfg = tmp;
@@ -98,6 +267,18 @@ void mb_config_clear(MbConfig *cfg) {
     g_free(cfg->io_uuid_alias);
     g_free(cfg->alsa_client_name);
     g_free(cfg->alsa_port_name);
+    if (cfg->devices)
+        g_ptr_array_unref(cfg->devices);
 
     memset(cfg, 0, sizeof(*cfg));
+}
+
+unsigned mb_config_device_count(const MbConfig *cfg) {
+    return cfg && cfg->devices ? cfg->devices->len : 0;
+}
+
+const MbDeviceConfig *mb_config_get_device(const MbConfig *cfg, unsigned index) {
+    if (!cfg || !cfg->devices || index >= cfg->devices->len)
+        return NULL;
+    return g_ptr_array_index(cfg->devices, index);
 }
