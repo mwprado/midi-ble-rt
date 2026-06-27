@@ -1,0 +1,29 @@
+[daemon]
+# Global ALSA client name used by the daemon.
+client_name = midi-ble-rt
+
+[defaults]
+# Defaults inherited by entries in devices.d/*.ini unless overridden.
+pair = no
+trust = yes
+auto_reconnect = yes
+enable_tx = yes
+profile = standard_ble_midi
+
+[gatt]
+# Official BLE-MIDI service and I/O characteristic UUIDs.
+service_uuid = 03b80e5a-ede8-4b33-a751-6ce34ec4c700
+io_uuid = 7772e5db-3868-4112-a1a9-f2669d106bf3
+
+# Keep generic daemon defaults vendor-neutral.
+io_uuid_alias =
+require_notify = yes
+require_write_without_response = yes
+
+[stats]
+enabled = yes
+interval_ms = 1000
+
+[debug]
+print_ble_packets = no
+print_midi_events = no
