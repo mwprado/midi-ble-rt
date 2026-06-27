@@ -114,6 +114,46 @@ Roland GO:KEYS I/O alias observed in the lab:
 `midi-ble-rt` treats the Roland UUID as a device quirk inside the standard
 BLE-MIDI service.
 
+## Install on Fedora from COPR
+
+Fedora packages are published through the `mwprado/cangaceiro` COPR repository:
+
+```text
+https://copr.fedorainfracloud.org/coprs/mwprado/cangaceiro/
+```
+
+On a regular Fedora system:
+
+```bash
+sudo dnf install 'dnf-command(copr)'
+sudo dnf copr enable mwprado/cangaceiro
+sudo dnf install midi-ble-rt
+```
+
+On Fedora Atomic / rpm-ostree based systems, enable the COPR repository file and
+layer the package:
+
+```bash
+fedora_version=$(rpm -E %fedora)
+sudo curl -L -o /etc/yum.repos.d/_copr_mwprado-cangaceiro.repo \
+  "https://copr.fedorainfracloud.org/coprs/mwprado/cangaceiro/repo/fedora-${fedora_version}/mwprado-cangaceiro-fedora-${fedora_version}.repo"
+sudo rpm-ostree install midi-ble-rt
+systemctl reboot
+```
+
+After installation, the installed commands are:
+
+```text
+midi-ble-rtd
+midi-ble-rtctl
+```
+
+Installed example configs are under:
+
+```text
+/usr/share/midi-ble-rt/config/
+```
+
 ## Build on Fedora
 
 ```bash
