@@ -10,11 +10,19 @@
 
 #include <glib.h>
 
+#include "mb-bluez.h"
 #include "mb-config.h"
 #include "mb-session.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
+}
+
+static bool session_has_bluez_device_path(const MbSession *session) {
+    return session &&
+           session->device_path &&
+           *session->device_path &&
+           !g_str_has_prefix(session->device_path, "config:");
 }
 
 static char *config_device_path(const MbDeviceConfig *device) {
@@ -44,11 +52,46 @@ static void build_config_dir_sessions(const MbConfig *cfg, MbDaemon *daemon) {
     }
 }
 
+static bool resolve_config_dir_bluez_devices(const MbConfig *cfg, MbDaemon *daemon) {
+    GError *error = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+    if (!bus) {
+        g_printerr("BlueZ discovery unavailable: could not connect to system bus: %s\n",
+                   error ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    unsigned found = 0;
+    for (unsigned i = 0; i < mb_config_device_count(cfg); i++) {
+        const MbDeviceConfig *device = mb_config_get_device(cfg, i);
+        if (!device || !device->address || !*device->address)
+            continue;
+
+        char *bluez_path = mb_bluez_find_device_path_by_address(bus, device->address);
+        if (!bluez_path)
+            continue;
+
+        MbSession *session = mb_daemon_ensure_session(daemon,
+                                                      bluez_path,
+                                                      device->address,
+                                                      device->name);
+        if (session) {
+            session->auto_reconnect = device->auto_reconnect;
+            found++;
+        }
+        g_free(bluez_path);
+    }
+
+    g_object_unref(bus);
+    return found > 0;
+}
+
 static void print_config_dir_devices(const MbConfig *cfg,
                                      const MbDaemon *daemon,
                                      const char *config_dir) {
     g_print("midi-ble-rtd\n");
-    g_print("Runtime: config-directory session skeleton\n");
+    g_print("Runtime: config-directory BlueZ discovery skeleton\n");
     g_print("Config: %s\n", config_dir);
     g_print("ALSA client: %s\n", printable_string(cfg->alsa_client_name, "midi-ble-rt"));
     g_print("Service UUID: %s\n", printable_string(cfg->service_uuid, ""));
@@ -79,17 +122,19 @@ static void print_config_dir_devices(const MbConfig *cfg,
         g_print("  enable_tx:      %s\n", device->enable_tx ? "yes" : "no");
         g_print("  ALSA port:      %s\n", printable_string(device->alsa_port_name, "BLE-MIDI"));
         if (session) {
+            g_print("  bluez:          %s\n", session_has_bluez_device_path(session) ? "found" : "not found");
             g_print("  session path:   %s\n", printable_string(session->device_path, "(none)"));
             g_print("  session state:  %s\n", mb_session_state_name(session->state));
             g_print("  session error:  %s\n", mb_error_name(session->error));
         } else {
+            g_print("  bluez:          not found\n");
             g_print("  session:        missing\n");
         }
     }
 
     g_print("\n");
-    g_print("Note: directory configs currently build IDLE session skeletons only.\n");
-    g_print("BlueZ/GATT discovery, ALSA ports and streaming remain on the single-device file config path.\n");
+    g_print("Note: directory configs currently resolve BlueZ Device1 paths only.\n");
+    g_print("Connect, GATT binding, ALSA ports and streaming remain on the single-device file config path.\n");
 }
 
 static int run_config_directory_mode(const char *config_dir) {
@@ -101,6 +146,7 @@ static int run_config_directory_mode(const char *config_dir) {
 
     MbDaemon daemon = {0};
     build_config_dir_sessions(&cfg, &daemon);
+    resolve_config_dir_bluez_devices(&cfg, &daemon);
     print_config_dir_devices(&cfg, &daemon, config_dir);
     mb_daemon_clear(&daemon);
     mb_config_clear(&cfg);
