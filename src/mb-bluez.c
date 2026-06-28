@@ -21,6 +21,46 @@ GVariant *mb_bluez_get_managed_objects(GDBusConnection *bus) {
     return objects;
 }
 
+char *mb_bluez_find_device_path_by_address(GDBusConnection *bus, const char *address) {
+    if (!bus || !address || !*address)
+        return NULL;
+
+    GVariant *objects = mb_bluez_get_managed_objects(bus);
+    if (!objects)
+        return NULL;
+
+    GVariantIter iter;
+    const char *path = NULL;
+    GVariant *ifaces = NULL;
+    char *match = NULL;
+
+    g_variant_iter_init(&iter, objects);
+    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+        GVariant *props = g_variant_lookup_value(ifaces, DEVICE_IFACE, G_VARIANT_TYPE("a{sv}"));
+        if (!props) {
+            g_variant_unref(ifaces);
+            continue;
+        }
+
+        GVariant *v_address = g_variant_lookup_value(props, "Address", G_VARIANT_TYPE_STRING);
+        const char *candidate_address = v_address ? g_variant_get_string(v_address, NULL) : NULL;
+
+        if (candidate_address && g_ascii_strcasecmp(candidate_address, address) == 0)
+            match = g_strdup(path);
+
+        if (v_address)
+            g_variant_unref(v_address);
+        g_variant_unref(props);
+        g_variant_unref(ifaces);
+
+        if (match)
+            break;
+    }
+
+    g_variant_unref(objects);
+    return match;
+}
+
 bool mb_bluez_get_device_bool_property(GDBusConnection *bus, const char *device_path, const char *property, bool *out) {
     GError *error = NULL;
 
