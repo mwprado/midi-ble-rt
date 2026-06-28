@@ -18,12 +18,35 @@ static char *keyfile_get_string_default(GKeyFile *kf, const char *group, const c
 
 static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char *key, bool fallback) {
     GError *error = NULL;
-    gboolean value = g_key_file_get_boolean(kf, group, key, &error);
+    char *raw = g_key_file_get_string(kf, group, key, &error);
     if (error) {
         g_clear_error(&error);
         return fallback;
     }
-    return value;
+
+    char *value = g_strstrip(raw);
+    bool parsed = fallback;
+
+    if (g_ascii_strcasecmp(value, "true") == 0 ||
+        g_ascii_strcasecmp(value, "yes") == 0 ||
+        g_ascii_strcasecmp(value, "on") == 0 ||
+        g_strcmp0(value, "1") == 0) {
+        parsed = true;
+    } else if (g_ascii_strcasecmp(value, "false") == 0 ||
+               g_ascii_strcasecmp(value, "no") == 0 ||
+               g_ascii_strcasecmp(value, "off") == 0 ||
+               g_strcmp0(value, "0") == 0) {
+        parsed = false;
+    } else {
+        g_printerr("Invalid boolean value for [%s].%s: '%s'; using default %s.\n",
+                   group,
+                   key,
+                   value,
+                   fallback ? "true" : "false");
+    }
+
+    g_free(raw);
+    return parsed;
 }
 
 static bool keyfile_has_key(GKeyFile *kf, const char *group, const char *key) {
