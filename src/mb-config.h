@@ -11,10 +11,10 @@ typedef struct MbDeviceConfig {
     char *profile;
     char *alsa_port_name;
     bool enabled;
-    bool autoconnect;
+    bool connect_on_start;
     bool pair;
     bool trust;
-    bool auto_reconnect;
+    bool reconnect_on_link_loss;
     bool enable_tx;
 } MbDeviceConfig;
 
@@ -23,7 +23,7 @@ typedef struct MbConfig {
     char *name;
     bool pair;
     bool trust;
-    bool auto_reconnect;
+    bool reconnect_on_link_loss;
     char *service_uuid;
     char *io_uuid;
     char *io_uuid_alias;
