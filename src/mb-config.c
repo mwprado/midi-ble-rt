@@ -26,6 +26,42 @@ static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char
     return value;
 }
 
+static bool keyfile_has_key(GKeyFile *kf, const char *group, const char *key) {
+    GError *error = NULL;
+    gboolean has_key = g_key_file_has_key(kf, group, key, &error);
+    if (error) {
+        g_clear_error(&error);
+        return false;
+    }
+    return has_key;
+}
+
+static bool keyfile_get_bool_alias_default(GKeyFile *kf,
+                                           const char *group,
+                                           const char *canonical_key,
+                                           const char *const *aliases,
+                                           bool fallback) {
+    if (keyfile_has_key(kf, group, canonical_key))
+        return keyfile_get_bool_default(kf, group, canonical_key, fallback);
+
+    if (!aliases)
+        return fallback;
+
+    for (unsigned i = 0; aliases[i]; i++) {
+        if (!keyfile_has_key(kf, group, aliases[i]))
+            continue;
+
+        bool value = keyfile_get_bool_default(kf, group, aliases[i], fallback);
+        g_printerr("Config key [%s].%s is deprecated; use %s instead.\n",
+                   group,
+                   aliases[i],
+                   canonical_key);
+        return value;
+    }
+
+    return fallback;
+}
+
 static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const char *key, unsigned fallback) {
     GError *error = NULL;
     guint64 value = g_key_file_get_uint64(kf, group, key, &error);
@@ -124,6 +160,12 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
 static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
                                                       const MbConfig *defaults,
                                                       const char *fallback_id) {
+    static const char *const connect_on_start_aliases[] = {
+        "conect_on_start",
+        "autoconnect",
+        NULL
+    };
+
     MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
 
     device->id = keyfile_get_string_default(kf, "device", "id", fallback_id ? fallback_id : "device");
@@ -133,7 +175,11 @@ static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
     device->alsa_port_name = keyfile_get_string_default(kf, "device", "alsa_port_name",
         str_nonempty_or(defaults ? defaults->alsa_port_name : NULL, "BLE-MIDI"));
     device->enabled = keyfile_get_bool_default(kf, "device", "enabled", true);
-    device->connect_on_start = keyfile_get_bool_default(kf, "device", "connect_on_start", false);
+    device->connect_on_start = keyfile_get_bool_alias_default(kf,
+                                                              "device",
+                                                              "connect_on_start",
+                                                              connect_on_start_aliases,
+                                                              false);
     device->pair = keyfile_get_bool_default(kf, "policy", "pair", defaults ? defaults->pair : false);
     device->trust = keyfile_get_bool_default(kf, "policy", "trust", defaults ? defaults->trust : true);
     device->reconnect_on_link_loss = keyfile_get_bool_default(kf, "policy", "reconnect_on_link_loss",
