@@ -112,9 +112,11 @@ struct _ConfigDirRuntime {
     /*
      * Local control socket.
      *
-     * First IPC step for midi-ble-rtctl -> daemon communication.
-     * Lifecycle-changing commands will be routed to the monitor in a later
-     * commit; this first step exposes status/list/ping only.
+     * IPC endpoint for midi-ble-rtctl -> daemon communication.
+     *
+     * Read-only commands expose daemon state. Lifecycle-changing commands are
+     * translated into lifecycle queue entries and executed by the main-loop
+     * monitor, never directly from the control socket handler.
      */
     int control_socket_fd;
     guint control_socket_source_id;
@@ -1200,6 +1202,31 @@ static ConfigDeviceRuntime *runtime_find_device_by_id(ConfigDirRuntime *rt,
     return NULL;
 }
 
+static bool runtime_control_enqueue_lifecycle(ConfigDirRuntime *rt,
+                                              int client_fd,
+                                              const char *id,
+                                              MbLifecycleCommandType type,
+                                              const char *reason) {
+    if (!rt || !id || !*id)
+        return false;
+
+    ConfigDeviceRuntime *dev = runtime_find_device_by_id(rt, id);
+    if (!dev) {
+        runtime_control_reply(client_fd, "ERR device not found\n");
+        return false;
+    }
+
+    lifecycle_enqueue(rt, dev, type, reason);
+
+    char *reply = g_strdup_printf("OK QUEUED %s id=%s state=%s\n",
+                                  lifecycle_command_name(type),
+                                  printable_string(dev->config->id, "-"),
+                                  mb_session_state_name(device_session_state(dev)));
+    runtime_control_reply(client_fd, reply);
+    g_free(reply);
+    return true;
+}
+
 static void runtime_control_handle_request(ConfigDirRuntime *rt,
                                            int client_fd,
                                            const char *request) {
@@ -1280,6 +1307,42 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
                                       dev->alsa_port);
         runtime_control_reply(client_fd, reply);
         g_free(reply);
+        g_free(line);
+        return;
+    }
+
+    if (g_str_has_prefix(line, "CONNECT ")) {
+        const char *id = line + 8;
+        g_strstrip((char *)id);
+        runtime_control_enqueue_lifecycle(rt,
+                                          client_fd,
+                                          id,
+                                          MB_LIFECYCLE_CMD_CONNECT,
+                                          "ctl connect");
+        g_free(line);
+        return;
+    }
+
+    if (g_str_has_prefix(line, "DISCONNECT ")) {
+        const char *id = line + 11;
+        g_strstrip((char *)id);
+        runtime_control_enqueue_lifecycle(rt,
+                                          client_fd,
+                                          id,
+                                          MB_LIFECYCLE_CMD_DISCONNECT,
+                                          "ctl disconnect");
+        g_free(line);
+        return;
+    }
+
+    if (g_str_has_prefix(line, "RECHECK ")) {
+        const char *id = line + 8;
+        g_strstrip((char *)id);
+        runtime_control_enqueue_lifecycle(rt,
+                                          client_fd,
+                                          id,
+                                          MB_LIFECYCLE_CMD_RECHECK,
+                                          "ctl recheck");
         g_free(line);
         return;
     }

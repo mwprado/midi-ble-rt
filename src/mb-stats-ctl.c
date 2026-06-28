@@ -105,6 +105,23 @@ static int control_send_command(const char *command) {
     return 0;
 }
 
+static void control_device_usage(const char *argv0, const char *cmd) {
+    g_printerr("Usage:\n");
+    g_printerr("  %s %s DEVICE\n", argv0, cmd);
+    g_printerr("\n");
+    g_printerr("DEVICE must match a configured device id or Bluetooth address.\n");
+}
+
+static int control_send_device_command(const char *verb, const char *device) {
+    if (!verb || !device || !*device)
+        return 2;
+
+    char *command = g_strdup_printf("%s %s", verb, device);
+    int rc = control_send_command(command);
+    g_free(command);
+    return rc;
+}
+
 typedef struct {
     char *version;
     char **header;
@@ -352,6 +369,30 @@ int main(int argc, char **argv) {
         return control_send_command("STATUS");
     if (argc == 2 && g_strcmp0(argv[1], "daemon-list") == 0)
         return control_send_command("LIST");
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-connect") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("CONNECT", argv[2]);
+    }
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-disconnect") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("DISCONNECT", argv[2]);
+    }
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-recheck") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("RECHECK", argv[2]);
+    }
 
     return midi_ble_rtctl_bluez_main(argc, argv);
 }
