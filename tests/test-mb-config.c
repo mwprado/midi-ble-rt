@@ -24,17 +24,16 @@ static void write_file_checked(const char *path, const char *content) {
 }
 
 static void test_defaults_are_applied(void) {
-    char *path = write_temp_config("[device]\naddress=AA:BB:CC:DD:EE:FF\n");
+    char *path = write_temp_config("[device]\naddress=11:22:33:44:55:66\n");
 
     MbConfig cfg = {0};
     g_assert_true(mb_config_load(&cfg, path));
 
-    g_assert_cmpstr(cfg.address, ==, "AA:BB:CC:DD:EE:FF");
+    g_assert_cmpstr(cfg.address, ==, "11:22:33:44:55:66");
     g_assert_cmpstr(cfg.name, ==, "");
     g_assert_false(cfg.pair);
     g_assert_true(cfg.trust);
     g_assert_true(cfg.reconnect_on_link_loss);
-    g_assert_true(cfg.auto_reconnect);
     g_assert_cmpstr(cfg.service_uuid, ==, "03b80e5a-ede8-4b33-a751-6ce34ec4c700");
     g_assert_cmpstr(cfg.io_uuid, ==, "7772e5db-3868-4112-a1a9-f2669d106bf3");
     g_assert_cmpstr(cfg.io_uuid_alias, ==, "00006bf3-0000-1000-8000-00805f9b34fb");
@@ -49,10 +48,9 @@ static void test_defaults_are_applied(void) {
     g_assert_cmpuint(mb_config_device_count(&cfg), ==, 1);
     const MbDeviceConfig *device = mb_config_get_device(&cfg, 0);
     g_assert_nonnull(device);
-    g_assert_cmpstr(device->address, ==, "AA:BB:CC:DD:EE:FF");
+    g_assert_cmpstr(device->address, ==, "11:22:33:44:55:66");
     g_assert_cmpstr(device->profile, ==, "standard_ble_midi");
     g_assert_true(device->connect_on_start);
-    g_assert_true(device->autoconnect);
 
     mb_config_clear(&cfg);
     g_unlink(path);
@@ -90,7 +88,6 @@ static void test_explicit_values_override_defaults(void) {
     g_assert_true(cfg.pair);
     g_assert_false(cfg.trust);
     g_assert_false(cfg.reconnect_on_link_loss);
-    g_assert_false(cfg.auto_reconnect);
     g_assert_cmpstr(cfg.service_uuid, ==, "service-test");
     g_assert_cmpstr(cfg.io_uuid, ==, "io-test");
     g_assert_cmpstr(cfg.io_uuid_alias, ==, "alias-test");
@@ -109,7 +106,6 @@ static void test_explicit_values_override_defaults(void) {
     g_assert_cmpstr(device->name, ==, "GO:KEYS");
     g_assert_false(device->trust);
     g_assert_false(device->reconnect_on_link_loss);
-    g_assert_false(device->auto_reconnect);
     g_assert_false(device->enable_tx);
 
     mb_config_clear(&cfg);
@@ -148,10 +144,10 @@ static void test_config_dir_loads_devices_d(void) {
         "id=roland-gokeys\n"
         "enabled=true\n"
         "address=CB:81:F4:62:FF:07\n"
-        "name=Roland GO:KEYS\n"
+        "name=Roland GO KEYS\n"
         "profile=roland_gokeys\n"
         "connect_on_start=true\n"
-        "alsa_port_name=Roland GO:KEYS BLE-MIDI\n"
+        "alsa_port_name=Roland GO KEYS BLE-MIDI\n"
         "[policy]\n"
         "pair=false\n"
         "trust=true\n"
@@ -163,7 +159,7 @@ static void test_config_dir_loads_devices_d(void) {
         "[device]\n"
         "id=widi-master\n"
         "enabled=true\n"
-        "address=AA:BB:CC:DD:EE:FF\n"
+        "address=11:22:33:44:55:66\n"
         "profile=standard_ble_midi\n"
         "connect_on_start=false\n"
         "alsa_port_name=WIDI Master BLE-MIDI\n");
@@ -198,16 +194,13 @@ static void test_config_dir_loads_devices_d(void) {
     g_assert_cmpstr(gokeys->address, ==, "CB:81:F4:62:FF:07");
     g_assert_cmpstr(gokeys->profile, ==, "roland_gokeys");
     g_assert_true(gokeys->connect_on_start);
-    g_assert_true(gokeys->autoconnect);
     g_assert_true(gokeys->reconnect_on_link_loss);
-    g_assert_true(gokeys->auto_reconnect);
     g_assert_true(gokeys->enable_tx);
 
     g_assert_nonnull(widi);
-    g_assert_cmpstr(widi->address, ==, "AA:BB:CC:DD:EE:FF");
+    g_assert_cmpstr(widi->address, ==, "11:22:33:44:55:66");
     g_assert_cmpstr(widi->profile, ==, "standard_ble_midi");
     g_assert_false(widi->connect_on_start);
-    g_assert_false(widi->autoconnect);
 
     mb_config_clear(&cfg);
 
@@ -243,20 +236,20 @@ static void test_config_dir_ignores_duplicate_ids(void) {
         "client_name=midi-ble-rt\n"
         "[defaults]\n"
         "trust=true\n"
-        "auto_reconnect=true\n");
+        "reconnect_on_link_loss=true\n");
 
     write_file_checked(first_ini,
         "[device]\n"
         "id=dup-device\n"
         "enabled=true\n"
-        "address=AA:BB:CC:DD:EE:01\n"
+        "address=11:22:33:44:55:01\n"
         "name=first\n");
 
     write_file_checked(duplicate_ini,
         "[device]\n"
         "id=dup-device\n"
         "enabled=true\n"
-        "address=AA:BB:CC:DD:EE:02\n"
+        "address=11:22:33:44:55:02\n"
         "name=duplicate\n");
 
     MbConfig cfg = {0};
@@ -266,7 +259,7 @@ static void test_config_dir_ignores_duplicate_ids(void) {
     const MbDeviceConfig *device = mb_config_get_device(&cfg, 0);
     g_assert_nonnull(device);
     g_assert_cmpstr(device->id, ==, "dup-device");
-    g_assert_cmpstr(device->address, ==, "AA:BB:CC:DD:EE:01");
+    g_assert_cmpstr(device->address, ==, "11:22:33:44:55:01");
 
     mb_config_clear(&cfg);
 
