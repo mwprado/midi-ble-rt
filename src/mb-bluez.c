@@ -229,6 +229,14 @@ bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
     return true;
 }
 
+static void bluez_reset_after_failed_lifecycle_step(GDBusConnection *bus,
+                                                    const char *device_path,
+                                                    const char *reason) {
+    g_printerr("%s; resetting BlueZ device connection.\n", reason);
+    mb_bluez_disconnect_device(bus, device_path);
+    g_usleep(1000 * 1000);
+}
+
 bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
     if (bluez_device_is_connected(bus, device_path)) {
         g_print("Device already connected.\n");
@@ -243,32 +251,22 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
     if (in_progress) {
         if (bluez_wait_connected(bus, device_path, 15000))
             return true;
-        g_printerr("Connect remained in progress without Connected=true; resetting BlueZ device connection.\n");
-        mb_bluez_disconnect_device(bus, device_path);
-        g_usleep(1000 * 1000);
-    } else if (ambiguous_timeout) {
-        if (bluez_wait_connected(bus, device_path, 3000))
-            return true;
-        g_printerr("Connect timeout recovery: resetting BlueZ device connection.\n");
-        mb_bluez_disconnect_device(bus, device_path);
-        g_usleep(1000 * 1000);
-    } else {
+
+        bluez_reset_after_failed_lifecycle_step(bus,
+                                                device_path,
+                                                "Connect remained in progress without Connected=true");
         return false;
     }
 
-    if (bluez_device_is_connected(bus, device_path)) {
-        g_print("Device became connected after reset wait.\n");
-        return true;
+    if (ambiguous_timeout) {
+        if (bluez_wait_connected(bus, device_path, 3000))
+            return true;
+
+        bluez_reset_after_failed_lifecycle_step(bus,
+                                                device_path,
+                                                "Connect timed out without Connected=true");
+        return false;
     }
-
-    bool second_in_progress = false;
-    bool second_ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 15000, &second_in_progress, &second_ambiguous_timeout))
-        return true;
-
-    if ((second_in_progress || second_ambiguous_timeout) &&
-        bluez_wait_connected(bus, device_path, 10000))
-        return true;
 
     return false;
 }
@@ -295,20 +293,9 @@ bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_pa
     if (wait_services_resolved_once(bus, device_path, timeout_ms))
         return true;
 
-    g_printerr("Timed out waiting for ServicesResolved=true. Resetting BlueZ connection once.\n");
-
-    mb_bluez_disconnect_device(bus, device_path);
-    g_usleep(1000 * 1000);
-
-    if (!mb_bluez_connect_device(bus, device_path)) {
-        g_printerr("ServicesResolved recovery reconnect failed.\n");
-        return false;
-    }
-
-    if (wait_services_resolved_once(bus, device_path, timeout_ms))
-        return true;
-
-    g_printerr("Timed out waiting for ServicesResolved=true after BlueZ reset.\n");
+    bluez_reset_after_failed_lifecycle_step(bus,
+                                            device_path,
+                                            "Timed out waiting for ServicesResolved=true");
     return false;
 }
 
