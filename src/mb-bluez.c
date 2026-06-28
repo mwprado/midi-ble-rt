@@ -132,7 +132,29 @@ static bool bluez_device_is_connected(GDBusConnection *bus, const char *device_p
     return mb_bluez_get_device_bool_property(bus, device_path, "Connected", &connected) && connected;
 }
 
-static bool bluez_connect_call_once(GDBusConnection *bus, const char *device_path, int timeout_ms, bool *ambiguous_timeout) {
+static bool bluez_wait_connected(GDBusConnection *bus, const char *device_path, int timeout_ms) {
+    const int step_ms = 250;
+    int elapsed = 0;
+
+    while (elapsed < timeout_ms) {
+        if (bluez_device_is_connected(bus, device_path)) {
+            g_print("Connected=true.\n");
+            return true;
+        }
+        g_usleep(step_ms * 1000);
+        elapsed += step_ms;
+    }
+
+    return false;
+}
+
+static bool bluez_connect_call_once(GDBusConnection *bus,
+                                    const char *device_path,
+                                    int timeout_ms,
+                                    bool *in_progress,
+                                    bool *ambiguous_timeout) {
+    if (in_progress)
+        *in_progress = false;
     if (ambiguous_timeout)
         *ambiguous_timeout = false;
 
@@ -145,12 +167,18 @@ static bool bluez_connect_call_once(GDBusConnection *bus, const char *device_pat
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
-        if (remote &&
-            (g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0 ||
-             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0)) {
-            g_print("Device already connected or in progress.\n");
+        if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyConnected") == 0) {
+            g_print("Device already connected.\n");
             g_clear_error(&error);
             return true;
+        }
+
+        if (remote && g_strcmp0(remote, "org.bluez.Error.InProgress") == 0) {
+            g_print("Device Connect() already in progress; waiting for Connected=true.\n");
+            if (in_progress)
+                *in_progress = true;
+            g_clear_error(&error);
+            return false;
         }
 
         if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
@@ -172,57 +200,9 @@ static bool bluez_connect_call_once(GDBusConnection *bus, const char *device_pat
     return true;
 }
 
-bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
-    if (bluez_device_is_connected(bus, device_path)) {
-        g_print("Device already connected.\n");
-        return true;
-    }
-
-    bool ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 30000, &ambiguous_timeout))
-        return true;
-
-    if (!ambiguous_timeout)
-        return false;
-
-    for (unsigned i = 0; i < 20; i++) {
-        if (bluez_device_is_connected(bus, device_path)) {
-            g_print("Device became connected after Connect() timeout.\n");
-            return true;
-        }
-        g_usleep(250 * 1000);
-    }
-
-    g_printerr("Connect timeout recovery: resetting BlueZ device connection.\n");
-    mb_bluez_disconnect_device(bus, device_path);
-    g_usleep(1000 * 1000);
-
-    if (bluez_device_is_connected(bus, device_path)) {
-        g_print("Device became connected after reset wait.\n");
-        return true;
-    }
-
-    bool second_ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 45000, &second_ambiguous_timeout))
-        return true;
-
-    if (second_ambiguous_timeout && bluez_device_is_connected(bus, device_path)) {
-        g_print("Device became connected after second Connect() timeout.\n");
-        return true;
-    }
-
-    return false;
-}
-
 bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
     if (!bus || !device_path || !*device_path)
         return false;
-
-    bool connected = false;
-    if (mb_bluez_get_device_bool_property(bus, device_path, "Connected", &connected) && !connected) {
-        g_print("Device already disconnected.\n");
-        return true;
-    }
 
     GError *error = NULL;
     g_print("Calling Device1.Disconnect()...\n");
@@ -247,6 +227,50 @@ bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
     g_variant_unref(ret);
     g_print("Device Disconnect() ok.\n");
     return true;
+}
+
+bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
+    if (bluez_device_is_connected(bus, device_path)) {
+        g_print("Device already connected.\n");
+        return true;
+    }
+
+    bool in_progress = false;
+    bool ambiguous_timeout = false;
+    if (bluez_connect_call_once(bus, device_path, 30000, &in_progress, &ambiguous_timeout))
+        return true;
+
+    if (in_progress) {
+        if (bluez_wait_connected(bus, device_path, 30000))
+            return true;
+        g_printerr("Connect remained in progress without Connected=true; resetting BlueZ device connection.\n");
+        mb_bluez_disconnect_device(bus, device_path);
+        g_usleep(1000 * 1000);
+    } else if (ambiguous_timeout) {
+        if (bluez_wait_connected(bus, device_path, 5000))
+            return true;
+        g_printerr("Connect timeout recovery: resetting BlueZ device connection.\n");
+        mb_bluez_disconnect_device(bus, device_path);
+        g_usleep(1000 * 1000);
+    } else {
+        return false;
+    }
+
+    if (bluez_device_is_connected(bus, device_path)) {
+        g_print("Device became connected after reset wait.\n");
+        return true;
+    }
+
+    bool second_in_progress = false;
+    bool second_ambiguous_timeout = false;
+    if (bluez_connect_call_once(bus, device_path, 45000, &second_in_progress, &second_ambiguous_timeout))
+        return true;
+
+    if ((second_in_progress || second_ambiguous_timeout) &&
+        bluez_wait_connected(bus, device_path, 30000))
+        return true;
+
+    return false;
 }
 
 static bool wait_services_resolved_once(GDBusConnection *bus, const char *device_path, int timeout_ms) {
