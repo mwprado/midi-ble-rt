@@ -19,7 +19,6 @@ add_library(midi-ble-rt-core STATIC
     src/mb-ble-midi.c
     src/mb-buffer.c
     src/mb-config.c
-    src/mb-config-dir-alsa.c
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
     src/mb-log.c
@@ -124,8 +123,7 @@ if(BUILD_TESTING)
     add_test(NAME mb-duplex-runtime COMMAND test-mb-duplex-runtime)
 endif()
 
-install(TARGETS midi-ble-rtd midi-ble-rtctl DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.ini.example")
-install(FILES examples/midi/test-note.mid DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/examples/midi)
-install(PROGRAMS scripts/test-alsa-loopback.sh scripts/test-fluidsynth-smoke.sh DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/scripts)
-install(FILES packaging/fedora/midi-ble-rtd.service DESTINATION lib/systemd/user)
+install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.example")
+install(FILES packaging/systemd/midi-ble-rtd.service DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/systemd)
+install(FILES docs/MULTI_DEVICE_CONFIG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
