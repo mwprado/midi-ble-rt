@@ -13,9 +13,13 @@
 #include <errno.h>
 #include <glib.h>
 #include <glib-unix.h>
+#include <glib/gstdio.h>
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include "mb-alsa.h"
 #include "mb-alsa-port.h"
@@ -104,6 +108,17 @@ struct _ConfigDirRuntime {
     GQueue *lifecycle_queue;
     bool lifecycle_busy;
     guint lifecycle_source_id;
+
+    /*
+     * Local control socket.
+     *
+     * First IPC step for midi-ble-rtctl -> daemon communication.
+     * Lifecycle-changing commands will be routed to the monitor in a later
+     * commit; this first step exposes status/list/ping only.
+     */
+    int control_socket_fd;
+    guint control_socket_source_id;
+    char *control_socket_path;
 
     guint alsa_source_id;
     guint health_source_id;
@@ -1130,6 +1145,238 @@ static bool lifecycle_has_queued(ConfigDirRuntime *rt) {
     return queued;
 }
 
+static char *runtime_control_socket_path(void) {
+    const char *runtime_dir = g_get_user_runtime_dir();
+    if (!runtime_dir || !*runtime_dir)
+        runtime_dir = g_get_tmp_dir();
+
+    return g_build_filename(runtime_dir, "midi-ble-rt", "control.sock", NULL);
+}
+
+static unsigned runtime_lifecycle_queue_depth(ConfigDirRuntime *rt) {
+    if (!rt)
+        return 0;
+
+    g_mutex_lock(&rt->lifecycle_lock);
+    unsigned depth = rt->lifecycle_queue ? (unsigned)g_queue_get_length(rt->lifecycle_queue) : 0;
+    g_mutex_unlock(&rt->lifecycle_lock);
+
+    return depth;
+}
+
+static void runtime_control_reply(int fd, const char *text) {
+    if (!text)
+        return;
+
+    size_t len = strlen(text);
+    while (len > 0) {
+        ssize_t n = write(fd, text, len);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return;
+        }
+
+        text += n;
+        len -= (size_t)n;
+    }
+}
+
+static ConfigDeviceRuntime *runtime_find_device_by_id(ConfigDirRuntime *rt,
+                                                      const char *id) {
+    if (!rt || !id || !*id)
+        return NULL;
+
+    for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!dev || !dev->config)
+            continue;
+
+        if (g_strcmp0(dev->config->id, id) == 0 ||
+            g_strcmp0(dev->config->address, id) == 0)
+            return dev;
+    }
+
+    return NULL;
+}
+
+static void runtime_control_handle_request(ConfigDirRuntime *rt,
+                                           int client_fd,
+                                           const char *request) {
+    if (!rt || !request)
+        return;
+
+    char *line = g_strdup(request);
+    g_strstrip(line);
+
+    if (g_ascii_strcasecmp(line, "PING") == 0) {
+        runtime_control_reply(client_fd, "OK PONG\n");
+        g_free(line);
+        return;
+    }
+
+    if (g_ascii_strcasecmp(line, "STATUS") == 0) {
+        unsigned devices = rt->devices ? rt->devices->len : 0;
+        unsigned streaming = 0;
+
+        for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+            ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+            if (dev && device_session_is(dev, MB_SESSION_STREAMING))
+                streaming++;
+        }
+
+        char *reply = g_strdup_printf(
+            "OK STATUS devices=%u streaming=%u lifecycle_busy=%s lifecycle_queue=%u\n",
+            devices,
+            streaming,
+            rt->lifecycle_busy ? "yes" : "no",
+            runtime_lifecycle_queue_depth(rt));
+
+        runtime_control_reply(client_fd, reply);
+        g_free(reply);
+        g_free(line);
+        return;
+    }
+
+    if (g_ascii_strcasecmp(line, "LIST") == 0) {
+        runtime_control_reply(client_fd, "OK LIST\n");
+        runtime_control_reply(client_fd, "id\taddress\tname\tstate\talsa_port\n");
+
+        for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+            ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+            if (!dev || !dev->config)
+                continue;
+
+            char *row = g_strdup_printf("%s\t%s\t%s\t%s\t%d\n",
+                                        printable_string(dev->config->id, "-"),
+                                        printable_string(dev->config->address, "-"),
+                                        printable_string(dev->config->name, "-"),
+                                        mb_session_state_name(device_session_state(dev)),
+                                        dev->alsa_port);
+            runtime_control_reply(client_fd, row);
+            g_free(row);
+        }
+
+        runtime_control_reply(client_fd, ".\n");
+        g_free(line);
+        return;
+    }
+
+    if (g_str_has_prefix(line, "FIND ")) {
+        const char *id = line + 5;
+        g_strstrip((char *)id);
+
+        ConfigDeviceRuntime *dev = runtime_find_device_by_id(rt, id);
+        if (!dev) {
+            runtime_control_reply(client_fd, "ERR device not found\n");
+            g_free(line);
+            return;
+        }
+
+        char *reply = g_strdup_printf("OK DEVICE id=%s address=%s state=%s alsa_port=%d\n",
+                                      printable_string(dev->config->id, "-"),
+                                      printable_string(dev->config->address, "-"),
+                                      mb_session_state_name(device_session_state(dev)),
+                                      dev->alsa_port);
+        runtime_control_reply(client_fd, reply);
+        g_free(reply);
+        g_free(line);
+        return;
+    }
+
+    runtime_control_reply(client_fd, "ERR unknown command\n");
+    g_free(line);
+}
+
+static gboolean runtime_control_socket_cb(gint fd,
+                                          GIOCondition condition,
+                                          gpointer user_data) {
+    ConfigDirRuntime *rt = user_data;
+
+    if (!rt || condition & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
+        return G_SOURCE_CONTINUE;
+
+    struct sockaddr_un peer;
+    socklen_t peer_len = sizeof(peer);
+    int client_fd = accept(fd, (struct sockaddr *)&peer, &peer_len);
+    if (client_fd < 0) {
+        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+            g_printerr("control socket accept failed: %s\n", g_strerror(errno));
+        return G_SOURCE_CONTINUE;
+    }
+
+    char buf[512];
+    ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        runtime_control_handle_request(rt, client_fd, buf);
+    } else {
+        runtime_control_reply(client_fd, "ERR empty request\n");
+    }
+
+    close(client_fd);
+    return G_SOURCE_CONTINUE;
+}
+
+static bool runtime_start_control_socket(ConfigDirRuntime *rt) {
+    if (!rt)
+        return false;
+
+    rt->control_socket_path = runtime_control_socket_path();
+    char *dir = g_path_get_dirname(rt->control_socket_path);
+
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        g_printerr("Could not create runtime control directory %s: %s\n",
+                   dir, g_strerror(errno));
+        g_free(dir);
+        return false;
+    }
+    g_free(dir);
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        g_printerr("Could not create control socket: %s\n", g_strerror(errno));
+        return false;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+
+    if (strlen(rt->control_socket_path) >= sizeof(addr.sun_path)) {
+        g_printerr("Control socket path too long: %s\n", rt->control_socket_path);
+        close(fd);
+        return false;
+    }
+
+    strncpy(addr.sun_path, rt->control_socket_path, sizeof(addr.sun_path) - 1);
+    unlink(rt->control_socket_path);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        g_printerr("Could not bind control socket %s: %s\n",
+                   rt->control_socket_path, g_strerror(errno));
+        close(fd);
+        return false;
+    }
+
+    if (listen(fd, 8) != 0) {
+        g_printerr("Could not listen on control socket %s: %s\n",
+                   rt->control_socket_path, g_strerror(errno));
+        close(fd);
+        unlink(rt->control_socket_path);
+        return false;
+    }
+
+    rt->control_socket_fd = fd;
+    rt->control_socket_source_id = g_unix_fd_add(fd,
+                                                 G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL,
+                                                 runtime_control_socket_cb,
+                                                 rt);
+
+    g_print("Control socket: %s\n", rt->control_socket_path);
+    return rt->control_socket_source_id != 0;
+}
+
 static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
@@ -1303,8 +1550,20 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         g_source_remove(rt->health_source_id);
     if (rt->alsa_source_id)
         g_source_remove(rt->alsa_source_id);
+    if (rt->control_socket_source_id)
+        g_source_remove(rt->control_socket_source_id);
     if (rt->lifecycle_source_id)
         g_source_remove(rt->lifecycle_source_id);
+
+    if (rt->control_socket_fd >= 0) {
+        close(rt->control_socket_fd);
+        rt->control_socket_fd = -1;
+    }
+
+    if (rt->control_socket_path) {
+        unlink(rt->control_socket_path);
+        g_clear_pointer(&rt->control_socket_path, g_free);
+    }
 
     if (rt->devices)
         g_ptr_array_unref(rt->devices);
@@ -1337,6 +1596,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
 static int run_config_directory_mode(const char *config_dir) {
     ConfigDirRuntime rt;
     memset(&rt, 0, sizeof(rt));
+    rt.control_socket_fd = -1;
     g_mutex_init(&rt.alsa_lock);
     g_mutex_init(&rt.lifecycle_lock);
     rt.lifecycle_queue = g_queue_new();
@@ -1369,6 +1629,7 @@ static int run_config_directory_mode(const char *config_dir) {
     rt.reconnect_source_id = g_timeout_add(10000, runtime_reconnect_cb, &rt);
     rt.health_source_id = g_timeout_add(1000, runtime_device_health_cb, &rt);
     rt.alsa_source_id = g_timeout_add(1, runtime_alsa_rx_poll_cb, &rt);
+    runtime_start_control_socket(&rt);
 
     print_config_dir_devices(&rt, config_dir);
     runtime_start_configured_devices(&rt);
