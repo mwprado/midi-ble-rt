@@ -1,11 +1,11 @@
 [device]
-id = standard-ble-midi
-enabled = yes
-address = 11:22:33:44:55:66
-name = BLE-MIDI
+id = generic-example
+enabled = no
+address =
+name = Generic MIDI Device
 profile = standard_ble_midi
 connect_on_start = no
-alsa_port_name = Standard BLE-MIDI Device
+alsa_port_name = Generic MIDI Device
 
 [policy]
 pair = no
