@@ -82,17 +82,17 @@ Global defaults are inherited by entries in `devices.d/*.ini` unless the device 
 
 ## Device config
 
-Each file in `devices.d/*.ini` describes one BLE-MIDI device:
+Each file in `devices.d/*.ini` describes one BLE-MIDI device. New configs and packaged examples must use the current key names:
 
 ```ini
 [device]
 id = roland-gokeys
 enabled = yes
 address = CB:81:F4:62:FF:07
-name = Roland GO:KEYS
+name = Roland GO KEYS
 profile = roland_gokeys
 connect_on_start = yes
-alsa_port_name = Roland GO:KEYS BLE-MIDI
+alsa_port_name = Roland GO KEYS BLE-MIDI
 
 [policy]
 pair = no
@@ -119,7 +119,7 @@ manual disconnect
   A user command. It sets desired state to disconnected and suppresses automatic reconnect.
 ```
 
-Compatibility aliases still accepted by the parser:
+Legacy compatibility aliases accepted by the parser for existing user configs, but not used by packaged examples:
 
 ```text
 autoconnect    -> connect_on_start
@@ -174,7 +174,7 @@ Device[0]: roland-gokeys
 
 Device[1]: standard-ble-midi
   enabled:        yes
-  address:        AA:BB:CC:DD:EE:FF
+  address:        11:22:33:44:55:66
   profile:        standard_ble_midi
   connect_on_start: no
   bluez:          not found
