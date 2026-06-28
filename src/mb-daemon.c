@@ -208,7 +208,9 @@ static int run_config_directory_mode(const char *config_dir) {
     }
 
     MbDaemon daemon = {0};
+    MbConfigDirAlsa alsa = {0};
     build_config_dir_sessions(&cfg, &daemon);
+    mb_config_dir_alsa_open_ports(&cfg, &alsa);
     resolve_config_dir_bluez_devices(&cfg, &daemon);
     try_config_dir_connect_devices(&cfg, &daemon);
     print_config_dir_devices(&cfg, &daemon, config_dir);
@@ -227,6 +229,7 @@ static int run_config_directory_mode(const char *config_dir) {
         g_source_remove(sigterm_source);
     g_main_loop_unref(loop);
 
+    mb_config_dir_alsa_close(&alsa);
     mb_daemon_clear(&daemon);
     mb_config_clear(&cfg);
     return 0;
