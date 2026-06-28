@@ -4,6 +4,7 @@
 #include "mb-config.h"
 
 #include <alsa/asoundlib.h>
+#include <glib.h>
 #include <stdbool.h>
 
 typedef struct MbConfigDirAlsa {
