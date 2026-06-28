@@ -159,7 +159,7 @@ static void print_config_dir_devices(const MbConfig *cfg,
     g_print("Service UUID: %s\n", printable_string(cfg->service_uuid, ""));
     g_print("I/O UUID: %s\n", printable_string(cfg->io_uuid, ""));
     g_print("I/O alias: %s\n", printable_string(cfg->io_uuid_alias, ""));
-    g_print("Stats: %s\n", cfg->stats_enabled ? "enabled" : "disabled");
+    g_print("Stats: not available in config-directory skeleton\n");
     g_print("Configured devices: %u\n", mb_config_device_count(cfg));
     g_print("Skeleton sessions: %zu\n", mb_daemon_session_count(daemon));
 
@@ -197,7 +197,7 @@ static void print_config_dir_devices(const MbConfig *cfg,
 
     g_print("\n");
     g_print("Note: directory configs currently connect Device1 only.\n");
-    g_print("GATT binding, ALSA ports and streaming remain on the single-device file config path.\n");
+    g_print("GATT binding, ALSA ports, stats and streaming remain on the single-device file config path.\n");
 }
 
 static int run_config_directory_mode(const char *config_dir) {
