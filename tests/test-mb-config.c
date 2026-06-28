@@ -217,6 +217,63 @@ static void test_config_dir_loads_devices_d(void) {
     g_free(dir);
 }
 
+static void test_config_dir_ignores_duplicate_ids(void) {
+    GError *error = NULL;
+    char *dir = g_dir_make_tmp("mb-config-dup-test-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(dir);
+
+    char *devices_dir = g_build_filename(dir, "devices.d", NULL);
+    g_assert_cmpint(g_mkdir(devices_dir, 0700), ==, 0);
+
+    char *daemon_ini = g_build_filename(dir, "daemon.ini", NULL);
+    char *first_ini = g_build_filename(devices_dir, "00-first.ini", NULL);
+    char *duplicate_ini = g_build_filename(devices_dir, "01-duplicate.ini", NULL);
+
+    write_file_checked(daemon_ini,
+        "[daemon]\n"
+        "client_name=midi-ble-rt\n"
+        "[defaults]\n"
+        "trust=true\n"
+        "auto_reconnect=true\n");
+
+    write_file_checked(first_ini,
+        "[device]\n"
+        "id=dup-device\n"
+        "enabled=true\n"
+        "address=AA:BB:CC:DD:EE:01\n"
+        "name=first\n");
+
+    write_file_checked(duplicate_ini,
+        "[device]\n"
+        "id=dup-device\n"
+        "enabled=true\n"
+        "address=AA:BB:CC:DD:EE:02\n"
+        "name=duplicate\n");
+
+    MbConfig cfg = {0};
+    g_assert_true(mb_config_load_dir(&cfg, dir));
+
+    g_assert_cmpuint(mb_config_device_count(&cfg), ==, 1);
+    const MbDeviceConfig *device = mb_config_get_device(&cfg, 0);
+    g_assert_nonnull(device);
+    g_assert_cmpstr(device->id, ==, "dup-device");
+    g_assert_cmpstr(device->address, ==, "AA:BB:CC:DD:EE:01");
+
+    mb_config_clear(&cfg);
+
+    g_unlink(daemon_ini);
+    g_unlink(first_ini);
+    g_unlink(duplicate_ini);
+    g_rmdir(devices_dir);
+    g_rmdir(dir);
+    g_free(daemon_ini);
+    g_free(first_ini);
+    g_free(duplicate_ini);
+    g_free(devices_dir);
+    g_free(dir);
+}
+
 static void test_missing_file_fails(void) {
     MbConfig cfg = {0};
     g_assert_false(mb_config_load(&cfg, "/tmp/midi-ble-rt-missing-config.ini"));
@@ -229,6 +286,7 @@ int main(int argc, char **argv) {
     g_test_add_func("/mb-config/defaults", test_defaults_are_applied);
     g_test_add_func("/mb-config/explicit-values", test_explicit_values_override_defaults);
     g_test_add_func("/mb-config/config-dir-devices-d", test_config_dir_loads_devices_d);
+    g_test_add_func("/mb-config/config-dir-duplicate-ids", test_config_dir_ignores_duplicate_ids);
     g_test_add_func("/mb-config/missing-file", test_missing_file_fails);
 
     return g_test_run();
