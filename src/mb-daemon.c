@@ -14,6 +14,7 @@
 
 #include "mb-bluez.h"
 #include "mb-config.h"
+#include "mb-config-dir-alsa.h"
 #include "mb-session.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
