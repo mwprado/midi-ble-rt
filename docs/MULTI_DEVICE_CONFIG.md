@@ -23,7 +23,7 @@ daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files, builds IDLE session skeletons and tries to resolve each configured address to a BlueZ `Device1` object path. It does not connect devices and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
+At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It does not bind GATT, does not create ALSA ports and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
 
 `--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
 
@@ -155,7 +155,7 @@ prints a summary like:
 
 ```text
 midi-ble-rtd
-Runtime: config-directory BlueZ discovery skeleton
+Runtime: config-directory connect skeleton
 Config: /home/user/.config/midi-ble-rt
 ALSA client: midi-ble-rt
 Service UUID: 03b80e5a-ede8-4b33-a751-6ce34ec4c700
@@ -167,16 +167,16 @@ Device[0]: roland-gokeys
   enabled:        yes
   address:        CB:81:F4:62:FF:07
   profile:        roland_gokeys
-  autoconnect:    yes
+  connect_on_start: yes
   bluez:          found
   session path:   /org/bluez/hci0/dev_CB_81_F4_62_FF_07
-  session state:  IDLE
+  session state:  WAIT_SERVICES
 
 Device[1]: standard-ble-midi
   enabled:        yes
   address:        AA:BB:CC:DD:EE:FF
   profile:        standard_ble_midi
-  autoconnect:    no
+  connect_on_start: no
   bluez:          not found
   session path:   config:standard-ble-midi
   session state:  IDLE
