@@ -161,6 +161,41 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
     return true;
 }
 
+bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
+    if (!bus || !device_path || !*device_path)
+        return false;
+
+    bool connected = false;
+    if (mb_bluez_get_device_bool_property(bus, device_path, "Connected", &connected) && !connected) {
+        g_print("Device already disconnected.\n");
+        return true;
+    }
+
+    GError *error = NULL;
+    g_print("Calling Device1.Disconnect()...\n");
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Disconnect",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
+
+    if (!ret) {
+        const char *remote = g_dbus_error_get_remote_error(error);
+        if (remote && g_strcmp0(remote, "org.bluez.Error.NotConnected") == 0) {
+            g_print("Device already disconnected.\n");
+            g_clear_error(&error);
+            return true;
+        }
+
+        g_printerr("Device Disconnect() failed: %s\n", error->message);
+        g_clear_error(&error);
+        return false;
+    }
+
+    g_variant_unref(ret);
+    g_print("Device Disconnect() ok.\n");
+    return true;
+}
+
 bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_path, int timeout_ms) {
     const int step_ms = 100;
     int elapsed = 0;
