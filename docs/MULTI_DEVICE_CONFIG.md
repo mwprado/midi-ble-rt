@@ -1,6 +1,6 @@
 # Multi-device configuration layout
 
-This document describes the staged configuration model for the `multi-device-runtime` branch.
+This document describes the staged configuration model for the multi-device branches.
 
 The public configuration option remains `--config`. The value may be either a single INI file or a configuration directory.
 
@@ -23,7 +23,7 @@ daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files and builds IDLE session skeletons. It does not start multi-device streaming yet. The orchestrator will consume this model in a later cut.
+At this stage, directory mode validates the directory, loads all enabled device files, builds IDLE session skeletons and tries to resolve each configured address to a BlueZ `Device1` object path. It does not connect devices and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
 
 `--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
 
@@ -132,7 +132,7 @@ prints a summary like:
 
 ```text
 midi-ble-rtd
-Runtime: config-directory session skeleton
+Runtime: config-directory BlueZ discovery skeleton
 Config: /home/user/.config/midi-ble-rt
 ALSA client: midi-ble-rt
 Service UUID: 03b80e5a-ede8-4b33-a751-6ce34ec4c700
@@ -145,7 +145,17 @@ Device[0]: roland-gokeys
   address:        CB:81:F4:62:FF:07
   profile:        roland_gokeys
   autoconnect:    yes
-  session path:   config:roland-gokeys
+  bluez:          found
+  session path:   /org/bluez/hci0/dev_CB_81_F4_62_FF_07
+  session state:  IDLE
+
+Device[1]: standard-ble-midi
+  enabled:        yes
+  address:        AA:BB:CC:DD:EE:FF
+  profile:        standard_ble_midi
+  autoconnect:    no
+  bluez:          not found
+  session path:   config:standard-ble-midi
   session state:  IDLE
 ```
 
