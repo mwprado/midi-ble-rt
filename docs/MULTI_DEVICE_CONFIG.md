@@ -23,7 +23,7 @@ daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It does not bind GATT, does not create ALSA ports and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
+At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It then stays alive in a GLib main loop until Ctrl-C or SIGTERM. It does not bind GATT, does not create ALSA ports and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
 
 `--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
 
@@ -180,6 +180,8 @@ Device[1]: standard-ble-midi
   bluez:          not found
   session path:   config:standard-ble-midi
   session state:  IDLE
+
+Daemon loop: running. Press Ctrl-C to exit.
 ```
 
 The next implementation step is to move this model into the orchestrator:
