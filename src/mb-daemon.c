@@ -36,6 +36,7 @@ typedef struct {
     ConfigDirRuntime *owner;
     const MbDeviceConfig *config;
     MbSession *session;
+    GMutex session_lock;
 
     MbDuplexRuntime runtime;
     bool runtime_started;
@@ -125,12 +126,45 @@ static const char *device_io_alias(const ConfigDeviceRuntime *dev) {
     return "";
 }
 
+static char *device_dup_device_path(ConfigDeviceRuntime *dev) {
+    char *path = NULL;
+    g_mutex_lock(&dev->session_lock);
+    path = g_strdup(dev->session ? dev->session->device_path : NULL);
+    g_mutex_unlock(&dev->session_lock);
+    return path;
+}
+
+static char *device_dup_char_path(ConfigDeviceRuntime *dev) {
+    char *path = NULL;
+    g_mutex_lock(&dev->session_lock);
+    path = g_strdup(dev->session ? dev->session->midi_char_path : NULL);
+    g_mutex_unlock(&dev->session_lock);
+    return path;
+}
+
+static MbSessionState device_session_state(ConfigDeviceRuntime *dev) {
+    g_mutex_lock(&dev->session_lock);
+    MbSessionState state = dev->session ? dev->session->state : MB_SESSION_ERROR;
+    g_mutex_unlock(&dev->session_lock);
+    return state;
+}
+
+static bool device_has_bluez_device_path(ConfigDeviceRuntime *dev) {
+    bool ok = false;
+    g_mutex_lock(&dev->session_lock);
+    ok = session_has_bluez_device_path(dev->session);
+    g_mutex_unlock(&dev->session_lock);
+    return ok;
+}
+
 static bool device_session_event(ConfigDeviceRuntime *dev, MbEventType event) {
+    g_mutex_lock(&dev->session_lock);
     MbSessionState before = dev->session->state;
     MbErrorCode before_error = dev->session->error;
     bool ok = mb_session_handle_event(dev->session, event);
     MbSessionState after = dev->session->state;
     MbErrorCode after_error = dev->session->error;
+    g_mutex_unlock(&dev->session_lock);
 
     if (!ok || before != after || before_error != after_error) {
         g_print("Session[%s]: %s --%s--> %s",
@@ -149,14 +183,14 @@ static bool device_session_event(ConfigDeviceRuntime *dev, MbEventType event) {
 }
 
 static bool device_session_is(ConfigDeviceRuntime *dev, MbSessionState expected) {
-    return dev && dev->session && dev->session->state == expected;
+    return dev && dev->session && device_session_state(dev) == expected;
 }
 
 static bool device_can_mark_disconnected(ConfigDeviceRuntime *dev) {
     if (!dev || !dev->session)
         return false;
 
-    MbSessionState state = dev->session->state;
+    MbSessionState state = device_session_state(dev);
     return state != MB_SESSION_IDLE &&
            state != MB_SESSION_RECONNECTING &&
            state != MB_SESSION_ERROR;
@@ -218,6 +252,7 @@ static void device_runtime_free(gpointer data) {
     mb_duplex_runtime_clear(&dev->runtime);
     mb_alsa_midi_event_pair_free(&dev->alsa_midi_encoder,
                                   &dev->alsa_midi_decoder);
+    g_mutex_clear(&dev->session_lock);
     g_free(dev);
 }
 
@@ -239,15 +274,16 @@ static void runtime_create_devices(ConfigDirRuntime *rt) {
         dev->config = device;
         dev->session = session;
         dev->alsa_port = -1;
+        g_mutex_init(&dev->session_lock);
         g_ptr_array_add(rt->devices, dev);
     }
 }
 
 static void runtime_remove_char_route(ConfigDeviceRuntime *dev) {
-    if (dev && dev->owner && dev->owner->device_by_char_path &&
-        dev->session && dev->session->midi_char_path)
-        g_hash_table_remove(dev->owner->device_by_char_path,
-                            dev->session->midi_char_path);
+    char *char_path = device_dup_char_path(dev);
+    if (char_path && dev->owner && dev->owner->device_by_char_path)
+        g_hash_table_remove(dev->owner->device_by_char_path, char_path);
+    g_free(char_path);
 }
 
 static void device_stop_notify(ConfigDeviceRuntime *dev) {
@@ -303,7 +339,10 @@ static bool device_ensure_alsa_port(ConfigDeviceRuntime *dev) {
                                      &dev->alsa_midi_decoder))
         return false;
 
+    g_mutex_lock(&dev->session_lock);
     mb_session_set_alsa_port(dev->session, dev->alsa_port);
+    g_mutex_unlock(&dev->session_lock);
+
     g_hash_table_replace(rt->device_by_alsa_port,
                          GINT_TO_POINTER(dev->alsa_port),
                          dev);
@@ -422,7 +461,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
     if (!midi || len == 0)
         return true;
 
-    char *char_path = g_strdup(dev->session->midi_char_path);
+    char *char_path = device_dup_char_path(dev);
     if (!char_path) {
         g_printerr("No GATT characteristic path for %s.\n", device_label(dev));
         return false;
@@ -537,8 +576,11 @@ static void device_on_properties_changed(GDBusConnection *connection,
 
     g_variant_get(parameters, "(&s@a{sv}@as)", &iface, &changed, &invalidated);
 
-    if (g_strcmp0(iface, DEVICE_IFACE) == 0 &&
-        dev->session->device_path && g_strcmp0(object_path, dev->session->device_path) == 0) {
+    char *device_path = device_dup_device_path(dev);
+    bool device_match = device_path && g_strcmp0(object_path, device_path) == 0;
+    g_free(device_path);
+
+    if (g_strcmp0(iface, DEVICE_IFACE) == 0 && device_match) {
         GVariant *v_connected = g_variant_lookup_value(changed, "Connected", G_VARIANT_TYPE_BOOLEAN);
         if (v_connected) {
             gboolean connected = g_variant_get_boolean(v_connected);
@@ -548,8 +590,11 @@ static void device_on_properties_changed(GDBusConnection *connection,
         }
     }
 
-    if (g_strcmp0(iface, GATT_CHRC_IFACE) == 0 &&
-        dev->session->midi_char_path && g_strcmp0(object_path, dev->session->midi_char_path) == 0) {
+    char *char_path = device_dup_char_path(dev);
+    bool char_match = char_path && g_strcmp0(object_path, char_path) == 0;
+    g_free(char_path);
+
+    if (g_strcmp0(iface, GATT_CHRC_IFACE) == 0 && char_match) {
         GVariant *value = g_variant_lookup_value(changed, "Value", G_VARIANT_TYPE("ay"));
         if (value) {
             gsize len = 0;
@@ -568,16 +613,21 @@ static void device_on_properties_changed(GDBusConnection *connection,
 }
 
 static bool device_start_device_watch(ConfigDeviceRuntime *dev) {
-    if (!dev->session->device_path)
+    char *device_path = device_dup_device_path(dev);
+    if (!device_path)
         return false;
 
-    if (dev->device_sub_id)
+    if (dev->device_sub_id) {
+        g_free(device_path);
         return true;
+    }
 
     dev->device_sub_id = mb_bluez_subscribe_properties_changed(dev->owner->bus,
-                                                               dev->session->device_path,
+                                                               device_path,
                                                                device_on_properties_changed,
                                                                dev);
+    g_free(device_path);
+
     if (!dev->device_sub_id) {
         g_printerr("Failed to subscribe to Device1 PropertiesChanged for %s.\n",
                    device_label(dev));
@@ -591,39 +641,49 @@ static bool device_start_notify(ConfigDeviceRuntime *dev) {
     GError *error = NULL;
 
     device_stop_notify(dev);
+
+    char *char_path = device_dup_char_path(dev);
+    if (!char_path)
+        return false;
+
     dev->notify_sub_id = mb_bluez_subscribe_properties_changed(dev->owner->bus,
-                                                               dev->session->midi_char_path,
+                                                               char_path,
                                                                device_on_properties_changed,
                                                                dev);
     if (!dev->notify_sub_id) {
+        g_free(char_path);
         g_printerr("Failed to subscribe to GattCharacteristic1 PropertiesChanged for %s.\n",
                    device_label(dev));
         return false;
     }
 
     if (!mb_gatt_midi_start_notify(dev->owner->bus,
-                                   dev->session->midi_char_path,
+                                   char_path,
                                    15000,
                                    &error)) {
         g_printerr("StartNotify failed for %s: %s\n",
                    device_label(dev), error ? error->message : "unknown error");
         g_clear_error(&error);
+        g_free(char_path);
         return false;
     }
 
+    g_free(char_path);
     g_print("StartNotify ok for %s.\n", device_label(dev));
     return true;
 }
 
 static bool device_try_start_streaming(ConfigDeviceRuntime *dev) {
     ConfigDirRuntime *rt = dev->owner;
-    MbSessionState state = dev->session->state;
+    MbSessionState state = device_session_state(dev);
 
     if (state == MB_SESSION_STREAMING)
         return true;
 
-    if (!session_has_bluez_device_path(dev->session)) {
+    char *device_path = device_dup_device_path(dev);
+    if (!device_path || g_str_has_prefix(device_path, "config:")) {
         g_print("Connect skipped for %s: BlueZ Device1 not found.\n", device_label(dev));
+        g_free(device_path);
         return false;
     }
 
@@ -631,43 +691,51 @@ static bool device_try_start_streaming(ConfigDeviceRuntime *dev) {
         device_session_event(dev, MB_EV_RECONNECT_TIMER);
     else if (state == MB_SESSION_IDLE || state == MB_SESSION_SCANNING)
         device_session_event(dev, MB_EV_CMD_CONNECT);
-    else if (state != MB_SESSION_CONNECTING)
+    else if (state != MB_SESSION_CONNECTING) {
+        g_free(device_path);
         return false;
+    }
 
-    if (dev->config->pair && !mb_bluez_pair_device(rt->bus, dev->session->device_path)) {
+    if (dev->config->pair && !mb_bluez_pair_device(rt->bus, device_path)) {
         device_session_event(dev, MB_EV_BLUEZ_CONNECT_FAILED);
+        g_free(device_path);
         return false;
     }
 
     if (dev->config->trust)
-        mb_bluez_set_device_trusted(rt->bus, dev->session->device_path);
+        mb_bluez_set_device_trusted(rt->bus, device_path);
 
-    if (!mb_bluez_connect_device(rt->bus, dev->session->device_path)) {
+    if (!mb_bluez_connect_device(rt->bus, device_path)) {
         device_session_event(dev, MB_EV_BLUEZ_CONNECT_FAILED);
+        g_free(device_path);
         return false;
     }
     device_session_event(dev, MB_EV_BLUEZ_CONNECTED);
 
-    if (!mb_bluez_wait_services_resolved(rt->bus, dev->session->device_path, 15000)) {
+    if (!mb_bluez_wait_services_resolved(rt->bus, device_path, 15000)) {
         device_session_event(dev, MB_EV_TIMEOUT);
+        g_free(device_path);
         return false;
     }
     device_session_event(dev, MB_EV_BLUEZ_SERVICES_RESOLVED);
 
     char *service_path = mb_gatt_midi_find_service(rt->bus,
-                                                   dev->session->device_path,
+                                                   device_path,
                                                    rt->cfg.service_uuid);
     if (!service_path) {
         g_printerr("BLE-MIDI service not found for %s.\n", device_label(dev));
         device_session_event(dev, MB_EV_MIDI_SERVICE_NOT_FOUND);
+        g_free(device_path);
         return false;
     }
 
     char *char_path = mb_gatt_midi_find_characteristic(rt->bus,
-                                                       dev->session->device_path,
+                                                       device_path,
                                                        service_path,
                                                        rt->cfg.io_uuid,
                                                        device_io_alias(dev));
+    g_free(device_path);
+
     if (!char_path) {
         g_printerr("BLE-MIDI I/O characteristic not found for %s.\n", device_label(dev));
         g_free(service_path);
@@ -675,10 +743,13 @@ static bool device_try_start_streaming(ConfigDeviceRuntime *dev) {
         return false;
     }
 
+    g_mutex_lock(&dev->session_lock);
     mb_session_set_midi_binding(dev->session,
                                 service_path,
                                 char_path,
                                 rt->cfg.io_uuid);
+    g_mutex_unlock(&dev->session_lock);
+
     g_hash_table_replace(rt->device_by_char_path, g_strdup(char_path), dev);
     g_free(service_path);
     g_free(char_path);
@@ -783,12 +854,14 @@ static gboolean runtime_device_health_cb(gpointer user_data) {
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev || !session_has_bluez_device_path(dev->session) || !device_can_mark_disconnected(dev))
+        if (!dev || !device_has_bluez_device_path(dev) || !device_can_mark_disconnected(dev))
             continue;
 
+        char *device_path = device_dup_device_path(dev);
         bool connected = false;
-        if (!mb_bluez_get_device_bool_property(rt->bus, dev->session->device_path, "Connected", &connected) || !connected)
+        if (!mb_bluez_get_device_bool_property(rt->bus, device_path, "Connected", &connected) || !connected)
             device_mark_disconnected(dev, "health check");
+        g_free(device_path);
     }
 
     return G_SOURCE_CONTINUE;
@@ -840,6 +913,8 @@ static void print_config_dir_devices(ConfigDirRuntime *rt, const char *config_di
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        char *session_path = device_dup_device_path(dev);
+        MbSessionState state = device_session_state(dev);
         g_print("\n");
         g_print("Device[%u]: %s\n", i, printable_string(dev->config->id, "(unnamed)"));
         g_print("  address:        %s\n", printable_string(dev->config->address, "(none)"));
@@ -848,10 +923,11 @@ static void print_config_dir_devices(ConfigDirRuntime *rt, const char *config_di
         g_print("  connect_on_start: %s\n", dev->config->connect_on_start ? "yes" : "no");
         g_print("  reconnect_on_link_loss: %s\n", dev->config->reconnect_on_link_loss ? "yes" : "no");
         g_print("  enable_tx:      %s\n", dev->config->enable_tx ? "yes" : "no");
-        g_print("  bluez:          %s\n", session_has_bluez_device_path(dev->session) ? "found" : "not found");
-        g_print("  session path:   %s\n", printable_string(dev->session->device_path, "(none)"));
-        g_print("  session state:  %s\n", mb_session_state_name(dev->session->state));
+        g_print("  bluez:          %s\n", session_path && !g_str_has_prefix(session_path, "config:") ? "found" : "not found");
+        g_print("  session path:   %s\n", printable_string(session_path, "(none)"));
+        g_print("  session state:  %s\n", mb_session_state_name(state));
         g_print("  ALSA port:      %d\n", dev->alsa_port);
+        g_free(session_path);
     }
 }
 
