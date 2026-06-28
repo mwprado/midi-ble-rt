@@ -1,5 +1,6 @@
 #include "mb-alsa-port.h"
 
+#include <errno.h>
 #include <glib.h>
 
 static const char *nonempty_or(const char *value, const char *fallback) {
