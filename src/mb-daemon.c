@@ -47,7 +47,7 @@ static void build_config_dir_sessions(const MbConfig *cfg, MbDaemon *daemon) {
                                                       device->address,
                                                       device->name);
         if (session)
-            session->auto_reconnect = device->auto_reconnect;
+            session->auto_reconnect = device->reconnect_on_link_loss;
         g_free(path);
     }
 }
@@ -77,7 +77,7 @@ static bool resolve_config_dir_bluez_devices(const MbConfig *cfg, MbDaemon *daem
                                                       device->address,
                                                       device->name);
         if (session) {
-            session->auto_reconnect = device->auto_reconnect;
+            session->auto_reconnect = device->reconnect_on_link_loss;
             found++;
         }
         g_free(bluez_path);
@@ -87,11 +87,56 @@ static bool resolve_config_dir_bluez_devices(const MbConfig *cfg, MbDaemon *daem
     return found > 0;
 }
 
+static void try_config_dir_connect_devices(const MbConfig *cfg, MbDaemon *daemon) {
+    GError *error = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+    if (!bus) {
+        g_printerr("Connect skeleton unavailable: could not connect to system bus: %s\n",
+                   error ? error->message : "unknown error");
+        g_clear_error(&error);
+        return;
+    }
+
+    for (unsigned i = 0; i < mb_config_device_count(cfg); i++) {
+        const MbDeviceConfig *device = mb_config_get_device(cfg, i);
+        if (!device || !device->connect_on_start)
+            continue;
+
+        MbSession *session = mb_daemon_find_session_by_address(daemon, device->address);
+        if (!session || !session_has_bluez_device_path(session)) {
+            g_print("Connect skipped for %s: BlueZ Device1 not found.\n",
+                    printable_string(device->id, printable_string(device->address, "device")));
+            continue;
+        }
+
+        mb_session_handle_event(session, MB_EV_CMD_CONNECT);
+
+        if (device->pair && !mb_bluez_pair_device(bus, session->device_path)) {
+            mb_session_handle_event(session, MB_EV_BLUEZ_CONNECT_FAILED);
+            continue;
+        }
+
+        if (device->trust)
+            mb_bluez_set_device_trusted(bus, session->device_path);
+
+        if (!mb_bluez_connect_device(bus, session->device_path)) {
+            mb_session_handle_event(session, MB_EV_BLUEZ_CONNECT_FAILED);
+            continue;
+        }
+
+        mb_session_handle_event(session, MB_EV_BLUEZ_CONNECTED);
+        g_print("Connect skeleton ok for %s.\n",
+                printable_string(device->id, printable_string(device->address, "device")));
+    }
+
+    g_object_unref(bus);
+}
+
 static void print_config_dir_devices(const MbConfig *cfg,
                                      const MbDaemon *daemon,
                                      const char *config_dir) {
     g_print("midi-ble-rtd\n");
-    g_print("Runtime: config-directory BlueZ discovery skeleton\n");
+    g_print("Runtime: config-directory connect skeleton\n");
     g_print("Config: %s\n", config_dir);
     g_print("ALSA client: %s\n", printable_string(cfg->alsa_client_name, "midi-ble-rt"));
     g_print("Service UUID: %s\n", printable_string(cfg->service_uuid, ""));
@@ -115,10 +160,10 @@ static void print_config_dir_devices(const MbConfig *cfg,
         g_print("  address:        %s\n", printable_string(device->address, "(none)"));
         g_print("  name:           %s\n", printable_string(device->name, "(none)"));
         g_print("  profile:        %s\n", printable_string(device->profile, "standard_ble_midi"));
-        g_print("  autoconnect:    %s\n", device->autoconnect ? "yes" : "no");
+        g_print("  connect_on_start: %s\n", device->connect_on_start ? "yes" : "no");
         g_print("  pair:           %s\n", device->pair ? "yes" : "no");
         g_print("  trust:          %s\n", device->trust ? "yes" : "no");
-        g_print("  auto_reconnect: %s\n", device->auto_reconnect ? "yes" : "no");
+        g_print("  reconnect_on_link_loss: %s\n", device->reconnect_on_link_loss ? "yes" : "no");
         g_print("  enable_tx:      %s\n", device->enable_tx ? "yes" : "no");
         g_print("  ALSA port:      %s\n", printable_string(device->alsa_port_name, "BLE-MIDI"));
         if (session) {
@@ -133,8 +178,8 @@ static void print_config_dir_devices(const MbConfig *cfg,
     }
 
     g_print("\n");
-    g_print("Note: directory configs currently resolve BlueZ Device1 paths only.\n");
-    g_print("Connect, GATT binding, ALSA ports and streaming remain on the single-device file config path.\n");
+    g_print("Note: directory configs currently connect Device1 only.\n");
+    g_print("GATT binding, ALSA ports and streaming remain on the single-device file config path.\n");
 }
 
 static int run_config_directory_mode(const char *config_dir) {
@@ -147,6 +192,7 @@ static int run_config_directory_mode(const char *config_dir) {
     MbDaemon daemon = {0};
     build_config_dir_sessions(&cfg, &daemon);
     resolve_config_dir_bluez_devices(&cfg, &daemon);
+    try_config_dir_connect_devices(&cfg, &daemon);
     print_config_dir_devices(&cfg, &daemon, config_dir);
     mb_daemon_clear(&daemon);
     mb_config_clear(&cfg);
