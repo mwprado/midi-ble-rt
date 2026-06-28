@@ -107,10 +107,19 @@ Rules:
 
 ```text
 Only *.ini files in devices.d are loaded as device configs.
+Files are loaded in lexicographic filename order.
+The id field must be unique among enabled device configs.
+If an id is duplicated, the first config wins and the duplicate is ignored with a warning.
 Devices with enabled = no are ignored.
 Devices without address are ignored.
 Device identity is address-based; name is diagnostic.
 The profile field is declarative for now and will drive quirk policy later.
+```
+
+Duplicate warning format:
+
+```text
+Config /path/to/devices.d/example.ini: id 'example' already configured; ignoring duplicate configuration.
 ```
 
 ## Current branch behavior
