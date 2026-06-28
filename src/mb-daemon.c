@@ -9,6 +9,8 @@
 #include "mb-orchestrator.h"
 
 #include <glib.h>
+#include <glib-unix.h>
+#include <signal.h>
 
 #include "mb-bluez.h"
 #include "mb-config.h"
@@ -16,6 +18,13 @@
 
 static const char *printable_string(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
+}
+
+static gboolean quit_main_loop(gpointer user_data) {
+    GMainLoop *loop = user_data;
+    if (loop)
+        g_main_loop_quit(loop);
+    return G_SOURCE_REMOVE;
 }
 
 static bool session_has_bluez_device_path(const MbSession *session) {
@@ -202,6 +211,21 @@ static int run_config_directory_mode(const char *config_dir) {
     resolve_config_dir_bluez_devices(&cfg, &daemon);
     try_config_dir_connect_devices(&cfg, &daemon);
     print_config_dir_devices(&cfg, &daemon, config_dir);
+
+    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+    guint sigint_source = g_unix_signal_add(SIGINT, quit_main_loop, loop);
+    guint sigterm_source = g_unix_signal_add(SIGTERM, quit_main_loop, loop);
+
+    g_print("\nDaemon loop: running. Press Ctrl-C to exit.\n");
+    g_main_loop_run(loop);
+    g_print("Daemon loop: stopping.\n");
+
+    if (sigint_source)
+        g_source_remove(sigint_source);
+    if (sigterm_source)
+        g_source_remove(sigterm_source);
+    g_main_loop_unref(loop);
+
     mb_daemon_clear(&daemon);
     mb_config_clear(&cfg);
     return 0;
