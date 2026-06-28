@@ -41,6 +41,15 @@ typedef struct {
     MbDuplexRuntime runtime;
     bool runtime_started;
 
+    /*
+     * Dataplane TX lock per device.
+     *
+     * Cada dispositivo BLE-MIDI em STREAMING tem seu próprio TX worker.
+     * O lock é por dispositivo, não global, para permitir instrumentos
+     * tocando simultaneamente sem serializar todos os GATT WriteValue.
+     */
+    GMutex gatt_write_lock;
+
     int alsa_port;
     snd_midi_event_t *alsa_midi_encoder;
     snd_midi_event_t *alsa_midi_decoder;
@@ -50,6 +59,19 @@ typedef struct {
 
     uint8_t running_status;
 } ConfigDeviceRuntime;
+
+typedef enum {
+    MB_LIFECYCLE_CMD_DISCOVER,
+    MB_LIFECYCLE_CMD_CONNECT,
+    MB_LIFECYCLE_CMD_DISCONNECT,
+    MB_LIFECYCLE_CMD_RECHECK,
+} MbLifecycleCommandType;
+
+typedef struct {
+    MbLifecycleCommandType type;
+    ConfigDeviceRuntime *dev;
+    char *reason;
+} MbLifecycleCommand;
 
 struct _ConfigDirRuntime {
     MbConfig cfg;
@@ -64,8 +86,20 @@ struct _ConfigDirRuntime {
     GHashTable *device_by_char_path;
 
     GMutex alsa_lock;
-    GMutex gatt_write_lock;
-    GMutex bluez_lock;
+
+    /*
+     * Lifecycle/control-plane monitor.
+     *
+     * Executa na thread principal do GLib main loop.
+     * Tudo que altera descoberta, conexão, binding BlueZ/GATT,
+     * health/recheck, reconnect e futuro ctl deve passar por esta fila.
+     *
+     * RX/TX de cada sessão só rodam em paralelo depois de STREAMING,
+     * via MbDuplexRuntime por dispositivo.
+     */
+    GQueue *lifecycle_queue;
+    bool lifecycle_busy;
+    guint lifecycle_source_id;
 
     guint alsa_source_id;
     guint health_source_id;
@@ -253,6 +287,7 @@ static void device_runtime_free(gpointer data) {
     mb_duplex_runtime_clear(&dev->runtime);
     mb_alsa_midi_event_pair_free(&dev->alsa_midi_encoder,
                                   &dev->alsa_midi_decoder);
+    g_mutex_clear(&dev->gatt_write_lock);
     g_mutex_clear(&dev->session_lock);
     g_free(dev);
 }
@@ -276,6 +311,7 @@ static void runtime_create_devices(ConfigDirRuntime *rt) {
         dev->session = session;
         dev->alsa_port = -1;
         g_mutex_init(&dev->session_lock);
+        g_mutex_init(&dev->gatt_write_lock);
         g_ptr_array_add(rt->devices, dev);
     }
 }
@@ -535,9 +571,9 @@ static void device_tx_consume(MbRuntimeFlow *flow,
     (void)item;
     ConfigDeviceRuntime *dev = user_data;
 
-    g_mutex_lock(&dev->owner->gatt_write_lock);
+    g_mutex_lock(&dev->gatt_write_lock);
     device_ble_midi_write_packet(dev, data, len);
-    g_mutex_unlock(&dev->owner->gatt_write_lock);
+    g_mutex_unlock(&dev->gatt_write_lock);
 }
 
 static bool device_start_workers(ConfigDeviceRuntime *dev) {
@@ -779,6 +815,203 @@ static bool device_try_start_streaming(ConfigDeviceRuntime *dev) {
     return device_session_is(dev, MB_SESSION_STREAMING);
 }
 
+static const char *lifecycle_command_name(MbLifecycleCommandType type) {
+    switch (type) {
+    case MB_LIFECYCLE_CMD_DISCOVER: return "DISCOVER";
+    case MB_LIFECYCLE_CMD_CONNECT: return "CONNECT";
+    case MB_LIFECYCLE_CMD_DISCONNECT: return "DISCONNECT";
+    case MB_LIFECYCLE_CMD_RECHECK: return "RECHECK";
+    default: return "UNKNOWN";
+    }
+}
+
+static void lifecycle_command_free(MbLifecycleCommand *cmd) {
+    if (!cmd)
+        return;
+
+    g_free(cmd->reason);
+    g_free(cmd);
+}
+
+static gboolean lifecycle_process_next_cb(gpointer user_data);
+
+static bool lifecycle_has_pending(ConfigDirRuntime *rt,
+                                  ConfigDeviceRuntime *dev,
+                                  MbLifecycleCommandType type) {
+    if (!rt || !rt->lifecycle_queue)
+        return false;
+
+    for (GList *l = rt->lifecycle_queue->head; l; l = l->next) {
+        MbLifecycleCommand *cmd = l->data;
+        if (cmd && cmd->dev == dev && cmd->type == type)
+            return true;
+    }
+
+    return false;
+}
+
+static void lifecycle_schedule(ConfigDirRuntime *rt) {
+    if (!rt || rt->lifecycle_source_id)
+        return;
+
+    rt->lifecycle_source_id = g_idle_add(lifecycle_process_next_cb, rt);
+}
+
+static void lifecycle_enqueue(ConfigDirRuntime *rt,
+                              ConfigDeviceRuntime *dev,
+                              MbLifecycleCommandType type,
+                              const char *reason) {
+    if (!rt || !dev || !rt->lifecycle_queue)
+        return;
+
+    if (lifecycle_has_pending(rt, dev, type))
+        return;
+
+    MbLifecycleCommand *cmd = g_new0(MbLifecycleCommand, 1);
+    cmd->type = type;
+    cmd->dev = dev;
+    cmd->reason = g_strdup(reason);
+
+    g_queue_push_tail(rt->lifecycle_queue, cmd);
+
+    g_print("Lifecycle queued %s for %s%s%s.\n",
+            lifecycle_command_name(type),
+            device_label(dev),
+            reason && *reason ? ": " : "",
+            reason && *reason ? reason : "");
+
+    lifecycle_schedule(rt);
+}
+
+static bool device_lifecycle_discover(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner || !dev->config ||
+        !dev->config->address || !*dev->config->address)
+        return false;
+
+    ConfigDirRuntime *rt = dev->owner;
+    char *bluez_path = mb_bluez_find_device_path_by_address(rt->bus,
+                                                            dev->config->address);
+    if (!bluez_path) {
+        g_print("BlueZ Device1 not found for %s (%s).\n",
+                device_label(dev),
+                dev->config->address);
+        return false;
+    }
+
+    g_mutex_lock(&dev->session_lock);
+    mb_session_set_identity(dev->session,
+                            bluez_path,
+                            dev->config->address,
+                            dev->config->name);
+    g_mutex_unlock(&dev->session_lock);
+
+    g_print("BlueZ Device1 resolved for %s: %s\n",
+            device_label(dev),
+            bluez_path);
+
+    g_free(bluez_path);
+    return true;
+}
+
+static void device_lifecycle_disconnect(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner)
+        return;
+
+    char *device_path = device_dup_device_path(dev);
+
+    device_stop_notify(dev);
+
+    if (device_path && !g_str_has_prefix(device_path, "config:")) {
+        if (!mb_bluez_disconnect_device(dev->owner->bus, device_path))
+            g_printerr("BlueZ disconnect failed for %s.\n", device_label(dev));
+    }
+
+    device_session_event(dev, MB_EV_CMD_DISCONNECT);
+
+    g_free(device_path);
+}
+
+static void device_lifecycle_recheck(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner)
+        return;
+
+    char *device_path = device_dup_device_path(dev);
+
+    if (!device_path || g_str_has_prefix(device_path, "config:")) {
+        g_free(device_path);
+        device_lifecycle_discover(dev);
+        return;
+    }
+
+    bool connected = false;
+    if (!mb_bluez_get_device_bool_property(dev->owner->bus,
+                                           device_path,
+                                           "Connected",
+                                           &connected) ||
+        !connected) {
+        device_mark_disconnected(dev, "health check");
+    }
+
+    g_free(device_path);
+}
+
+static gboolean lifecycle_process_next_cb(gpointer user_data) {
+    ConfigDirRuntime *rt = user_data;
+    if (!rt)
+        return G_SOURCE_REMOVE;
+
+    rt->lifecycle_source_id = 0;
+
+    if (rt->lifecycle_busy)
+        return G_SOURCE_REMOVE;
+
+    MbLifecycleCommand *cmd = rt->lifecycle_queue
+        ? g_queue_pop_head(rt->lifecycle_queue)
+        : NULL;
+
+    if (!cmd)
+        return G_SOURCE_REMOVE;
+
+    rt->lifecycle_busy = true;
+
+    g_print("Lifecycle processing %s for %s%s%s.\n",
+            lifecycle_command_name(cmd->type),
+            device_label(cmd->dev),
+            cmd->reason && *cmd->reason ? ": " : "",
+            cmd->reason && *cmd->reason ? cmd->reason : "");
+
+    switch (cmd->type) {
+    case MB_LIFECYCLE_CMD_DISCOVER:
+        device_lifecycle_discover(cmd->dev);
+        break;
+
+    case MB_LIFECYCLE_CMD_CONNECT:
+        if (!device_has_bluez_device_path(cmd->dev))
+            device_lifecycle_discover(cmd->dev);
+
+        if (!device_try_start_streaming(cmd->dev))
+            g_print("Device %s did not reach STREAMING.\n",
+                    device_label(cmd->dev));
+        break;
+
+    case MB_LIFECYCLE_CMD_DISCONNECT:
+        device_lifecycle_disconnect(cmd->dev);
+        break;
+
+    case MB_LIFECYCLE_CMD_RECHECK:
+        device_lifecycle_recheck(cmd->dev);
+        break;
+    }
+
+    lifecycle_command_free(cmd);
+    rt->lifecycle_busy = false;
+
+    if (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue))
+        lifecycle_schedule(rt);
+
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
@@ -853,22 +1086,16 @@ static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
 static gboolean runtime_device_health_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
+    if (rt->lifecycle_busy ||
+        (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue)))
+        return G_SOURCE_CONTINUE;
+
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev || !device_has_bluez_device_path(dev) || !device_can_mark_disconnected(dev))
+        if (!dev || !device_can_mark_disconnected(dev))
             continue;
 
-        char *device_path = device_dup_device_path(dev);
-        bool connected = false;
-
-        g_mutex_lock(&rt->bluez_lock);
-        bool ok = mb_bluez_get_device_bool_property(rt->bus, device_path, "Connected", &connected);
-        g_mutex_unlock(&rt->bluez_lock);
-
-        if (!ok || !connected)
-            device_mark_disconnected(dev, "health check");
-
-        g_free(device_path);
+        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_RECHECK, "health");
     }
 
     return G_SOURCE_CONTINUE;
@@ -877,14 +1104,14 @@ static gboolean runtime_device_health_cb(gpointer user_data) {
 static gboolean runtime_reconnect_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
+    if (rt->lifecycle_busy ||
+        (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue)))
+        return G_SOURCE_CONTINUE;
+
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (dev && device_session_is(dev, MB_SESSION_RECONNECTING)) {
-            g_print("Reconnect timer fired for %s.\n", device_label(dev));
-            g_mutex_lock(&rt->bluez_lock);
-            device_try_start_streaming(dev);
-            g_mutex_unlock(&rt->bluez_lock);
-        }
+        if (dev && device_session_is(dev, MB_SESSION_RECONNECTING))
+            lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_CONNECT, "reconnect timer");
     }
 
     return G_SOURCE_CONTINUE;
@@ -896,12 +1123,8 @@ static void runtime_start_configured_devices(ConfigDirRuntime *rt) {
         if (!dev->config->connect_on_start)
             continue;
 
-        g_mutex_lock(&rt->bluez_lock);
-        bool started = device_try_start_streaming(dev);
-        g_mutex_unlock(&rt->bluez_lock);
-
-        if (!started)
-            g_print("Device %s did not reach STREAMING at startup.\n", device_label(dev));
+        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCOVER, "startup");
+        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_CONNECT, "startup");
     }
 }
 
@@ -958,6 +1181,15 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         g_source_remove(rt->health_source_id);
     if (rt->alsa_source_id)
         g_source_remove(rt->alsa_source_id);
+    if (rt->lifecycle_source_id)
+        g_source_remove(rt->lifecycle_source_id);
+
+    if (rt->lifecycle_queue) {
+        while (!g_queue_is_empty(rt->lifecycle_queue))
+            lifecycle_command_free(g_queue_pop_head(rt->lifecycle_queue));
+        g_queue_free(rt->lifecycle_queue);
+        rt->lifecycle_queue = NULL;
+    }
 
     if (rt->devices)
         g_ptr_array_unref(rt->devices);
@@ -975,16 +1207,15 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         g_object_unref(rt->bus);
 
     g_mutex_clear(&rt->alsa_lock);
-    g_mutex_clear(&rt->gatt_write_lock);
-    g_mutex_clear(&rt->bluez_lock);
 }
 
 static int run_config_directory_mode(const char *config_dir) {
     ConfigDirRuntime rt;
     memset(&rt, 0, sizeof(rt));
     g_mutex_init(&rt.alsa_lock);
-    g_mutex_init(&rt.gatt_write_lock);
-    g_mutex_init(&rt.bluez_lock);
+    rt.lifecycle_queue = g_queue_new();
+    rt.lifecycle_busy = false;
+    rt.lifecycle_source_id = 0;
     rt.device_by_alsa_port = g_hash_table_new(g_direct_hash, g_direct_equal);
     rt.device_by_char_path = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
@@ -1016,8 +1247,12 @@ static int run_config_directory_mode(const char *config_dir) {
     print_config_dir_devices(&rt, config_dir);
     runtime_start_configured_devices(&rt);
 
-    if (!runtime_has_streaming_device(&rt))
-        g_print("No configured device reached STREAMING yet; daemon stays alive for reconnect/manual future control.\n");
+    if (!runtime_has_streaming_device(&rt)) {
+        if (rt.lifecycle_queue && !g_queue_is_empty(rt.lifecycle_queue))
+            g_print("Startup lifecycle commands queued; daemon will attempt connection from the main loop.\n");
+        else
+            g_print("No configured device reached STREAMING yet; daemon stays alive for reconnect/manual future control.\n");
+    }
 
     g_print("\nDaemon loop: running. Press Ctrl-C to exit.\n");
     g_main_loop_run(rt.loop);
