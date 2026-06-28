@@ -111,6 +111,14 @@ static void try_config_dir_connect_devices(const MbConfig *cfg, MbDaemon *daemon
 
         mb_session_handle_event(session, MB_EV_CMD_CONNECT);
 
+        bool connected = false;
+        if (mb_bluez_get_device_bool_property(bus, session->device_path, "Connected", &connected) && connected) {
+            mb_session_handle_event(session, MB_EV_BLUEZ_CONNECTED);
+            g_print("Connect skeleton already connected for %s.\n",
+                    printable_string(device->id, printable_string(device->address, "device")));
+            continue;
+        }
+
         if (device->pair && !mb_bluez_pair_device(bus, session->device_path)) {
             mb_session_handle_event(session, MB_EV_BLUEZ_CONNECT_FAILED);
             continue;
