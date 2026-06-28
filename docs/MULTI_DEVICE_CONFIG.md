@@ -23,7 +23,7 @@ daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It then stays alive in a GLib main loop until Ctrl-C or SIGTERM. It does not bind GATT, does not create ALSA ports and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
+At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, creates one ALSA Sequencer port per enabled device, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It then stays alive in a GLib main loop until Ctrl-C or SIGTERM. It does not bind GATT and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
 
 `--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
 
@@ -151,7 +151,7 @@ Config /path/to/devices.d/example.ini: id 'example' already configured; ignoring
 midi-ble-rtd --config ~/.config/midi-ble-rt
 ```
 
-prints a summary like:
+creates ALSA Sequencer ports and prints a summary like:
 
 ```text
 midi-ble-rtd
