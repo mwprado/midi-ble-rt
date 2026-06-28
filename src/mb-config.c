@@ -42,6 +42,12 @@ static const char *str_nonempty_or(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
 }
 
+static gint compare_filename_strings(gconstpointer a, gconstpointer b) {
+    const char *sa = *(const char * const *)a;
+    const char *sb = *(const char * const *)b;
+    return g_strcmp0(sa, sb);
+}
+
 static void mb_device_config_free(gpointer data) {
     MbDeviceConfig *device = data;
     if (!device)
@@ -161,6 +167,32 @@ static void mb_config_add_compat_device(MbConfig *cfg) {
     g_ptr_array_add(cfg->devices, device);
 }
 
+static void mb_config_add_device_if_valid(MbConfig *cfg,
+                                          GHashTable *seen_ids,
+                                          MbDeviceConfig *device,
+                                          const char *path) {
+    if (!device)
+        return;
+
+    if (!device->enabled || !device->address || !*device->address) {
+        mb_device_config_free(device);
+        return;
+    }
+
+    if (device->id && *device->id && g_hash_table_contains(seen_ids, device->id)) {
+        g_printerr("Config %s: id '%s' already configured; ignoring duplicate configuration.\n",
+                   path,
+                   device->id);
+        mb_device_config_free(device);
+        return;
+    }
+
+    if (device->id && *device->id)
+        g_hash_table_add(seen_ids, g_strdup(device->id));
+
+    g_ptr_array_add(cfg->devices, device);
+}
+
 bool mb_config_load(MbConfig *cfg, const char *path) {
     if (!cfg || !path)
         return false;
@@ -219,11 +251,19 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         return false;
     }
 
+    GPtrArray *filenames = g_ptr_array_new_with_free_func(g_free);
     const char *name = NULL;
     while ((name = g_dir_read_name(dir)) != NULL) {
-        if (!g_str_has_suffix(name, ".ini"))
-            continue;
+        if (g_str_has_suffix(name, ".ini"))
+            g_ptr_array_add(filenames, g_strdup(name));
+    }
+    g_dir_close(dir);
+    g_ptr_array_sort(filenames, compare_filename_strings);
 
+    GHashTable *seen_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    for (unsigned i = 0; i < filenames->len; i++) {
+        name = g_ptr_array_index(filenames, i);
         char *path = g_build_filename(devices_dir, name, NULL);
         GKeyFile *device_kf = g_key_file_new();
         error = NULL;
@@ -239,16 +279,13 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         MbDeviceConfig *device = mb_device_config_from_key_file(device_kf, &tmp, fallback_id);
         g_free(fallback_id);
         g_key_file_unref(device_kf);
-        g_free(path);
 
-        if (device->enabled && device->address && *device->address) {
-            g_ptr_array_add(tmp.devices, device);
-        } else {
-            mb_device_config_free(device);
-        }
+        mb_config_add_device_if_valid(&tmp, seen_ids, device, path);
+        g_free(path);
     }
 
-    g_dir_close(dir);
+    g_hash_table_unref(seen_ids);
+    g_ptr_array_unref(filenames);
     g_free(devices_dir);
 
     mb_config_clear(cfg);
