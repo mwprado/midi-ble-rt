@@ -6,7 +6,7 @@ client_name = midi-ble-rt
 # Defaults inherited by entries in devices.d/*.ini unless overridden.
 pair = no
 trust = yes
-auto_reconnect = yes
+reconnect_on_link_loss = yes
 enable_tx = yes
 profile = standard_ble_midi
 
