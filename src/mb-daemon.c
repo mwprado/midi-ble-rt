@@ -65,6 +65,7 @@ struct _ConfigDirRuntime {
 
     GMutex alsa_lock;
     GMutex gatt_write_lock;
+    GMutex bluez_lock;
 
     guint alsa_source_id;
     guint health_source_id;
@@ -859,8 +860,14 @@ static gboolean runtime_device_health_cb(gpointer user_data) {
 
         char *device_path = device_dup_device_path(dev);
         bool connected = false;
-        if (!mb_bluez_get_device_bool_property(rt->bus, device_path, "Connected", &connected) || !connected)
+
+        g_mutex_lock(&rt->bluez_lock);
+        bool ok = mb_bluez_get_device_bool_property(rt->bus, device_path, "Connected", &connected);
+        g_mutex_unlock(&rt->bluez_lock);
+
+        if (!ok || !connected)
             device_mark_disconnected(dev, "health check");
+
         g_free(device_path);
     }
 
@@ -874,7 +881,9 @@ static gboolean runtime_reconnect_cb(gpointer user_data) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
         if (dev && device_session_is(dev, MB_SESSION_RECONNECTING)) {
             g_print("Reconnect timer fired for %s.\n", device_label(dev));
+            g_mutex_lock(&rt->bluez_lock);
             device_try_start_streaming(dev);
+            g_mutex_unlock(&rt->bluez_lock);
         }
     }
 
@@ -887,7 +896,11 @@ static void runtime_start_configured_devices(ConfigDirRuntime *rt) {
         if (!dev->config->connect_on_start)
             continue;
 
-        if (!device_try_start_streaming(dev))
+        g_mutex_lock(&rt->bluez_lock);
+        bool started = device_try_start_streaming(dev);
+        g_mutex_unlock(&rt->bluez_lock);
+
+        if (!started)
             g_print("Device %s did not reach STREAMING at startup.\n", device_label(dev));
     }
 }
@@ -963,6 +976,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
 
     g_mutex_clear(&rt->alsa_lock);
     g_mutex_clear(&rt->gatt_write_lock);
+    g_mutex_clear(&rt->bluez_lock);
 }
 
 static int run_config_directory_mode(const char *config_dir) {
@@ -970,6 +984,7 @@ static int run_config_directory_mode(const char *config_dir) {
     memset(&rt, 0, sizeof(rt));
     g_mutex_init(&rt.alsa_lock);
     g_mutex_init(&rt.gatt_write_lock);
+    g_mutex_init(&rt.bluez_lock);
     rt.device_by_alsa_port = g_hash_table_new(g_direct_hash, g_direct_equal);
     rt.device_by_char_path = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
