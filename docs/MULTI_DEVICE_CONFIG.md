@@ -58,7 +58,7 @@ client_name = midi-ble-rt
 [defaults]
 pair = no
 trust = yes
-auto_reconnect = yes
+reconnect_on_link_loss = yes
 enable_tx = yes
 profile = standard_ble_midi
 
@@ -91,16 +91,39 @@ enabled = yes
 address = CB:81:F4:62:FF:07
 name = Roland GO:KEYS
 profile = roland_gokeys
-autoconnect = yes
+connect_on_start = yes
 alsa_port_name = Roland GO:KEYS BLE-MIDI
 
 [policy]
 pair = no
 trust = yes
-auto_reconnect = yes
+reconnect_on_link_loss = yes
 
 [midi]
 enable_tx = yes
+```
+
+Connection policy names:
+
+```text
+connect_on_start
+  If yes, the daemon may initiate connection when it starts or when the device model is activated.
+
+reconnect_on_link_loss
+  If yes, the daemon may reconnect after unexpected link loss. It must not override a manual disconnect.
+
+manual connect
+  A user command. It may connect even when connect_on_start = no.
+
+manual disconnect
+  A user command. It sets desired state to disconnected and suppresses automatic reconnect.
+```
+
+Compatibility aliases still accepted by the parser:
+
+```text
+autoconnect    -> connect_on_start
+auto_reconnect -> reconnect_on_link_loss
 ```
 
 Rules:
