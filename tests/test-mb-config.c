@@ -33,6 +33,7 @@ static void test_defaults_are_applied(void) {
     g_assert_cmpstr(cfg.name, ==, "");
     g_assert_false(cfg.pair);
     g_assert_true(cfg.trust);
+    g_assert_true(cfg.reconnect_on_link_loss);
     g_assert_true(cfg.auto_reconnect);
     g_assert_cmpstr(cfg.service_uuid, ==, "03b80e5a-ede8-4b33-a751-6ce34ec4c700");
     g_assert_cmpstr(cfg.io_uuid, ==, "7772e5db-3868-4112-a1a9-f2669d106bf3");
@@ -50,6 +51,7 @@ static void test_defaults_are_applied(void) {
     g_assert_nonnull(device);
     g_assert_cmpstr(device->address, ==, "AA:BB:CC:DD:EE:FF");
     g_assert_cmpstr(device->profile, ==, "standard_ble_midi");
+    g_assert_true(device->connect_on_start);
     g_assert_true(device->autoconnect);
 
     mb_config_clear(&cfg);
@@ -64,7 +66,7 @@ static void test_explicit_values_override_defaults(void) {
         "name=GO:KEYS\n"
         "pair=true\n"
         "trust=false\n"
-        "auto_reconnect=false\n"
+        "reconnect_on_link_loss=false\n"
         "[gatt]\n"
         "service_uuid=service-test\n"
         "io_uuid=io-test\n"
@@ -87,6 +89,7 @@ static void test_explicit_values_override_defaults(void) {
     g_assert_cmpstr(cfg.name, ==, "GO:KEYS");
     g_assert_true(cfg.pair);
     g_assert_false(cfg.trust);
+    g_assert_false(cfg.reconnect_on_link_loss);
     g_assert_false(cfg.auto_reconnect);
     g_assert_cmpstr(cfg.service_uuid, ==, "service-test");
     g_assert_cmpstr(cfg.io_uuid, ==, "io-test");
@@ -105,6 +108,7 @@ static void test_explicit_values_override_defaults(void) {
     g_assert_cmpstr(device->address, ==, "11:22:33:44:55:66");
     g_assert_cmpstr(device->name, ==, "GO:KEYS");
     g_assert_false(device->trust);
+    g_assert_false(device->reconnect_on_link_loss);
     g_assert_false(device->auto_reconnect);
     g_assert_false(device->enable_tx);
 
@@ -133,7 +137,7 @@ static void test_config_dir_loads_devices_d(void) {
         "[defaults]\n"
         "pair=false\n"
         "trust=true\n"
-        "auto_reconnect=true\n"
+        "reconnect_on_link_loss=true\n"
         "enable_tx=true\n"
         "[stats]\n"
         "enabled=true\n"
@@ -146,12 +150,12 @@ static void test_config_dir_loads_devices_d(void) {
         "address=CB:81:F4:62:FF:07\n"
         "name=Roland GO:KEYS\n"
         "profile=roland_gokeys\n"
-        "autoconnect=true\n"
+        "connect_on_start=true\n"
         "alsa_port_name=Roland GO:KEYS BLE-MIDI\n"
         "[policy]\n"
         "pair=false\n"
         "trust=true\n"
-        "auto_reconnect=true\n"
+        "reconnect_on_link_loss=true\n"
         "[midi]\n"
         "enable_tx=true\n");
 
@@ -161,7 +165,7 @@ static void test_config_dir_loads_devices_d(void) {
         "enabled=true\n"
         "address=AA:BB:CC:DD:EE:FF\n"
         "profile=standard_ble_midi\n"
-        "autoconnect=false\n"
+        "connect_on_start=false\n"
         "alsa_port_name=WIDI Master BLE-MIDI\n");
 
     write_file_checked(disabled_ini,
@@ -193,12 +197,16 @@ static void test_config_dir_loads_devices_d(void) {
     g_assert_nonnull(gokeys);
     g_assert_cmpstr(gokeys->address, ==, "CB:81:F4:62:FF:07");
     g_assert_cmpstr(gokeys->profile, ==, "roland_gokeys");
+    g_assert_true(gokeys->connect_on_start);
     g_assert_true(gokeys->autoconnect);
+    g_assert_true(gokeys->reconnect_on_link_loss);
+    g_assert_true(gokeys->auto_reconnect);
     g_assert_true(gokeys->enable_tx);
 
     g_assert_nonnull(widi);
     g_assert_cmpstr(widi->address, ==, "AA:BB:CC:DD:EE:FF");
     g_assert_cmpstr(widi->profile, ==, "standard_ble_midi");
+    g_assert_false(widi->connect_on_start);
     g_assert_false(widi->autoconnect);
 
     mb_config_clear(&cfg);
