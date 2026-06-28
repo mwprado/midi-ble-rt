@@ -21,13 +21,12 @@ Current directory-mode behavior:
 1. validate the config directory
 2. load enabled device configs
 3. build session skeletons
-4. create one ALSA Sequencer port per enabled device
-5. resolve configured addresses to BlueZ Device1 paths
-6. attempt Device1.Connect() for devices with connect_on_start = yes
-7. stay alive in a GLib main loop until Ctrl-C or SIGTERM
+4. resolve configured addresses to BlueZ Device1 paths
+5. attempt Device1.Connect() for devices with connect_on_start = yes
+6. stay alive in a GLib main loop until Ctrl-C or SIGTERM
 ```
 
-It does not bind GATT and does not start multi-device streaming yet.
+It does not bind GATT, does not create ALSA Sequencer ports, and does not start multi-device streaming yet. ALSA ports are exposed only by the single-device orchestrator path, where the dataplane is active.
 
 `--config-dir DIR` is a temporary development alias. Prefer `--config DIR`.
 
@@ -135,6 +134,6 @@ one daemon process
 one shared BlueZ bus
 one ALSA client
 one DeviceSession per enabled device
-one ALSA port per enabled device
+one ALSA port per streaming-capable device
 one notify subscription per streaming device
 ```
