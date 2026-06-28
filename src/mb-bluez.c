@@ -196,7 +196,7 @@ bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
     return true;
 }
 
-bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_path, int timeout_ms) {
+static bool wait_services_resolved_once(GDBusConnection *bus, const char *device_path, int timeout_ms) {
     const int step_ms = 100;
     int elapsed = 0;
 
@@ -211,7 +211,27 @@ bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_pa
         elapsed += step_ms;
     }
 
-    g_printerr("Timed out waiting for ServicesResolved=true.\n");
+    return false;
+}
+
+bool mb_bluez_wait_services_resolved(GDBusConnection *bus, const char *device_path, int timeout_ms) {
+    if (wait_services_resolved_once(bus, device_path, timeout_ms))
+        return true;
+
+    g_printerr("Timed out waiting for ServicesResolved=true. Resetting BlueZ connection once.\n");
+
+    mb_bluez_disconnect_device(bus, device_path);
+    g_usleep(1000 * 1000);
+
+    if (!mb_bluez_connect_device(bus, device_path)) {
+        g_printerr("ServicesResolved recovery reconnect failed.\n");
+        return false;
+    }
+
+    if (wait_services_resolved_once(bus, device_path, timeout_ms))
+        return true;
+
+    g_printerr("Timed out waiting for ServicesResolved=true after BlueZ reset.\n");
     return false;
 }
 
