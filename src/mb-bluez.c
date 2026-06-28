@@ -237,17 +237,17 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
 
     bool in_progress = false;
     bool ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 30000, &in_progress, &ambiguous_timeout))
+    if (bluez_connect_call_once(bus, device_path, 20000, &in_progress, &ambiguous_timeout))
         return true;
 
     if (in_progress) {
-        if (bluez_wait_connected(bus, device_path, 30000))
+        if (bluez_wait_connected(bus, device_path, 15000))
             return true;
         g_printerr("Connect remained in progress without Connected=true; resetting BlueZ device connection.\n");
         mb_bluez_disconnect_device(bus, device_path);
         g_usleep(1000 * 1000);
     } else if (ambiguous_timeout) {
-        if (bluez_wait_connected(bus, device_path, 5000))
+        if (bluez_wait_connected(bus, device_path, 3000))
             return true;
         g_printerr("Connect timeout recovery: resetting BlueZ device connection.\n");
         mb_bluez_disconnect_device(bus, device_path);
@@ -263,11 +263,11 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
 
     bool second_in_progress = false;
     bool second_ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 45000, &second_in_progress, &second_ambiguous_timeout))
+    if (bluez_connect_call_once(bus, device_path, 15000, &second_in_progress, &second_ambiguous_timeout))
         return true;
 
     if ((second_in_progress || second_ambiguous_timeout) &&
-        bluez_wait_connected(bus, device_path, 30000))
+        bluez_wait_connected(bus, device_path, 10000))
         return true;
 
     return false;
