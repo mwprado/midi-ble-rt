@@ -14,7 +14,6 @@
 
 #include "mb-bluez.h"
 #include "mb-config.h"
-#include "mb-config-dir-alsa.h"
 #include "mb-session.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
@@ -183,7 +182,8 @@ static void print_config_dir_devices(const MbConfig *cfg,
         g_print("  trust:          %s\n", device->trust ? "yes" : "no");
         g_print("  reconnect_on_link_loss: %s\n", device->reconnect_on_link_loss ? "yes" : "no");
         g_print("  enable_tx:      %s\n", device->enable_tx ? "yes" : "no");
-        g_print("  ALSA port:      %s\n", printable_string(device->alsa_port_name, "BLE-MIDI"));
+        g_print("  ALSA port name: %s\n", printable_string(device->alsa_port_name, "BLE-MIDI"));
+        g_print("  ALSA status:    not created in config-directory skeleton\n");
         if (session) {
             g_print("  bluez:          %s\n", session_has_bluez_device_path(session) ? "found" : "not found");
             g_print("  session path:   %s\n", printable_string(session->device_path, "(none)"));
@@ -208,9 +208,7 @@ static int run_config_directory_mode(const char *config_dir) {
     }
 
     MbDaemon daemon = {0};
-    MbConfigDirAlsa alsa = {0};
     build_config_dir_sessions(&cfg, &daemon);
-    mb_config_dir_alsa_open_ports(&cfg, &alsa);
     resolve_config_dir_bluez_devices(&cfg, &daemon);
     try_config_dir_connect_devices(&cfg, &daemon);
     print_config_dir_devices(&cfg, &daemon, config_dir);
@@ -229,7 +227,6 @@ static int run_config_directory_mode(const char *config_dir) {
         g_source_remove(sigterm_source);
     g_main_loop_unref(loop);
 
-    mb_config_dir_alsa_close(&alsa);
     mb_daemon_clear(&daemon);
     mb_config_clear(&cfg);
     return 0;
