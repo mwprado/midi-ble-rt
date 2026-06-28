@@ -65,11 +65,14 @@ typedef enum {
     MB_LIFECYCLE_CMD_CONNECT,
     MB_LIFECYCLE_CMD_DISCONNECT,
     MB_LIFECYCLE_CMD_RECHECK,
+    MB_LIFECYCLE_CMD_MARK_DISCONNECTED,
+    MB_LIFECYCLE_CMD_SESSION_EVENT,
 } MbLifecycleCommandType;
 
 typedef struct {
     MbLifecycleCommandType type;
     ConfigDeviceRuntime *dev;
+    MbEventType event;
     char *reason;
 } MbLifecycleCommand;
 
@@ -86,6 +89,7 @@ struct _ConfigDirRuntime {
     GHashTable *device_by_char_path;
 
     GMutex alsa_lock;
+    GMutex lifecycle_lock;
 
     /*
      * Lifecycle/control-plane monitor.
@@ -230,6 +234,16 @@ static bool device_can_mark_disconnected(ConfigDeviceRuntime *dev) {
            state != MB_SESSION_RECONNECTING &&
            state != MB_SESSION_ERROR;
 }
+
+static void lifecycle_enqueue(ConfigDirRuntime *rt,
+                              ConfigDeviceRuntime *dev,
+                              MbLifecycleCommandType type,
+                              const char *reason);
+
+static void lifecycle_enqueue_event(ConfigDirRuntime *rt,
+                                    ConfigDeviceRuntime *dev,
+                                    MbEventType event,
+                                    const char *reason);
 
 static void runtime_build_sessions(ConfigDirRuntime *rt) {
     mb_daemon_init(&rt->daemon);
@@ -536,7 +550,10 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                                packet,
                                                packet_len,
                                                5000)) {
-            device_session_event(dev, MB_EV_GATT_WRITE_FAILED);
+            lifecycle_enqueue_event(dev->owner,
+                                    dev,
+                                    MB_EV_GATT_WRITE_FAILED,
+                                    "GATT write failed");
             ok = false;
             break;
         }
@@ -586,7 +603,10 @@ static bool device_start_workers(ConfigDeviceRuntime *dev) {
     if (!mb_duplex_runtime_start(&dev->runtime)) {
         g_printerr("Could not start duplex runtime workers for %s.\n",
                    device_label(dev));
-        device_session_event(dev, MB_EV_RUNTIME_FAILED);
+        lifecycle_enqueue_event(dev->owner,
+                                dev,
+                                MB_EV_RUNTIME_FAILED,
+                                "duplex runtime start failed");
         return false;
     }
 
@@ -622,7 +642,10 @@ static void device_on_properties_changed(GDBusConnection *connection,
         if (v_connected) {
             gboolean connected = g_variant_get_boolean(v_connected);
             if (!connected)
-                device_mark_disconnected(dev, "Device1.Connected=false");
+                lifecycle_enqueue(dev->owner,
+                                  dev,
+                                  MB_LIFECYCLE_CMD_MARK_DISCONNECTED,
+                                  "Device1.Connected=false");
             g_variant_unref(v_connected);
         }
     }
@@ -639,7 +662,10 @@ static void device_on_properties_changed(GDBusConnection *connection,
             if (!mb_duplex_runtime_push_rx(&dev->runtime, bytes, len, runtime_now_ns())) {
                 g_printerr("RX runtime queue push failed for %s; BLE notification dropped.\n",
                            device_label(dev));
-                device_session_event(dev, MB_EV_RUNTIME_FAILED);
+                lifecycle_enqueue_event(dev->owner,
+                                        dev,
+                                        MB_EV_RUNTIME_FAILED,
+                                        "RX runtime queue push failed");
             }
             g_variant_unref(value);
         }
@@ -821,6 +847,8 @@ static const char *lifecycle_command_name(MbLifecycleCommandType type) {
     case MB_LIFECYCLE_CMD_CONNECT: return "CONNECT";
     case MB_LIFECYCLE_CMD_DISCONNECT: return "DISCONNECT";
     case MB_LIFECYCLE_CMD_RECHECK: return "RECHECK";
+    case MB_LIFECYCLE_CMD_MARK_DISCONNECTED: return "MARK_DISCONNECTED";
+    case MB_LIFECYCLE_CMD_SESSION_EVENT: return "SESSION_EVENT";
     default: return "UNKNOWN";
     }
 }
@@ -851,21 +879,33 @@ static bool lifecycle_has_pending(ConfigDirRuntime *rt,
 }
 
 static void lifecycle_schedule(ConfigDirRuntime *rt) {
-    if (!rt || rt->lifecycle_source_id)
+    if (!rt)
         return;
 
-    rt->lifecycle_source_id = g_idle_add(lifecycle_process_next_cb, rt);
+    g_mutex_lock(&rt->lifecycle_lock);
+    if (!rt->lifecycle_source_id)
+        rt->lifecycle_source_id = g_idle_add(lifecycle_process_next_cb, rt);
+    g_mutex_unlock(&rt->lifecycle_lock);
 }
 
 static void lifecycle_enqueue(ConfigDirRuntime *rt,
                               ConfigDeviceRuntime *dev,
                               MbLifecycleCommandType type,
                               const char *reason) {
-    if (!rt || !dev || !rt->lifecycle_queue)
+    if (!rt || !dev)
         return;
 
-    if (lifecycle_has_pending(rt, dev, type))
+    g_mutex_lock(&rt->lifecycle_lock);
+
+    if (!rt->lifecycle_queue) {
+        g_mutex_unlock(&rt->lifecycle_lock);
         return;
+    }
+
+    if (lifecycle_has_pending(rt, dev, type)) {
+        g_mutex_unlock(&rt->lifecycle_lock);
+        return;
+    }
 
     MbLifecycleCommand *cmd = g_new0(MbLifecycleCommand, 1);
     cmd->type = type;
@@ -874,8 +914,43 @@ static void lifecycle_enqueue(ConfigDirRuntime *rt,
 
     g_queue_push_tail(rt->lifecycle_queue, cmd);
 
+    g_mutex_unlock(&rt->lifecycle_lock);
+
     g_print("Lifecycle queued %s for %s%s%s.\n",
             lifecycle_command_name(type),
+            device_label(dev),
+            reason && *reason ? ": " : "",
+            reason && *reason ? reason : "");
+
+    lifecycle_schedule(rt);
+}
+
+static void lifecycle_enqueue_event(ConfigDirRuntime *rt,
+                                    ConfigDeviceRuntime *dev,
+                                    MbEventType event,
+                                    const char *reason) {
+    if (!rt || !dev)
+        return;
+
+    g_mutex_lock(&rt->lifecycle_lock);
+
+    if (!rt->lifecycle_queue) {
+        g_mutex_unlock(&rt->lifecycle_lock);
+        return;
+    }
+
+    MbLifecycleCommand *cmd = g_new0(MbLifecycleCommand, 1);
+    cmd->type = MB_LIFECYCLE_CMD_SESSION_EVENT;
+    cmd->dev = dev;
+    cmd->event = event;
+    cmd->reason = g_strdup(reason);
+
+    g_queue_push_tail(rt->lifecycle_queue, cmd);
+
+    g_mutex_unlock(&rt->lifecycle_lock);
+
+    g_print("Lifecycle queued SESSION_EVENT/%s for %s%s%s.\n",
+            mb_event_name(event),
             device_label(dev),
             reason && *reason ? ": " : "",
             reason && *reason ? reason : "");
@@ -960,19 +1035,27 @@ static gboolean lifecycle_process_next_cb(gpointer user_data) {
     if (!rt)
         return G_SOURCE_REMOVE;
 
+    g_mutex_lock(&rt->lifecycle_lock);
+
     rt->lifecycle_source_id = 0;
 
-    if (rt->lifecycle_busy)
+    if (rt->lifecycle_busy) {
+        g_mutex_unlock(&rt->lifecycle_lock);
         return G_SOURCE_REMOVE;
+    }
 
     MbLifecycleCommand *cmd = rt->lifecycle_queue
         ? g_queue_pop_head(rt->lifecycle_queue)
         : NULL;
 
-    if (!cmd)
+    if (!cmd) {
+        g_mutex_unlock(&rt->lifecycle_lock);
         return G_SOURCE_REMOVE;
+    }
 
     rt->lifecycle_busy = true;
+
+    g_mutex_unlock(&rt->lifecycle_lock);
 
     g_print("Lifecycle processing %s for %s%s%s.\n",
             lifecycle_command_name(cmd->type),
@@ -1001,15 +1084,50 @@ static gboolean lifecycle_process_next_cb(gpointer user_data) {
     case MB_LIFECYCLE_CMD_RECHECK:
         device_lifecycle_recheck(cmd->dev);
         break;
+
+    case MB_LIFECYCLE_CMD_MARK_DISCONNECTED:
+        device_mark_disconnected(cmd->dev, cmd->reason);
+        break;
+
+    case MB_LIFECYCLE_CMD_SESSION_EVENT:
+        device_session_event(cmd->dev, cmd->event);
+        break;
     }
 
     lifecycle_command_free(cmd);
-    rt->lifecycle_busy = false;
 
-    if (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue))
+    g_mutex_lock(&rt->lifecycle_lock);
+    rt->lifecycle_busy = false;
+    bool has_more = rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue);
+    g_mutex_unlock(&rt->lifecycle_lock);
+
+    if (has_more)
         lifecycle_schedule(rt);
 
     return G_SOURCE_REMOVE;
+}
+
+static bool lifecycle_is_idle(ConfigDirRuntime *rt) {
+    if (!rt)
+        return true;
+
+    g_mutex_lock(&rt->lifecycle_lock);
+    bool idle = !rt->lifecycle_busy &&
+                (!rt->lifecycle_queue || g_queue_is_empty(rt->lifecycle_queue));
+    g_mutex_unlock(&rt->lifecycle_lock);
+
+    return idle;
+}
+
+static bool lifecycle_has_queued(ConfigDirRuntime *rt) {
+    if (!rt)
+        return false;
+
+    g_mutex_lock(&rt->lifecycle_lock);
+    bool queued = rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue);
+    g_mutex_unlock(&rt->lifecycle_lock);
+
+    return queued;
 }
 
 static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
@@ -1058,7 +1176,10 @@ static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
                        device_label(dev), ev->type, snd_strerror((int)n));
             snd_midi_event_reset_decode(dev->alsa_midi_decoder);
             g_mutex_unlock(&rt->alsa_lock);
-            device_session_event(dev, MB_EV_ALSA_DECODE_FAILED);
+            lifecycle_enqueue_event(rt,
+                                    dev,
+                                    MB_EV_ALSA_DECODE_FAILED,
+                                    "ALSA MIDI decode failed");
             continue;
         }
         g_mutex_unlock(&rt->alsa_lock);
@@ -1076,7 +1197,10 @@ static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
         if (!mb_duplex_runtime_push_tx(&dev->runtime, midi, (size_t)n, runtime_now_ns())) {
             g_printerr("TX runtime queue push failed for %s; ALSA event dropped.\n",
                        device_label(dev));
-            device_session_event(dev, MB_EV_RUNTIME_FAILED);
+            lifecycle_enqueue_event(rt,
+                                    dev,
+                                    MB_EV_RUNTIME_FAILED,
+                                    "TX runtime queue push failed");
         }
     }
 
@@ -1086,8 +1210,7 @@ static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
 static gboolean runtime_device_health_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
-    if (rt->lifecycle_busy ||
-        (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue)))
+    if (!lifecycle_is_idle(rt))
         return G_SOURCE_CONTINUE;
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
@@ -1104,8 +1227,7 @@ static gboolean runtime_device_health_cb(gpointer user_data) {
 static gboolean runtime_reconnect_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
-    if (rt->lifecycle_busy ||
-        (rt->lifecycle_queue && !g_queue_is_empty(rt->lifecycle_queue)))
+    if (!lifecycle_is_idle(rt))
         return G_SOURCE_CONTINUE;
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
@@ -1184,15 +1306,17 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
     if (rt->lifecycle_source_id)
         g_source_remove(rt->lifecycle_source_id);
 
+    if (rt->devices)
+        g_ptr_array_unref(rt->devices);
+
     if (rt->lifecycle_queue) {
+        g_mutex_lock(&rt->lifecycle_lock);
         while (!g_queue_is_empty(rt->lifecycle_queue))
             lifecycle_command_free(g_queue_pop_head(rt->lifecycle_queue));
         g_queue_free(rt->lifecycle_queue);
         rt->lifecycle_queue = NULL;
+        g_mutex_unlock(&rt->lifecycle_lock);
     }
-
-    if (rt->devices)
-        g_ptr_array_unref(rt->devices);
     if (rt->seq)
         snd_seq_close(rt->seq);
     if (rt->device_by_char_path)
@@ -1207,12 +1331,14 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         g_object_unref(rt->bus);
 
     g_mutex_clear(&rt->alsa_lock);
+    g_mutex_clear(&rt->lifecycle_lock);
 }
 
 static int run_config_directory_mode(const char *config_dir) {
     ConfigDirRuntime rt;
     memset(&rt, 0, sizeof(rt));
     g_mutex_init(&rt.alsa_lock);
+    g_mutex_init(&rt.lifecycle_lock);
     rt.lifecycle_queue = g_queue_new();
     rt.lifecycle_busy = false;
     rt.lifecycle_source_id = 0;
@@ -1248,7 +1374,7 @@ static int run_config_directory_mode(const char *config_dir) {
     runtime_start_configured_devices(&rt);
 
     if (!runtime_has_streaming_device(&rt)) {
-        if (rt.lifecycle_queue && !g_queue_is_empty(rt.lifecycle_queue))
+        if (lifecycle_has_queued(&rt))
             g_print("Startup lifecycle commands queued; daemon will attempt connection from the main loop.\n");
         else
             g_print("No configured device reached STREAMING yet; daemon stays alive for reconnect/manual future control.\n");
