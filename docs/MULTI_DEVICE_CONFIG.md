@@ -20,13 +20,23 @@ Current directory-mode behavior:
 ```text
 1. validate the config directory
 2. load enabled device configs
-3. build session skeletons
+3. build one MbSession per configured device
 4. resolve configured addresses to BlueZ Device1 paths
-5. attempt Device1.Connect() for devices with connect_on_start = yes
-6. stay alive in a GLib main loop until Ctrl-C or SIGTERM
+5. for devices with connect_on_start = yes:
+   - pair/trust according to device policy
+   - call Device1.Connect() when needed
+   - wait for ServicesResolved
+   - bind the BLE-MIDI service and I/O characteristic
+   - create one ALSA Sequencer port for that session
+   - start one RX worker and one TX worker for the session
+   - enable StartNotify
+6. keep one shared BlueZ system bus and one shared ALSA client
+7. stay alive in a GLib main loop until Ctrl-C or SIGTERM
 ```
 
-It does not bind GATT, does not create ALSA Sequencer ports, and does not start multi-device streaming yet. ALSA ports are exposed only by the single-device orchestrator path, where the dataplane is active.
+Directory mode is now a multi-session runtime foundation. The model is centered on `MbDaemon`, `MbSession` and `MbDuplexRuntime`; BlueZ and GATT are transport infrastructure only.
+
+ALSA ports are created only after the device has a valid BlueZ path, GATT service, BLE-MIDI I/O characteristic and runtime workers. No fake ALSA port is exposed for an unbound device.
 
 `--config-dir DIR` is a temporary development alias. Prefer `--config DIR`.
 
@@ -44,6 +54,40 @@ Installed examples follow the same shape under:
 
 ```text
 /usr/share/midi-ble-rt/config/
+```
+
+## Runtime shape
+
+```text
+one daemon process
+one shared BlueZ system bus
+one shared ALSA Sequencer client
+one MbDaemon session index
+one MbSession per enabled device
+one MbDuplexRuntime per streaming-capable device
+one ALSA port per bound device
+one GATT notify subscription per bound device
+```
+
+Expected ALSA shape once multiple devices are bound:
+
+```text
+client 128: 'midi-ble-rt' [type=user]
+    0 'Roland GO KEYS BLE-MIDI'
+    1 'Standard BLE-MIDI Device'
+    2 'CME WIDI Master BLE-MIDI'
+```
+
+Routing model:
+
+```text
+TX:
+  ALSA event dest.port = 0 -> MbSession A -> GATT WriteValue char A
+  ALSA event dest.port = 1 -> MbSession B -> GATT WriteValue char B
+
+RX:
+  GATT notify char A -> MbSession A RX runtime -> ALSA port 0
+  GATT notify char B -> MbSession B RX runtime -> ALSA port 1
 ```
 
 ## Global daemon config
@@ -124,16 +168,15 @@ If an id is duplicated, the first config wins and the duplicate is ignored with 
 Devices with enabled = no are ignored.
 Devices without address are ignored.
 Device identity is address-based; name is diagnostic.
-The profile field is declarative for now and will drive quirk policy later.
+The profile field selects profile/quirk policy such as the Roland GO:KEYS I/O UUID alias.
 ```
 
-The next implementation step is to move this model into the orchestrator:
+Validation target for this development branch:
 
 ```text
-one daemon process
-one shared BlueZ bus
-one ALSA client
-one DeviceSession per enabled device
-one ALSA port per streaming-capable device
-one notify subscription per streaming device
+--config DIR with one configured GO:KEYS device reaches STREAMING
+one real ALSA port appears for that session
+aplaymidi can transmit to the device through that port
+GATT notify events are routed back to the same ALSA port
+single-file orchestrator mode still works unchanged
 ```
