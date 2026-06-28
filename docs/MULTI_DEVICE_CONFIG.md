@@ -1,31 +1,35 @@
 # Multi-device configuration layout
 
-This document describes the staged configuration model for the multi-device branches.
-
 The public configuration option remains `--config`. The value may be either a single INI file or a configuration directory.
 
-Single-file mode remains supported and uses the existing single-device runtime path:
+Single-file mode remains supported:
 
 ```bash
 midi-ble-rtd --config config/roland-gokeys.ini.example
 ```
 
-Directory mode is introduced as a compatibility-safe staging point:
-
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt
-```
-
-When the `--config` argument is a directory, the daemon automatically loads:
+Directory mode loads:
 
 ```text
 daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files, builds session skeletons, creates one ALSA Sequencer port per enabled device, resolves each configured address to a BlueZ `Device1` object path, and attempts `Device1.Connect()` for devices with `connect_on_start = yes`. It then stays alive in a GLib main loop until Ctrl-C or SIGTERM. It does not bind GATT and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
+Current directory-mode behavior:
 
-`--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
+```text
+1. validate the config directory
+2. load enabled device configs
+3. build session skeletons
+4. create one ALSA Sequencer port per enabled device
+5. resolve configured addresses to BlueZ Device1 paths
+6. attempt Device1.Connect() for devices with connect_on_start = yes
+7. stay alive in a GLib main loop until Ctrl-C or SIGTERM
+```
+
+It does not bind GATT and does not start multi-device streaming yet.
+
+`--config-dir DIR` is a temporary development alias. Prefer `--config DIR`.
 
 ## Directory shape
 
@@ -37,19 +41,13 @@ At this stage, directory mode validates the directory, loads all enabled device 
     └── standard-ble-midi.ini
 ```
 
-Installed examples are expected to follow the same shape under the package data directory:
+Installed examples follow the same shape under:
 
 ```text
 /usr/share/midi-ble-rt/config/
-├── daemon.ini.example
-└── devices.d/
-    ├── roland-gokeys.ini.example
-    └── standard-ble-midi.ini.example
 ```
 
 ## Global daemon config
-
-`daemon.ini` contains global defaults:
 
 ```ini
 [daemon]
@@ -78,11 +76,9 @@ print_ble_packets = no
 print_midi_events = no
 ```
 
-Global defaults are inherited by entries in `devices.d/*.ini` unless the device file overrides them.
-
 ## Device config
 
-Each file in `devices.d/*.ini` describes one BLE-MIDI device. New configs and packaged examples must use the current key names:
+Configs and packaged examples use the current key names only:
 
 ```ini
 [device]
@@ -119,13 +115,6 @@ manual disconnect
   A user command. It sets desired state to disconnected and suppresses automatic reconnect.
 ```
 
-Legacy compatibility aliases accepted by the parser for existing user configs, but not used by packaged examples:
-
-```text
-autoconnect    -> connect_on_start
-auto_reconnect -> reconnect_on_link_loss
-```
-
 Rules:
 
 ```text
@@ -137,51 +126,6 @@ Devices with enabled = no are ignored.
 Devices without address are ignored.
 Device identity is address-based; name is diagnostic.
 The profile field is declarative for now and will drive quirk policy later.
-```
-
-Duplicate warning format:
-
-```text
-Config /path/to/devices.d/example.ini: id 'example' already configured; ignoring duplicate configuration.
-```
-
-## Current branch behavior
-
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt
-```
-
-creates ALSA Sequencer ports and prints a summary like:
-
-```text
-midi-ble-rtd
-Runtime: config-directory connect skeleton
-Config: /home/user/.config/midi-ble-rt
-ALSA client: midi-ble-rt
-Service UUID: 03b80e5a-ede8-4b33-a751-6ce34ec4c700
-I/O UUID: 7772e5db-3868-4112-a1a9-f2669d106bf3
-Configured devices: 2
-Skeleton sessions: 2
-
-Device[0]: roland-gokeys
-  enabled:        yes
-  address:        CB:81:F4:62:FF:07
-  profile:        roland_gokeys
-  connect_on_start: yes
-  bluez:          found
-  session path:   /org/bluez/hci0/dev_CB_81_F4_62_FF_07
-  session state:  WAIT_SERVICES
-
-Device[1]: standard-ble-midi
-  enabled:        yes
-  address:        11:22:33:44:55:66
-  profile:        standard_ble_midi
-  connect_on_start: no
-  bluez:          not found
-  session path:   config:standard-ble-midi
-  session state:  IDLE
-
-Daemon loop: running. Press Ctrl-C to exit.
 ```
 
 The next implementation step is to move this model into the orchestrator:
