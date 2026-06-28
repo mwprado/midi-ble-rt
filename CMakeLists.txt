@@ -19,6 +19,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-ble-midi.c
     src/mb-buffer.c
     src/mb-config.c
+    src/mb-config-dir-alsa.c
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
     src/mb-log.c
