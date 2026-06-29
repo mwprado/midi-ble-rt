@@ -6,6 +6,7 @@
  * local stats commands, and delegates all BlueZ commands to the original CLI.
  */
 
+#include "mb-slice-ring.h"
 #include "mb-stats.h"
 
 #include <glib.h>
@@ -17,6 +18,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#define STATS_QUEUE_BAR_WIDTH 20u
 
 int midi_ble_rtctl_bluez_main(int argc, char **argv);
 
@@ -159,6 +162,7 @@ static bool stats_is_v3(const StatsTable *t) {
 static bool stats_has_window(const StatsTable *t) {
     return stats_is_v2(t) || stats_is_v3(t);
 }
+
 static const char *stats_get(const StatsTable *t, const char *key) {
     if (!t || !key)
         return "-";
@@ -179,6 +183,59 @@ static guint64 stats_u64(const StatsTable *t, const char *key) {
 static const char *stats_rate(const StatsTable *t, const char *key) {
     const char *s = stats_get(t, key);
     return s && *s ? s : "0.000";
+}
+
+static double stats_queue_fill_pct(guint64 depth) {
+    if (MB_SLICE_RING_COUNT == 0)
+        return 0.0;
+    return ((double)depth * 100.0) / (double)MB_SLICE_RING_COUNT;
+}
+
+static void stats_queue_bar(guint64 depth, char *out, size_t out_len) {
+    if (!out || out_len < STATS_QUEUE_BAR_WIDTH + 3)
+        return;
+
+    guint64 clamped = depth;
+    if (clamped > MB_SLICE_RING_COUNT)
+        clamped = MB_SLICE_RING_COUNT;
+
+    unsigned filled = 0;
+    if (MB_SLICE_RING_COUNT > 0) {
+        filled = (unsigned)((clamped * STATS_QUEUE_BAR_WIDTH + (MB_SLICE_RING_COUNT / 2)) /
+                            MB_SLICE_RING_COUNT);
+        if (depth > 0 && filled == 0)
+            filled = 1;
+        if (filled > STATS_QUEUE_BAR_WIDTH)
+            filled = STATS_QUEUE_BAR_WIDTH;
+    }
+
+    out[0] = '[';
+    for (unsigned i = 0; i < STATS_QUEUE_BAR_WIDTH; i++)
+        out[i + 1] = i < filled ? '#' : '.';
+    out[STATS_QUEUE_BAR_WIDTH + 1] = ']';
+    out[STATS_QUEUE_BAR_WIDTH + 2] = '\0';
+}
+
+static void print_queue_visual_line(const StatsTable *t, const char *dir, const char *depth_key) {
+    guint64 depth = stats_u64(t, depth_key);
+    double pct = stats_queue_fill_pct(depth);
+    char bar[STATS_QUEUE_BAR_WIDTH + 3];
+
+    stats_queue_bar(depth, bar, sizeof(bar));
+
+    g_print("%-8s %5" G_GUINT64_FORMAT "/%-5u %7.1f%%  %s\n",
+            dir,
+            depth,
+            (unsigned)MB_SLICE_RING_COUNT,
+            pct,
+            bar);
+}
+
+static void print_queue_visual(const StatsTable *t) {
+    g_print("Buffer fill:\n");
+    g_print("%-8s %11s %8s  %s\n", "DIR", "DEPTH/CAP", "FILL", "BAR");
+    print_queue_visual_line(t, "RX", "rx_queue_depth");
+    print_queue_visual_line(t, "TX", "tx_queue_depth");
 }
 
 static bool read_stats_table(const char *path, StatsTable *out) {
@@ -293,6 +350,8 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
     }
 
     g_print("\n");
+    print_queue_visual(t);
+    g_print("\n");
 
     g_print("%-8s %12s %12s %12s\n", "DIR", "LAST_MS", "GAP_AVG_MS", "GAP_MAX_MS");
     g_print("%-8s %12s %12s %12s\n",
@@ -306,6 +365,7 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
             stats_get(t, "tx_gap_avg_ms"),
             stats_get(t, "tx_gap_max_ms"));
 }
+
 static int cmd_stats_print(const char *path) {
     StatsTable t;
     if (!read_stats_table(path, &t))
