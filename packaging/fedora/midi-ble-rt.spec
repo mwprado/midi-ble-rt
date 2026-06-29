@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.7.0
+Version:        0.7.1
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -61,6 +61,12 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Sun Jun 28 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.1-1
+- Stabilize multi-session runtime shutdown path.
+- Avoid double-removing GLib signal sources during Ctrl-C shutdown.
+- Make ALSA client shutdown explicit after dataplane workers stop.
+- Expose and validate ALSA TX, RX worker and TX worker runtime state.
+
 * Sun Jun 28 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.0-1
 - Add multi-session lifecycle/control-plane monitor architecture.
 - Route lifecycle state changes through the monitor.
