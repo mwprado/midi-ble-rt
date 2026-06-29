@@ -43,7 +43,7 @@ The file is created under the user's runtime directory. It is ephemeral and is n
 The first line is a format version. Current exports use:
 
 ```text
-v3
+v4
 ```
 
 The second line is the header. The third line is the current session snapshot.
@@ -80,14 +80,16 @@ tx_gap_avg_ms
 tx_gap_max_ms
 rx_queue_depth
 tx_queue_depth
+rx_queue_high_watermark
+tx_queue_high_watermark
 ```
 
 Example:
 
 ```text
-v3
-label	address	state	alsa_rx_client_id	alsa_rx_port_id	alsa_tx_client_id	alsa_tx_port_id	uptime_ms	window_ms	rx_packets	tx_packets	rx_bytes	tx_bytes	rx_drops	tx_drops	rx_packets_per_sec	tx_packets_per_sec	rx_bytes_per_sec	tx_bytes_per_sec	rx_drops_per_sec	tx_drops_per_sec	last_rx_ms	last_tx_ms	rx_gap_avg_ms	rx_gap_max_ms	tx_gap_avg_ms	tx_gap_max_ms	rx_queue_depth	tx_queue_depth
-config-dir	-	STREAMING	129	-1	129	-1	12000	1000	42	5	126	15	0	0	42.000	5.000	126.000	15.000	0.000	0.000	12	400	8	32	20	41	0	2
+v4
+label	address	state	alsa_rx_client_id	alsa_rx_port_id	alsa_tx_client_id	alsa_tx_port_id	uptime_ms	window_ms	rx_packets	tx_packets	rx_bytes	tx_bytes	rx_drops	tx_drops	rx_packets_per_sec	tx_packets_per_sec	rx_bytes_per_sec	tx_bytes_per_sec	rx_drops_per_sec	tx_drops_per_sec	last_rx_ms	last_tx_ms	rx_gap_avg_ms	rx_gap_max_ms	tx_gap_avg_ms	tx_gap_max_ms	rx_queue_depth	tx_queue_depth	rx_queue_high_watermark	tx_queue_high_watermark
+config-dir	-	STREAMING	129	-1	129	-1	12000	1000	42	5	126	15	0	0	42.000	5.000	126.000	15.000	0.000	0.000	12	400	8	32	20	41	0	2	3	7
 ```
 
 ## Human-readable commands
@@ -111,7 +113,7 @@ midi-ble-rtctl stats --path /run/user/$UID/midi-ble-rt/stats.tsv
 midi-ble-rtctl top --path /run/user/$UID/midi-ble-rt/stats.tsv --interval 1000
 ```
 
-The aligned view includes a visual buffer-fill section derived from `rx_queue_depth` and `tx_queue_depth`. The capacity is the runtime ring capacity, currently `MB_SLICE_RING_COUNT` slots.
+The aligned view includes a visual buffer-fill section derived from `rx_queue_depth`, `tx_queue_depth`, `rx_queue_high_watermark`, and `tx_queue_high_watermark`. The capacity is the runtime ring capacity, currently `MB_SLICE_RING_COUNT` slots.
 
 Example:
 
@@ -119,8 +121,12 @@ Example:
 Buffer fill:
 DIR        DEPTH/CAP     FILL  BAR
 RX             0/16       0.0%  [....................]
+  peak         3/16      18.8%  [####................]
 TX             2/16      12.5%  [###.................]
+  peak         7/16      43.8%  [#########...........]
 ```
+
+The current line is the queue depth at export time. The `peak` line is the high watermark observed during the export window. A high peak with a low current depth means the queue backed up transiently but drained before the snapshot was rendered.
 
 The bar is operational telemetry, not a latency measurement. A persistently high fill percentage means the runtime queue is backing up and the system may be approaching increased latency or drops.
 
@@ -135,7 +141,7 @@ Suggested interpretation:
 
 ## Semantics
 
-Counters are per daemon session. Window counters are reset after each stats export.
+Counters are per daemon session. Window counters and queue high watermarks are reset after each stats export.
 
 ```text
 RX packet
@@ -155,7 +161,7 @@ TX drop
 
 `rx_gap_avg_ms`, `rx_gap_max_ms`, `tx_gap_avg_ms`, and `tx_gap_max_ms` are host-side timing gaps between accepted RX/TX events. They are not BLE-MIDI protocol timestamps and are not end-to-end latency measurements.
 
-`rx_queue_depth` and `tx_queue_depth` are instantaneous runtime queue depths at export time. `midi-ble-rtctl stats/top` renders them as `depth/capacity`, percentage, and a bar.
+`rx_queue_depth` and `tx_queue_depth` are instantaneous runtime queue depths at export time. `rx_queue_high_watermark` and `tx_queue_high_watermark` are the highest queue depths recorded in the current export window. `midi-ble-rtctl stats/top` renders them as `depth/capacity`, percentage, and bars.
 
 ## Scope
 
