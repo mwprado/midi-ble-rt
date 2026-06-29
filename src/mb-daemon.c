@@ -317,6 +317,26 @@ static const char *runtime_stats_aggregate_state(ConfigDirRuntime *rt) {
     return mb_session_state_name(MB_SESSION_IDLE);
 }
 
+static int runtime_stats_aggregate_alsa_port(ConfigDirRuntime *rt) {
+    int port = -1;
+
+    for (unsigned i = 0; rt && rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!dev || dev->alsa_port < 0)
+            continue;
+
+        if (port < 0) {
+            port = dev->alsa_port;
+            continue;
+        }
+
+        if (port != dev->alsa_port)
+            return -1;
+    }
+
+    return port;
+}
+
 static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
     if (!rt || !rt->stats.enabled)
         return;
@@ -336,6 +356,7 @@ static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
     }
 
     int alsa_client_id = rt->seq ? snd_seq_client_id(rt->seq) : -1;
+    int alsa_port_id = runtime_stats_aggregate_alsa_port(rt);
     uint64_t now_ns = runtime_now_ns();
     GError *error = NULL;
 
@@ -345,9 +366,9 @@ static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
                                   "-",
                                   runtime_stats_aggregate_state(rt),
                                   alsa_client_id,
-                                  -1,
+                                  alsa_port_id,
                                   alsa_client_id,
-                                  -1,
+                                  alsa_port_id,
                                   rx_depth,
                                   tx_depth,
                                   now_ns,
