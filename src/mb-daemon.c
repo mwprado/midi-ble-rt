@@ -1263,9 +1263,10 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
         }
 
         char *reply = g_strdup_printf(
-            "OK STATUS devices=%u streaming=%u lifecycle_busy=%s lifecycle_queue=%u\n",
+            "OK STATUS devices=%u streaming=%u alsa_tx_thread=%s lifecycle_busy=%s lifecycle_queue=%u\n",
             devices,
             streaming,
+            rt->alsa_tx_thread ? "running" : "stopped",
             rt->lifecycle_busy ? "yes" : "no",
             runtime_lifecycle_queue_depth(rt));
 
