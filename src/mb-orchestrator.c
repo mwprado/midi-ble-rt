@@ -11,6 +11,7 @@
 #include "mb-orchestrator.h"
 
 #include <errno.h>
+#include <poll.h>
 
 #include "mb-alsa.h"
 #include "mb-app.h"
@@ -35,6 +36,8 @@ typedef struct {
     guint stats_source_id;
     guint health_source_id;
     guint reconnect_source_id;
+    GThread *alsa_tx_thread;
+    gint alsa_tx_stop_requested;
     bool runtime_started;
     bool session_initialized;
 } MbOrchestrator;
@@ -261,12 +264,11 @@ static void orchestrator_tx_consume(MbRuntimeFlow *flow,
     g_mutex_unlock(&orc->gatt_write_lock);
 }
 
-static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
-    MbOrchestrator *orc = user_data;
+static void orchestrator_drain_alsa_tx_queue(MbOrchestrator *orc) {
     App *app = &orc->app;
 
-    if (!app->cfg.enable_tx)
-        return G_SOURCE_CONTINUE;
+    if (!app->cfg.enable_tx || !app->seq)
+        return;
 
     for (;;) {
         g_mutex_lock(&orc->alsa_lock);
@@ -302,7 +304,8 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
         uint8_t midi[1024];
         long n = snd_midi_event_decode(app->alsa_midi_decoder, midi, sizeof(midi), ev);
         if (n < 0) {
-            g_printerr("ALSA MIDI decode failed for event type %d: %s\n", ev->type, snd_strerror((int)n));
+            g_printerr("ALSA MIDI decode failed for event type %d: %s\n",
+                       ev->type, snd_strerror((int)n));
             snd_midi_event_reset_decode(app->alsa_midi_decoder);
             g_mutex_unlock(&orc->alsa_lock);
             orchestrator_stats_tx_drop(orc);
@@ -323,8 +326,91 @@ static gboolean orchestrator_alsa_rx_poll_cb(gpointer user_data) {
             orchestrator_session_event(orc, MB_EV_RUNTIME_FAILED);
         }
     }
+}
 
-    return G_SOURCE_CONTINUE;
+static gpointer orchestrator_alsa_tx_thread_main(gpointer user_data) {
+    MbOrchestrator *orc = user_data;
+    App *app = &orc->app;
+
+    if (!app->cfg.enable_tx || !app->seq)
+        return NULL;
+
+    int nfds = snd_seq_poll_descriptors_count(app->seq, POLLIN);
+    if (nfds <= 0) {
+        g_printerr("ALSA TX thread could not get poll descriptor count.\n");
+        orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
+        return NULL;
+    }
+
+    struct pollfd *pfds = g_new0(struct pollfd, (guint)nfds);
+
+    g_mutex_lock(&orc->alsa_lock);
+    int got = snd_seq_poll_descriptors(app->seq, pfds, (unsigned int)nfds, POLLIN);
+    g_mutex_unlock(&orc->alsa_lock);
+
+    if (got < 0) {
+        g_printerr("ALSA TX thread could not get poll descriptors: %s\n",
+                   snd_strerror(got));
+        g_free(pfds);
+        orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
+        return NULL;
+    }
+
+    g_print("ALSA TX thread started.\n");
+
+    while (!g_atomic_int_get(&orc->alsa_tx_stop_requested)) {
+        int pr = poll(pfds, (nfds_t)nfds, 100);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            g_printerr("ALSA TX poll failed: %s\n", g_strerror(errno));
+            orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
+            break;
+        }
+
+        if (pr == 0)
+            continue;
+
+        orchestrator_drain_alsa_tx_queue(orc);
+    }
+
+    g_free(pfds);
+    return NULL;
+}
+
+static bool orchestrator_start_alsa_tx_thread(MbOrchestrator *orc) {
+    App *app = &orc->app;
+
+    g_print("ALSA TX start requested: enable_tx=%s seq=%p existing_thread=%p\n",
+            app->cfg.enable_tx ? "yes" : "no",
+            (void *)app->seq,
+            (void *)orc->alsa_tx_thread);
+
+    if (!app->cfg.enable_tx)
+        return true;
+
+    if (orc->alsa_tx_thread)
+        return true;
+
+    g_atomic_int_set(&orc->alsa_tx_stop_requested, 0);
+    orc->alsa_tx_thread = g_thread_new("midi-ble-rt-alsa-tx",
+                                       orchestrator_alsa_tx_thread_main,
+                                       orc);
+    if (!orc->alsa_tx_thread) {
+        g_printerr("Could not start ALSA TX thread.\n");
+        return false;
+    }
+
+    return true;
+}
+
+static void orchestrator_stop_alsa_tx_thread(MbOrchestrator *orc) {
+    if (!orc || !orc->alsa_tx_thread)
+        return;
+
+    g_atomic_int_set(&orc->alsa_tx_stop_requested, 1);
+    g_thread_join(orc->alsa_tx_thread);
+    orc->alsa_tx_thread = NULL;
 }
 
 static gboolean orchestrator_device_health_cb(gpointer user_data) {
@@ -449,8 +535,8 @@ static gboolean orchestrator_stats_export_cb(gpointer user_data) {
 static void orchestrator_ensure_periodic_sources(MbOrchestrator *orc) {
     App *app = &orc->app;
 
-    if (app->cfg.enable_tx && app->alsa_rx_source_id == 0)
-        app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, orc);
+    if (!orchestrator_start_alsa_tx_thread(orc))
+        orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
 
     if (orc->health_source_id == 0)
         orc->health_source_id = g_timeout_add(1000, orchestrator_device_health_cb, orc);
@@ -541,6 +627,11 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
     }
     orchestrator_session_event(orc, MB_EV_NOTIFY_OK);
 
+    if (!orchestrator_start_alsa_tx_thread(orc)) {
+        orchestrator_session_event(orc, MB_EV_ALSA_IO_FAILED);
+        return false;
+    }
+
     orchestrator_ensure_periodic_sources(orc);
     return orchestrator_session_is(orc, MB_SESSION_STREAMING);
 }
@@ -580,6 +671,8 @@ static void orchestrator_cleanup(MbOrchestrator *orc) {
         g_source_remove(app->alsa_rx_source_id);
         app->alsa_rx_source_id = 0;
     }
+
+    orchestrator_stop_alsa_tx_thread(orc);
 
     orchestrator_stop_notify(orc);
 

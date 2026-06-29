@@ -12,6 +12,7 @@
 #include <alsa/asoundlib.h>
 #include <errno.h>
 #include <glib.h>
+#include <poll.h>
 #include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <signal.h>
@@ -122,7 +123,8 @@ struct _ConfigDirRuntime {
     guint control_socket_source_id;
     char *control_socket_path;
 
-    guint alsa_source_id;
+    GThread *alsa_tx_thread;
+    gint alsa_tx_stop_requested;
     guint health_source_id;
     guint reconnect_source_id;
     guint sigint_source_id;
@@ -1440,11 +1442,9 @@ static bool runtime_start_control_socket(ConfigDirRuntime *rt) {
     return rt->control_socket_source_id != 0;
 }
 
-static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
-    ConfigDirRuntime *rt = user_data;
-
+static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
     if (!rt->cfg.enable_tx || !rt->seq)
-        return G_SOURCE_CONTINUE;
+        return;
 
     for (;;) {
         g_mutex_lock(&rt->alsa_lock);
@@ -1513,8 +1513,84 @@ static gboolean runtime_alsa_rx_poll_cb(gpointer user_data) {
                                     "TX runtime queue push failed");
         }
     }
+}
 
-    return G_SOURCE_CONTINUE;
+static gpointer runtime_alsa_tx_thread_main(gpointer user_data) {
+    ConfigDirRuntime *rt = user_data;
+
+    if (!rt->cfg.enable_tx || !rt->seq)
+        return NULL;
+
+    int nfds = snd_seq_poll_descriptors_count(rt->seq, POLLIN);
+    if (nfds <= 0) {
+        g_printerr("ALSA TX thread could not get poll descriptor count.\n");
+        return NULL;
+    }
+
+    struct pollfd *pfds = g_new0(struct pollfd, (guint)nfds);
+
+    g_mutex_lock(&rt->alsa_lock);
+    int got = snd_seq_poll_descriptors(rt->seq, pfds, (unsigned int)nfds, POLLIN);
+    g_mutex_unlock(&rt->alsa_lock);
+
+    if (got < 0) {
+        g_printerr("ALSA TX thread could not get poll descriptors: %s\n",
+                   snd_strerror(got));
+        g_free(pfds);
+        return NULL;
+    }
+
+    g_print("ALSA TX thread started.\n");
+
+    while (!g_atomic_int_get(&rt->alsa_tx_stop_requested)) {
+        int pr = poll(pfds, (nfds_t)nfds, 100);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            g_printerr("ALSA TX poll failed: %s\n", g_strerror(errno));
+            break;
+        }
+
+        if (pr == 0)
+            continue;
+
+        runtime_drain_alsa_tx_queue(rt);
+    }
+
+    g_free(pfds);
+    g_print("ALSA TX thread stopped.\n");
+    return NULL;
+}
+
+static bool runtime_start_alsa_tx_thread(ConfigDirRuntime *rt) {
+    if (!rt->cfg.enable_tx)
+        return true;
+
+    if (!rt->seq)
+        return true;
+
+    if (rt->alsa_tx_thread)
+        return true;
+
+    g_atomic_int_set(&rt->alsa_tx_stop_requested, 0);
+    rt->alsa_tx_thread = g_thread_new("midi-ble-rt-alsa-tx",
+                                      runtime_alsa_tx_thread_main,
+                                      rt);
+    if (!rt->alsa_tx_thread) {
+        g_printerr("Could not start ALSA TX thread.\n");
+        return false;
+    }
+
+    return true;
+}
+
+static void runtime_stop_alsa_tx_thread(ConfigDirRuntime *rt) {
+    if (!rt || !rt->alsa_tx_thread)
+        return;
+
+    g_atomic_int_set(&rt->alsa_tx_stop_requested, 1);
+    g_thread_join(rt->alsa_tx_thread);
+    rt->alsa_tx_thread = NULL;
 }
 
 static gboolean runtime_device_health_cb(gpointer user_data) {
@@ -1611,8 +1687,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         g_source_remove(rt->reconnect_source_id);
     if (rt->health_source_id)
         g_source_remove(rt->health_source_id);
-    if (rt->alsa_source_id)
-        g_source_remove(rt->alsa_source_id);
+    runtime_stop_alsa_tx_thread(rt);
     if (rt->control_socket_source_id)
         g_source_remove(rt->control_socket_source_id);
     if (rt->lifecycle_source_id)
@@ -1691,7 +1766,8 @@ static int run_config_directory_mode(const char *config_dir) {
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
     rt.reconnect_source_id = g_timeout_add(10000, runtime_reconnect_cb, &rt);
     rt.health_source_id = g_timeout_add(1000, runtime_device_health_cb, &rt);
-    rt.alsa_source_id = g_timeout_add(1, runtime_alsa_rx_poll_cb, &rt);
+    if (!runtime_start_alsa_tx_thread(&rt))
+        g_printerr("ALSA TX thread disabled; TX from ALSA will not run.\n");
     runtime_start_control_socket(&rt);
 
     print_config_dir_devices(&rt, config_dir);
