@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
-Version:        0.7.1
-Release:        2%{?dist}
+Version:        0.8.0
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -61,6 +61,14 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-1
+- Complete multi-device runtime statistics with stats v5.
+- Export one RX and one TX statistics row per configured BLE-MIDI device.
+- Show ALSA client:port per device instead of ambiguous aggregate ports.
+- Track queue depth and peak buffer fill per device and direction.
+- Update midi-ble-rtctl stats/top for the multi-device v5 format.
+- Keep the daemon generic for BLE-MIDI instruments, controllers, modules and adapters.
+
 * Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.1-2
 - Install generated systemd user unit from CMake.
 - Align service ExecStart with the installed bindir.
