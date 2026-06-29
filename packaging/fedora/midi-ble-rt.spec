@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.8.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -55,12 +55,16 @@ for bin in \
 %files
 %license LICENSE
 %doc README.md DEVELOPERS.md RELEASE_NOTES_v*.md docs/*.md
+%{_docdir}/midi_ble_rt/MULTI_DEVICE_CONFIG.md
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-2
+- Package installed multi-device documentation in the Fedora RPM.
+
 * Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-1
 - Complete multi-device runtime statistics with stats v5.
 - Export one RX and one TX statistics row per configured BLE-MIDI device.
