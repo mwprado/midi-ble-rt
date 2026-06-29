@@ -1266,18 +1266,31 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
     if (g_ascii_strcasecmp(line, "STATUS") == 0) {
         unsigned devices = rt->devices ? rt->devices->len : 0;
         unsigned streaming = 0;
+        unsigned rx_workers = 0;
+        unsigned tx_workers = 0;
 
         for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
             ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-            if (dev && device_session_is(dev, MB_SESSION_STREAMING))
+            if (!dev)
+                continue;
+
+            if (device_session_is(dev, MB_SESSION_STREAMING))
                 streaming++;
+
+            if (dev->runtime_started && dev->runtime.rx.consumer_thread)
+                rx_workers++;
+
+            if (dev->runtime_started && dev->runtime.tx.consumer_thread)
+                tx_workers++;
         }
 
         char *reply = g_strdup_printf(
-            "OK STATUS devices=%u streaming=%u alsa_tx_thread=%s lifecycle_busy=%s lifecycle_queue=%u\n",
+            "OK STATUS devices=%u streaming=%u alsa_tx_thread=%s rx_workers=%u tx_workers=%u lifecycle_busy=%s lifecycle_queue=%u\n",
             devices,
             streaming,
             rt->alsa_tx_thread ? "running" : "stopped",
+            rx_workers,
+            tx_workers,
             rt->lifecycle_busy ? "yes" : "no",
             runtime_lifecycle_queue_depth(rt));
 
