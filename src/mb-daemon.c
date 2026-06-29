@@ -47,6 +47,7 @@ typedef struct {
 
     MbDuplexRuntime runtime;
     bool runtime_started;
+    MbSessionStats stats;
 
     /*
      * Dataplane TX lock per device.
@@ -337,48 +338,167 @@ static int runtime_stats_aggregate_alsa_port(ConfigDirRuntime *rt) {
     return port;
 }
 
-static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
-    if (!rt || !rt->stats.enabled)
+static void runtime_device_stats_ensure_window(ConfigDeviceRuntime *dev,
+                                               uint64_t now_ns);
+static void runtime_device_stats_reset_window(ConfigDeviceRuntime *dev,
+                                              uint64_t now_ns);
+
+static uint64_t runtime_stats_v5_ns_to_ms(uint64_t ns) {
+    return ns / 1000000ULL;
+}
+
+static uint64_t runtime_stats_v5_elapsed_ms(uint64_t now_ns, uint64_t then_ns) {
+    if (then_ns == 0 || now_ns < then_ns)
+        return 0;
+    return runtime_stats_v5_ns_to_ms(now_ns - then_ns);
+}
+
+static double runtime_stats_v5_rate_per_sec(uint64_t count, uint64_t window_ns) {
+    if (window_ns < 100000000ULL)
+        return 0.0;
+    return ((double)count * 1000000000.0) / (double)window_ns;
+}
+
+static char *runtime_stats_dup_tsv_field(const char *value) {
+    char *out = g_strdup(value && *value ? value : "-");
+    for (char *p = out; p && *p; p++) {
+        if (*p == 9 || *p == 10 || *p == 13)
+            *p = ' ';
+    }
+    return out;
+}
+
+static void runtime_stats_append_v5_row(GString *content,
+                                        ConfigDirRuntime *rt,
+                                        ConfigDeviceRuntime *dev,
+                                        bool tx,
+                                        int alsa_client_id,
+                                        uint64_t now_ns,
+                                        uint8_t queue_depth) {
+    if (!content || !rt || !dev)
         return;
 
-    unsigned rx_depth = 0;
-    unsigned tx_depth = 0;
+    MbSessionStats *st = &dev->stats;
+    if (queue_depth > (tx ? st->tx_queue_high_watermark : st->rx_queue_high_watermark)) {
+        if (tx)
+            st->tx_queue_high_watermark = queue_depth;
+        else
+            st->rx_queue_high_watermark = queue_depth;
+    }
+
+    uint64_t window_ns = 0;
+    if (st->window_started_ns != 0 && now_ns >= st->window_started_ns)
+        window_ns = now_ns - st->window_started_ns;
+
+    char *id = runtime_stats_dup_tsv_field(dev->config ? dev->config->id : "-");
+    char *address = runtime_stats_dup_tsv_field(dev->config ? dev->config->address : "-");
+    char *name = runtime_stats_dup_tsv_field(device_label(dev));
+    char *state = runtime_stats_dup_tsv_field(mb_session_state_name(device_session_state(dev)));
+
+    uint64_t packets = tx ? st->tx_packets : st->rx_packets;
+    uint64_t bytes = tx ? st->tx_bytes : st->rx_bytes;
+    uint64_t drops = tx ? st->tx_drops : st->rx_drops;
+    uint64_t last_ms = tx
+        ? runtime_stats_v5_elapsed_ms(now_ns, st->last_tx_ns)
+        : runtime_stats_v5_elapsed_ms(now_ns, st->last_rx_ns);
+    uint64_t gap_avg_ms = tx
+        ? runtime_stats_v5_ns_to_ms(st->tx_gap_avg_ns)
+        : runtime_stats_v5_ns_to_ms(st->rx_gap_avg_ns);
+    uint64_t gap_max_ms = tx
+        ? runtime_stats_v5_ns_to_ms(st->tx_gap_max_ns)
+        : runtime_stats_v5_ns_to_ms(st->rx_gap_max_ns);
+    unsigned high_watermark = tx
+        ? st->tx_queue_high_watermark
+        : st->rx_queue_high_watermark;
+
+    g_string_append_printf(
+        content,
+        "%s\t%s\t%s\t%s\t%d\t%d\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%s\t"
+        "%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t"
+        "%.3f\t%.3f\t%.3f\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t"
+        "%u\t%u\n",
+        id,
+        address,
+        name,
+        state,
+        alsa_client_id,
+        dev->alsa_port,
+        runtime_stats_v5_elapsed_ms(now_ns, rt->stats.started_ns),
+        runtime_stats_v5_ns_to_ms(window_ns),
+        tx ? "TX" : "RX",
+        packets,
+        bytes,
+        drops,
+        runtime_stats_v5_rate_per_sec(packets, window_ns),
+        runtime_stats_v5_rate_per_sec(bytes, window_ns),
+        runtime_stats_v5_rate_per_sec(drops, window_ns),
+        last_ms,
+        gap_avg_ms,
+        gap_max_ms,
+        (unsigned)queue_depth,
+        high_watermark);
+
+    g_free(id);
+    g_free(address);
+    g_free(name);
+    g_free(state);
+}
+
+static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
+    if (!rt || !rt->stats.enabled || !rt->stats.path)
+        return;
+
+    int alsa_client_id = rt->seq ? snd_seq_client_id(rt->seq) : -1;
+    uint64_t now_ns = runtime_now_ns();
+
+    char *dir = g_path_get_dirname(rt->stats.path);
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        g_printerr("Stats export failed: failed to create stats directory: %s\n", dir);
+        g_free(dir);
+        return;
+    }
+    g_free(dir);
+
+    GString *content = g_string_new(
+        "v5\n"
+        "id\taddress\tname\tstate\talsa_client_id\talsa_port_id\tuptime_ms\twindow_ms\tdir\t"
+        "packets\tbytes\tdrops\tpackets_per_sec\tbytes_per_sec\tdrops_per_sec\t"
+        "last_ms\tgap_avg_ms\tgap_max_ms\tqueue_depth\tqueue_high_watermark\n");
+
+    g_mutex_lock(&rt->stats_lock);
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev || !dev->runtime_started)
+        if (!dev)
             continue;
 
-        rx_depth = runtime_stats_depth_add(rx_depth,
-                                           mb_duplex_runtime_rx_depth(&dev->runtime));
-        tx_depth = runtime_stats_depth_add(tx_depth,
-                                           mb_duplex_runtime_tx_depth(&dev->runtime));
+        runtime_device_stats_ensure_window(dev, now_ns);
+
+        uint8_t rx_depth = dev->runtime_started
+            ? mb_duplex_runtime_rx_depth(&dev->runtime)
+            : 0;
+        uint8_t tx_depth = dev->runtime_started
+            ? mb_duplex_runtime_tx_depth(&dev->runtime)
+            : 0;
+
+        runtime_stats_append_v5_row(content, rt, dev, false, alsa_client_id, now_ns, rx_depth);
+        runtime_stats_append_v5_row(content, rt, dev, true, alsa_client_id, now_ns, tx_depth);
     }
 
-    int alsa_client_id = rt->seq ? snd_seq_client_id(rt->seq) : -1;
-    int alsa_port_id = runtime_stats_aggregate_alsa_port(rt);
-    uint64_t now_ns = runtime_now_ns();
-    GError *error = NULL;
+    for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        runtime_device_stats_reset_window(dev, now_ns);
+    }
 
-    g_mutex_lock(&rt->stats_lock);
-    bool ok = mb_stats_export_tsv(&rt->stats,
-                                  "config-dir",
-                                  "-",
-                                  runtime_stats_aggregate_state(rt),
-                                  alsa_client_id,
-                                  alsa_port_id,
-                                  alsa_client_id,
-                                  alsa_port_id,
-                                  rx_depth,
-                                  tx_depth,
-                                  now_ns,
-                                  &error);
     g_mutex_unlock(&rt->stats_lock);
 
-    if (!ok) {
+    GError *error = NULL;
+    if (!g_file_set_contents(rt->stats.path, content->str, -1, &error)) {
         g_printerr("Stats export failed: %s\n", error ? error->message : "unknown error");
         g_clear_error(&error);
     }
+
+    g_string_free(content, TRUE);
 }
 
 static gboolean runtime_stats_export_cb(gpointer user_data) {
@@ -431,6 +551,141 @@ static void runtime_stats_observe_queue_depth(ConfigDirRuntime *rt,
     else
         mb_stats_queue_depth(&rt->stats, queue_depth, 0);
     g_mutex_unlock(&rt->stats_lock);
+}
+
+
+static uint64_t runtime_stats_ns_to_ms(uint64_t ns) {
+    return ns / 1000000ULL;
+}
+
+static uint64_t runtime_stats_elapsed_ms(uint64_t now_ns, uint64_t then_ns) {
+    if (then_ns == 0 || now_ns < then_ns)
+        return 0;
+    return runtime_stats_ns_to_ms(now_ns - then_ns);
+}
+
+static double runtime_stats_rate_per_sec(uint64_t count, uint64_t window_ns) {
+    if (window_ns < 100000000ULL)
+        return 0.0;
+    return ((double)count * 1000000000.0) / (double)window_ns;
+}
+
+static void runtime_stats_add_u64_saturating(uint64_t *value, uint64_t add) {
+    if (!value)
+        return;
+    if (UINT64_MAX - *value < add)
+        *value = UINT64_MAX;
+    else
+        *value += add;
+}
+
+static void runtime_device_stats_ensure_window(ConfigDeviceRuntime *dev, uint64_t now_ns) {
+    if (dev && dev->stats.window_started_ns == 0)
+        dev->stats.window_started_ns = now_ns;
+}
+
+static void runtime_device_stats_reset_window(ConfigDeviceRuntime *dev, uint64_t now_ns) {
+    if (!dev)
+        return;
+
+    dev->stats.rx_packets = 0;
+    dev->stats.tx_packets = 0;
+    dev->stats.rx_bytes = 0;
+    dev->stats.tx_bytes = 0;
+    dev->stats.rx_drops = 0;
+    dev->stats.tx_drops = 0;
+    dev->stats.rx_queue_high_watermark = 0;
+    dev->stats.tx_queue_high_watermark = 0;
+    dev->stats.window_started_ns = now_ns;
+}
+
+static void runtime_device_stats_update_gap(uint64_t *last_ns,
+                                            uint64_t *avg_ns,
+                                            uint64_t *max_ns,
+                                            uint64_t now_ns) {
+    if (*last_ns != 0 && now_ns >= *last_ns) {
+        uint64_t gap = now_ns - *last_ns;
+        if (*avg_ns == 0)
+            *avg_ns = gap;
+        else
+            *avg_ns = ((*avg_ns * 7ULL) + gap) / 8ULL;
+        if (gap > *max_ns)
+            *max_ns = gap;
+    }
+
+    *last_ns = now_ns;
+}
+
+static void runtime_device_stats_rx_packet(ConfigDeviceRuntime *dev,
+                                           size_t bytes,
+                                           uint64_t now_ns) {
+    if (!dev || !dev->owner || !dev->owner->stats.enabled)
+        return;
+
+    g_mutex_lock(&dev->owner->stats_lock);
+    runtime_device_stats_ensure_window(dev, now_ns);
+    runtime_stats_add_u64_saturating(&dev->stats.rx_packets, 1);
+    runtime_stats_add_u64_saturating(&dev->stats.rx_bytes, (uint64_t)bytes);
+    runtime_device_stats_update_gap(&dev->stats.last_rx_ns,
+                                    &dev->stats.rx_gap_avg_ns,
+                                    &dev->stats.rx_gap_max_ns,
+                                    now_ns);
+    g_mutex_unlock(&dev->owner->stats_lock);
+}
+
+static void runtime_device_stats_tx_packet(ConfigDeviceRuntime *dev,
+                                           size_t bytes,
+                                           uint64_t now_ns) {
+    if (!dev || !dev->owner || !dev->owner->stats.enabled)
+        return;
+
+    g_mutex_lock(&dev->owner->stats_lock);
+    runtime_device_stats_ensure_window(dev, now_ns);
+    runtime_stats_add_u64_saturating(&dev->stats.tx_packets, 1);
+    runtime_stats_add_u64_saturating(&dev->stats.tx_bytes, (uint64_t)bytes);
+    runtime_device_stats_update_gap(&dev->stats.last_tx_ns,
+                                    &dev->stats.tx_gap_avg_ns,
+                                    &dev->stats.tx_gap_max_ns,
+                                    now_ns);
+    g_mutex_unlock(&dev->owner->stats_lock);
+}
+
+static void runtime_device_stats_rx_drop(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner || !dev->owner->stats.enabled)
+        return;
+
+    g_mutex_lock(&dev->owner->stats_lock);
+    runtime_device_stats_ensure_window(dev, runtime_now_ns());
+    runtime_stats_add_u64_saturating(&dev->stats.rx_drops, 1);
+    g_mutex_unlock(&dev->owner->stats_lock);
+}
+
+static void runtime_device_stats_tx_drop(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner || !dev->owner->stats.enabled)
+        return;
+
+    g_mutex_lock(&dev->owner->stats_lock);
+    runtime_device_stats_ensure_window(dev, runtime_now_ns());
+    runtime_stats_add_u64_saturating(&dev->stats.tx_drops, 1);
+    g_mutex_unlock(&dev->owner->stats_lock);
+}
+
+static void runtime_device_stats_observe_queue_depth(ConfigDeviceRuntime *dev,
+                                                     bool tx,
+                                                     unsigned queue_depth) {
+    if (!dev || !dev->owner || !dev->owner->stats.enabled)
+        return;
+
+    g_mutex_lock(&dev->owner->stats_lock);
+    runtime_device_stats_ensure_window(dev, runtime_now_ns());
+    if (tx) {
+        if (queue_depth > dev->stats.tx_queue_high_watermark)
+            dev->stats.tx_queue_high_watermark = queue_depth;
+    } else {
+        if (queue_depth > dev->stats.rx_queue_high_watermark)
+            dev->stats.rx_queue_high_watermark = queue_depth;
+    }
+    g_mutex_unlock(&dev->owner->stats_lock);
 }
 
 static void runtime_build_sessions(ConfigDirRuntime *rt) {
@@ -512,6 +767,7 @@ static void runtime_create_devices(ConfigDirRuntime *rt) {
         dev->config = device;
         dev->session = session;
         dev->alsa_port = -1;
+        dev->stats.window_started_ns = runtime_now_ns();
         g_mutex_init(&dev->session_lock);
         g_mutex_init(&dev->gatt_write_lock);
         g_ptr_array_add(rt->devices, dev);
@@ -711,6 +967,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
     if (!char_path) {
         g_printerr("No GATT characteristic path for %s.\n", device_label(dev));
         runtime_stats_tx_drop(dev->owner);
+        runtime_device_stats_tx_drop(dev);
         return false;
     }
 
@@ -731,6 +988,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
             g_printerr("BLE-MIDI packet construction failed for %s.\n",
                        device_label(dev));
             runtime_stats_tx_drop(dev->owner);
+        runtime_device_stats_tx_drop(dev);
             ok = false;
             break;
         }
@@ -748,6 +1006,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                                packet_len,
                                                5000)) {
             runtime_stats_tx_drop(dev->owner);
+        runtime_device_stats_tx_drop(dev);
             lifecycle_enqueue_event(dev->owner,
                                     dev,
                                     MB_EV_GATT_WRITE_FAILED,
@@ -756,7 +1015,9 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
             break;
         }
 
-        runtime_stats_tx_packet(dev->owner, chunk, runtime_now_ns());
+        uint64_t now_ns = runtime_now_ns();
+        runtime_stats_tx_packet(dev->owner, chunk, now_ns);
+        runtime_device_stats_tx_packet(dev, chunk, now_ns);
         off += chunk;
     }
 
@@ -772,10 +1033,11 @@ static void device_rx_consume(MbRuntimeFlow *flow,
     (void)flow;
     (void)item;
     ConfigDeviceRuntime *dev = user_data;
-    if (dev)
-        runtime_stats_observe_queue_depth(dev->owner,
-                                          false,
-                                          (unsigned)mb_runtime_flow_depth(flow) + 1u);
+    if (dev) {
+        unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
+        runtime_stats_observe_queue_depth(dev->owner, false, depth);
+        runtime_device_stats_observe_queue_depth(dev, false, depth);
+    }
 
     g_mutex_lock(&dev->owner->alsa_lock);
     device_ble_midi_decode_packet(dev, data, len);
@@ -790,10 +1052,11 @@ static void device_tx_consume(MbRuntimeFlow *flow,
     (void)flow;
     (void)item;
     ConfigDeviceRuntime *dev = user_data;
-    if (dev)
-        runtime_stats_observe_queue_depth(dev->owner,
-                                          true,
-                                          (unsigned)mb_runtime_flow_depth(flow) + 1u);
+    if (dev) {
+        unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
+        runtime_stats_observe_queue_depth(dev->owner, true, depth);
+        runtime_device_stats_observe_queue_depth(dev, true, depth);
+    }
 
     g_mutex_lock(&dev->gatt_write_lock);
     device_ble_midi_write_packet(dev, data, len);
@@ -896,12 +1159,14 @@ static void device_on_properties_changed(GDBusConnection *connection,
                 g_printerr("RX runtime queue push failed for %s; BLE notification dropped.\n",
                            device_label(dev));
                 runtime_stats_rx_drop(dev->owner);
+                runtime_device_stats_rx_drop(dev);
                 lifecycle_enqueue_event(dev->owner,
                                         dev,
                                         MB_EV_RUNTIME_FAILED,
                                         "RX runtime queue push failed");
             } else {
                 runtime_stats_rx_packet(dev->owner, len, now_ns);
+                runtime_device_stats_rx_packet(dev, len, now_ns);
             }
             g_variant_unref(value);
         }
@@ -1729,6 +1994,7 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
             snd_midi_event_reset_decode(dev->alsa_midi_decoder);
             g_mutex_unlock(&rt->alsa_lock);
             runtime_stats_tx_drop(rt);
+            runtime_device_stats_tx_drop(dev);
             lifecycle_enqueue_event(rt,
                                     dev,
                                     MB_EV_ALSA_DECODE_FAILED,
@@ -1751,6 +2017,7 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
             g_printerr("TX runtime queue push failed for %s; ALSA event dropped.\n",
                        device_label(dev));
             runtime_stats_tx_drop(rt);
+            runtime_device_stats_tx_drop(dev);
             lifecycle_enqueue_event(rt,
                                     dev,
                                     MB_EV_RUNTIME_FAILED,
