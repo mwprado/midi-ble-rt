@@ -129,6 +129,7 @@ typedef struct {
     char *version;
     char **header;
     char **value;
+    GPtrArray *rows; /* element type: char ** */
     gsize n_header;
     gsize n_value;
 } StatsTable;
@@ -148,6 +149,8 @@ static void stats_table_clear(StatsTable *t) {
     g_free(t->version);
     g_strfreev(t->header);
     g_strfreev(t->value);
+    if (t->rows)
+        g_ptr_array_free(t->rows, TRUE);
     memset(t, 0, sizeof(*t));
 }
 
@@ -163,6 +166,10 @@ static bool stats_is_v4(const StatsTable *t) {
     return t && g_strcmp0(t->version, "v4") == 0;
 }
 
+static bool stats_is_v5(const StatsTable *t) {
+    return t && g_strcmp0(t->version, "v5") == 0;
+}
+
 static bool stats_has_window(const StatsTable *t) {
     return stats_is_v2(t) || stats_is_v3(t) || stats_is_v4(t);
 }
@@ -175,6 +182,28 @@ static const char *stats_get(const StatsTable *t, const char *key) {
             return t->value[i] && *t->value[i] ? t->value[i] : "-";
     }
     return "-";
+}
+
+static const char *stats_row_get(const StatsTable *t, char **row, const char *key) {
+    if (!t || !row || !key)
+        return "-";
+    for (gsize i = 0; i < t->n_header && row[i]; i++) {
+        if (g_strcmp0(t->header[i], key) == 0)
+            return row[i] && *row[i] ? row[i] : "-";
+    }
+    return "-";
+}
+
+static guint64 stats_row_u64(const StatsTable *t, char **row, const char *key) {
+    const char *s = stats_row_get(t, row, key);
+    if (!s || g_strcmp0(s, "-") == 0)
+        return 0;
+    return g_ascii_strtoull(s, NULL, 10);
+}
+
+static const char *stats_row_rate(const StatsTable *t, char **row, const char *key) {
+    const char *s = stats_row_get(t, row, key);
+    return s && *s ? s : "0.000";
 }
 
 static guint64 stats_u64(const StatsTable *t, const char *key) {
@@ -276,6 +305,53 @@ static bool read_stats_table(const char *path, StatsTable *out) {
     char **lines = g_strsplit(content, "\n", 0);
     g_free(content);
 
+    /*
+     * v5 is a multi-row format:
+     *
+     *   v5
+     *   header...
+     *   device RX row...
+     *   device TX row...
+     *
+     * Handle it before the legacy single-row validator, because the old
+     * validator expects exactly the v1-v4 shape and may reject v5 as incomplete.
+     */
+    if (lines && lines[0] && g_strcmp0(lines[0], "v5") == 0) {
+        out->version = g_strdup(lines[0]);
+
+        if (!lines[1] || !*lines[1]) {
+            g_printerr("Unsupported or incomplete stats file: %s\n", path);
+            g_printerr("Stats version found: %s\n", lines[0]);
+            g_strfreev(lines);
+            return false;
+        }
+
+        out->header = g_strsplit(lines[1], "\t", 0);
+        out->n_header = strv_len(out->header);
+        out->rows = g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev);
+
+        for (gsize i = 2; lines[i]; i++) {
+            if (!*lines[i])
+                continue;
+            g_ptr_array_add(out->rows, g_strsplit(lines[i], "\t", 0));
+        }
+
+        if (out->rows->len > 0) {
+            out->value = g_strdupv((char **)g_ptr_array_index(out->rows, 0));
+            out->n_value = strv_len(out->value);
+        }
+
+        g_strfreev(lines);
+
+        if (out->n_header == 0) {
+            g_printerr("Empty stats table: %s\n", path);
+            stats_table_clear(out);
+            return false;
+        }
+
+        return true;
+    }
+
     bool supported = lines &&
                      (g_strcmp0(lines[0], "v1") == 0 ||
                       g_strcmp0(lines[0], "v2") == 0 ||
@@ -292,9 +368,25 @@ static bool read_stats_table(const char *path, StatsTable *out) {
 
     out->version = g_strdup(lines[0]);
     out->header = g_strsplit(lines[1], "\t", 0);
-    out->value = g_strsplit(lines[2], "\t", 0);
     out->n_header = strv_len(out->header);
-    out->n_value = strv_len(out->value);
+
+    if (g_strcmp0(out->version, "v5") == 0) {
+        out->rows = g_ptr_array_new_with_free_func((GDestroyNotify)g_strfreev);
+        for (gsize i = 2; lines[i]; i++) {
+            if (!*lines[i])
+                continue;
+            g_ptr_array_add(out->rows, g_strsplit(lines[i], "\t", 0));
+        }
+
+        if (out->rows->len > 0) {
+            out->value = g_strdupv(g_ptr_array_index(out->rows, 0));
+            out->n_value = strv_len(out->value);
+        }
+    } else {
+        out->value = g_strsplit(lines[2], "\t", 0);
+        out->n_value = strv_len(out->value);
+    }
+
     g_strfreev(lines);
 
     if (out->n_header == 0 || out->n_value == 0) {
@@ -306,7 +398,88 @@ static bool read_stats_table(const char *path, StatsTable *out) {
     return true;
 }
 
+
+static void print_stats_v5(const char *path, const StatsTable *t) {
+    g_print("Stats file: %s\n", path);
+    g_print("Format:     %s\n", t->version ? t->version : "-");
+
+    if (!t->rows || t->rows->len == 0) {
+        g_print("No device stats rows.\n");
+        return;
+    }
+
+    char **first = g_ptr_array_index(t->rows, 0);
+    g_print("Session:    config-dir\n");
+    g_print("Uptime:     %s ms\n", stats_row_get(t, first, "uptime_ms"));
+    g_print("Window:     %s ms\n", stats_row_get(t, first, "window_ms"));
+    g_print("\n");
+
+    g_print("%-18s %-2s %-10s %-8s %10s %10s %10s %10s %10s %10s %8s %8s %7s  %s\n",
+            "DEVICE", "D", "STATE", "ALSA", "PKT_WIN", "B_WIN", "DROP_WIN",
+            "PKT/s", "B/s", "DROP/s", "QDEPTH", "PEAK", "FILL", "BAR");
+
+    for (guint i = 0; i < t->rows->len; i++) {
+        char **row = g_ptr_array_index(t->rows, i);
+        guint64 depth = stats_row_u64(t, row, "queue_depth");
+        guint64 peak = stats_row_u64(t, row, "queue_high_watermark");
+        if (depth > peak)
+            peak = depth;
+
+        char bar[STATS_QUEUE_BAR_WIDTH + 3];
+        stats_queue_bar(peak, bar, sizeof(bar));
+
+        char *alsa = g_strdup_printf("%s:%s",
+                                     stats_row_get(t, row, "alsa_client_id"),
+                                     stats_row_get(t, row, "alsa_port_id"));
+
+        const char *device = stats_row_get(t, row, "id");
+        if (g_strcmp0(device, "-") == 0)
+            device = stats_row_get(t, row, "address");
+
+        g_print("%-18.18s %-2.2s %-10.10s %-8.8s %10" G_GUINT64_FORMAT " %10" G_GUINT64_FORMAT " %10" G_GUINT64_FORMAT " %10s %10s %10s %8" G_GUINT64_FORMAT " %8" G_GUINT64_FORMAT " %6.1f%%  %s\n",
+                device,
+                stats_row_get(t, row, "dir"),
+                stats_row_get(t, row, "state"),
+                alsa,
+                stats_row_u64(t, row, "packets"),
+                stats_row_u64(t, row, "bytes"),
+                stats_row_u64(t, row, "drops"),
+                stats_row_rate(t, row, "packets_per_sec"),
+                stats_row_rate(t, row, "bytes_per_sec"),
+                stats_row_rate(t, row, "drops_per_sec"),
+                depth,
+                peak,
+                stats_queue_fill_pct(peak),
+                bar);
+
+        g_free(alsa);
+    }
+
+    g_print("\n");
+    g_print("%-18s %-2s %12s %12s %12s\n",
+            "DEVICE", "D", "LAST_MS", "GAP_AVG_MS", "GAP_MAX_MS");
+
+    for (guint i = 0; i < t->rows->len; i++) {
+        char **row = g_ptr_array_index(t->rows, i);
+        const char *device = stats_row_get(t, row, "id");
+        if (g_strcmp0(device, "-") == 0)
+            device = stats_row_get(t, row, "address");
+
+        g_print("%-18.18s %-2.2s %12s %12s %12s\n",
+                device,
+                stats_row_get(t, row, "dir"),
+                stats_row_get(t, row, "last_ms"),
+                stats_row_get(t, row, "gap_avg_ms"),
+                stats_row_get(t, row, "gap_max_ms"));
+    }
+}
+
 static void print_stats_aligned(const char *path, const StatsTable *t) {
+    if (stats_is_v5(t)) {
+        print_stats_v5(path, t);
+        return;
+    }
+
     g_print("Stats file: %s\n", path);
     g_print("Format:     %s\n", t->version ? t->version : "-");
     g_print("Session:    %s\n", stats_get(t, "label"));
