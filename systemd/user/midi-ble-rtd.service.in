@@ -1,0 +1,16 @@
+[Unit]
+Description=midi-ble-rt BLE-MIDI to ALSA Sequencer daemon
+Documentation=https://github.com/mwprado/midi-ble-rt
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/midi-ble-rtd --config %h/.config/midi-ble-rt
+Restart=on-failure
+RestartSec=2s
+
+# Keep the daemon tied to the user session. The ALSA Sequencer port belongs to
+# the user's MIDI/audio workflow.
+
+[Install]
+WantedBy=default.target
