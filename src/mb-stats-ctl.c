@@ -159,8 +159,12 @@ static bool stats_is_v3(const StatsTable *t) {
     return t && g_strcmp0(t->version, "v3") == 0;
 }
 
+static bool stats_is_v4(const StatsTable *t) {
+    return t && g_strcmp0(t->version, "v4") == 0;
+}
+
 static bool stats_has_window(const StatsTable *t) {
-    return stats_is_v2(t) || stats_is_v3(t);
+    return stats_is_v2(t) || stats_is_v3(t) || stats_is_v4(t);
 }
 
 static const char *stats_get(const StatsTable *t, const char *key) {
@@ -216,26 +220,43 @@ static void stats_queue_bar(guint64 depth, char *out, size_t out_len) {
     out[STATS_QUEUE_BAR_WIDTH + 2] = '\0';
 }
 
-static void print_queue_visual_line(const StatsTable *t, const char *dir, const char *depth_key) {
+static guint64 stats_queue_peak(const StatsTable *t, const char *depth_key, const char *peak_key) {
     guint64 depth = stats_u64(t, depth_key);
-    double pct = stats_queue_fill_pct(depth);
-    char bar[STATS_QUEUE_BAR_WIDTH + 3];
+    guint64 peak = stats_u64(t, peak_key);
+    return peak > depth ? peak : depth;
+}
 
-    stats_queue_bar(depth, bar, sizeof(bar));
+static void print_queue_visual_line(const StatsTable *t,
+                                    const char *dir,
+                                    const char *depth_key,
+                                    const char *peak_key) {
+    guint64 depth = stats_u64(t, depth_key);
+    guint64 peak = stats_queue_peak(t, depth_key, peak_key);
+    char now_bar[STATS_QUEUE_BAR_WIDTH + 3];
+    char peak_bar[STATS_QUEUE_BAR_WIDTH + 3];
+
+    stats_queue_bar(depth, now_bar, sizeof(now_bar));
+    stats_queue_bar(peak, peak_bar, sizeof(peak_bar));
 
     g_print("%-8s %5" G_GUINT64_FORMAT "/%-5u %7.1f%%  %s\n",
             dir,
             depth,
             (unsigned)MB_SLICE_RING_COUNT,
-            pct,
-            bar);
+            stats_queue_fill_pct(depth),
+            now_bar);
+    g_print("%-8s %5" G_GUINT64_FORMAT "/%-5u %7.1f%%  %s\n",
+            "  peak",
+            peak,
+            (unsigned)MB_SLICE_RING_COUNT,
+            stats_queue_fill_pct(peak),
+            peak_bar);
 }
 
 static void print_queue_visual(const StatsTable *t) {
     g_print("Buffer fill:\n");
     g_print("%-8s %11s %8s  %s\n", "DIR", "DEPTH/CAP", "FILL", "BAR");
-    print_queue_visual_line(t, "RX", "rx_queue_depth");
-    print_queue_visual_line(t, "TX", "tx_queue_depth");
+    print_queue_visual_line(t, "RX", "rx_queue_depth", "rx_queue_high_watermark");
+    print_queue_visual_line(t, "TX", "tx_queue_depth", "tx_queue_high_watermark");
 }
 
 static bool read_stats_table(const char *path, StatsTable *out) {
@@ -258,7 +279,8 @@ static bool read_stats_table(const char *path, StatsTable *out) {
     bool supported = lines &&
                      (g_strcmp0(lines[0], "v1") == 0 ||
                       g_strcmp0(lines[0], "v2") == 0 ||
-                      g_strcmp0(lines[0], "v3") == 0) &&
+                      g_strcmp0(lines[0], "v3") == 0 ||
+                      g_strcmp0(lines[0], "v4") == 0) &&
                      lines[1] && lines[2];
     if (!supported) {
         g_printerr("Unsupported or incomplete stats file: %s\n", path);
@@ -291,7 +313,7 @@ static void print_stats_aligned(const char *path, const StatsTable *t) {
     g_print("Address:    %s\n", stats_get(t, "address"));
     g_print("State:      %s\n", stats_get(t, "state"));
 
-    if (stats_is_v3(t)) {
+    if (stats_is_v3(t) || stats_is_v4(t)) {
         g_print("ALSA RX:    %s:%s\n",
                 stats_get(t, "alsa_rx_client_id"),
                 stats_get(t, "alsa_rx_port_id"));
