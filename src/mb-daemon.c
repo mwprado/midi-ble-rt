@@ -30,6 +30,7 @@
 #include "mb-duplex-runtime.h"
 #include "mb-gatt-midi.h"
 #include "mb-session.h"
+#include "mb-stats.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
@@ -96,6 +97,10 @@ struct _ConfigDirRuntime {
 
     GMutex alsa_lock;
     GMutex lifecycle_lock;
+    GMutex stats_lock;
+
+    MbStats stats;
+    guint stats_source_id;
 
     /*
      * Lifecycle/control-plane monitor.
@@ -271,6 +276,127 @@ static void lifecycle_enqueue_event(ConfigDirRuntime *rt,
                                     ConfigDeviceRuntime *dev,
                                     MbEventType event,
                                     const char *reason);
+
+static unsigned runtime_stats_depth_add(unsigned total, unsigned value) {
+    if (G_MAXUINT - total < value)
+        return G_MAXUINT;
+    return total + value;
+}
+
+static const char *runtime_stats_aggregate_state(ConfigDirRuntime *rt) {
+    bool any_streaming = false;
+    bool any_connecting = false;
+    bool any_reconnecting = false;
+    bool any_error = false;
+
+    for (unsigned i = 0; rt && rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!dev)
+            continue;
+
+        MbSessionState state = device_session_state(dev);
+        if (state == MB_SESSION_STREAMING)
+            any_streaming = true;
+        else if (state == MB_SESSION_CONNECTING || state == MB_SESSION_SCANNING)
+            any_connecting = true;
+        else if (state == MB_SESSION_RECONNECTING)
+            any_reconnecting = true;
+        else if (state == MB_SESSION_ERROR)
+            any_error = true;
+    }
+
+    if (any_streaming)
+        return mb_session_state_name(MB_SESSION_STREAMING);
+    if (any_connecting)
+        return mb_session_state_name(MB_SESSION_CONNECTING);
+    if (any_reconnecting)
+        return mb_session_state_name(MB_SESSION_RECONNECTING);
+    if (any_error)
+        return mb_session_state_name(MB_SESSION_ERROR);
+
+    return mb_session_state_name(MB_SESSION_IDLE);
+}
+
+static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
+    if (!rt || !rt->stats.enabled)
+        return;
+
+    unsigned rx_depth = 0;
+    unsigned tx_depth = 0;
+
+    for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!dev || !dev->runtime_started)
+            continue;
+
+        rx_depth = runtime_stats_depth_add(rx_depth,
+                                           mb_duplex_runtime_rx_depth(&dev->runtime));
+        tx_depth = runtime_stats_depth_add(tx_depth,
+                                           mb_duplex_runtime_tx_depth(&dev->runtime));
+    }
+
+    int alsa_client_id = rt->seq ? snd_seq_client_id(rt->seq) : -1;
+    uint64_t now_ns = runtime_now_ns();
+    GError *error = NULL;
+
+    g_mutex_lock(&rt->stats_lock);
+    bool ok = mb_stats_export_tsv(&rt->stats,
+                                  "config-dir",
+                                  "-",
+                                  runtime_stats_aggregate_state(rt),
+                                  alsa_client_id,
+                                  -1,
+                                  alsa_client_id,
+                                  -1,
+                                  rx_depth,
+                                  tx_depth,
+                                  now_ns,
+                                  &error);
+    g_mutex_unlock(&rt->stats_lock);
+
+    if (!ok) {
+        g_printerr("Stats export failed: %s\n", error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+}
+
+static gboolean runtime_stats_export_cb(gpointer user_data) {
+    ConfigDirRuntime *rt = user_data;
+    runtime_stats_export_snapshot(rt);
+    return G_SOURCE_CONTINUE;
+}
+
+static void runtime_stats_rx_packet(ConfigDirRuntime *rt, size_t bytes, uint64_t now_ns) {
+    if (!rt)
+        return;
+    g_mutex_lock(&rt->stats_lock);
+    mb_stats_rx_packet(&rt->stats, bytes, now_ns);
+    g_mutex_unlock(&rt->stats_lock);
+}
+
+static void runtime_stats_tx_packet(ConfigDirRuntime *rt, size_t bytes, uint64_t now_ns) {
+    if (!rt)
+        return;
+    g_mutex_lock(&rt->stats_lock);
+    mb_stats_tx_packet(&rt->stats, bytes, now_ns);
+    g_mutex_unlock(&rt->stats_lock);
+}
+
+static void runtime_stats_rx_drop(ConfigDirRuntime *rt) {
+    if (!rt)
+        return;
+    g_mutex_lock(&rt->stats_lock);
+    mb_stats_rx_drop(&rt->stats);
+    g_mutex_unlock(&rt->stats_lock);
+}
+
+static void runtime_stats_tx_drop(ConfigDirRuntime *rt) {
+    if (!rt)
+        return;
+    g_mutex_lock(&rt->stats_lock);
+    mb_stats_tx_drop(&rt->stats);
+    g_mutex_unlock(&rt->stats_lock);
+}
 
 static void runtime_build_sessions(ConfigDirRuntime *rt) {
     mb_daemon_init(&rt->daemon);
@@ -549,6 +675,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
     char *char_path = device_dup_char_path(dev);
     if (!char_path) {
         g_printerr("No GATT characteristic path for %s.\n", device_label(dev));
+        runtime_stats_tx_drop(dev->owner);
         return false;
     }
 
@@ -568,6 +695,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                      packet, sizeof(packet), &packet_len)) {
             g_printerr("BLE-MIDI packet construction failed for %s.\n",
                        device_label(dev));
+            runtime_stats_tx_drop(dev->owner);
             ok = false;
             break;
         }
@@ -584,6 +712,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                                packet,
                                                packet_len,
                                                5000)) {
+            runtime_stats_tx_drop(dev->owner);
             lifecycle_enqueue_event(dev->owner,
                                     dev,
                                     MB_EV_GATT_WRITE_FAILED,
@@ -592,6 +721,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
             break;
         }
 
+        runtime_stats_tx_packet(dev->owner, chunk, runtime_now_ns());
         off += chunk;
     }
 
@@ -693,13 +823,17 @@ static void device_on_properties_changed(GDBusConnection *connection,
         if (value) {
             gsize len = 0;
             const guint8 *bytes = g_variant_get_fixed_array(value, &len, sizeof(guint8));
-            if (!mb_duplex_runtime_push_rx(&dev->runtime, bytes, len, runtime_now_ns())) {
+            uint64_t now_ns = runtime_now_ns();
+            if (!mb_duplex_runtime_push_rx(&dev->runtime, bytes, len, now_ns)) {
                 g_printerr("RX runtime queue push failed for %s; BLE notification dropped.\n",
                            device_label(dev));
+                runtime_stats_rx_drop(dev->owner);
                 lifecycle_enqueue_event(dev->owner,
                                         dev,
                                         MB_EV_RUNTIME_FAILED,
                                         "RX runtime queue push failed");
+            } else {
+                runtime_stats_rx_packet(dev->owner, len, now_ns);
             }
             g_variant_unref(value);
         }
@@ -1526,6 +1660,7 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
                        device_label(dev), ev->type, snd_strerror((int)n));
             snd_midi_event_reset_decode(dev->alsa_midi_decoder);
             g_mutex_unlock(&rt->alsa_lock);
+            runtime_stats_tx_drop(rt);
             lifecycle_enqueue_event(rt,
                                     dev,
                                     MB_EV_ALSA_DECODE_FAILED,
@@ -1547,6 +1682,7 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
         if (!mb_duplex_runtime_push_tx(&dev->runtime, midi, (size_t)n, runtime_now_ns())) {
             g_printerr("TX runtime queue push failed for %s; ALSA event dropped.\n",
                        device_label(dev));
+            runtime_stats_tx_drop(rt);
             lifecycle_enqueue_event(rt,
                                     dev,
                                     MB_EV_RUNTIME_FAILED,
@@ -1702,6 +1838,9 @@ static void print_config_dir_devices(ConfigDirRuntime *rt, const char *config_di
     g_print("I/O UUID: %s\n", printable_string(rt->cfg.io_uuid, ""));
     g_print("Configured devices: %u\n", mb_config_device_count(&rt->cfg));
     g_print("Runtime devices: %u\n", rt->devices ? rt->devices->len : 0);
+    g_print("Stats: %s\n", rt->cfg.stats_enabled ? "enabled" : "disabled");
+    if (rt->cfg.stats_enabled && rt->stats.path)
+        g_print("Stats path: %s\n", rt->stats.path);
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
@@ -1726,6 +1865,13 @@ static void print_config_dir_devices(ConfigDirRuntime *rt, const char *config_di
 static void runtime_cleanup(ConfigDirRuntime *rt) {
     if (!rt)
         return;
+
+    runtime_stats_export_snapshot(rt);
+
+    if (rt->stats_source_id) {
+        g_source_remove(rt->stats_source_id);
+        rt->stats_source_id = 0;
+    }
 
     if (rt->sigint_source_id)
         g_source_remove(rt->sigint_source_id);
@@ -1774,8 +1920,13 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
     if (rt->bus)
         g_object_unref(rt->bus);
 
+    g_mutex_lock(&rt->stats_lock);
+    mb_stats_clear(&rt->stats);
+    g_mutex_unlock(&rt->stats_lock);
+
     g_mutex_clear(&rt->alsa_lock);
     g_mutex_clear(&rt->lifecycle_lock);
+    g_mutex_clear(&rt->stats_lock);
 }
 
 static int run_config_directory_mode(const char *config_dir) {
@@ -1784,6 +1935,7 @@ static int run_config_directory_mode(const char *config_dir) {
     rt.control_socket_fd = -1;
     g_mutex_init(&rt.alsa_lock);
     g_mutex_init(&rt.lifecycle_lock);
+    g_mutex_init(&rt.stats_lock);
     rt.lifecycle_queue = g_queue_new();
     rt.lifecycle_busy = false;
     rt.lifecycle_source_id = 0;
@@ -1794,6 +1946,8 @@ static int run_config_directory_mode(const char *config_dir) {
         runtime_cleanup(&rt);
         return 1;
     }
+
+    mb_stats_init(&rt.stats, rt.cfg.stats_enabled, rt.cfg.stats_interval_ms);
 
     GError *error = NULL;
     rt.bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
@@ -1807,12 +1961,17 @@ static int run_config_directory_mode(const char *config_dir) {
     runtime_build_sessions(&rt);
     runtime_resolve_bluez_devices(&rt);
     runtime_create_devices(&rt);
+    runtime_stats_export_snapshot(&rt);
 
     rt.loop = g_main_loop_new(NULL, FALSE);
     rt.sigint_source_id = g_unix_signal_add(SIGINT, quit_main_loop, &rt);
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
     rt.reconnect_source_id = g_timeout_add(10000, runtime_reconnect_cb, &rt);
     rt.health_source_id = g_timeout_add(1000, runtime_device_health_cb, &rt);
+    if (rt.cfg.stats_enabled)
+        rt.stats_source_id = g_timeout_add(rt.cfg.stats_interval_ms,
+                                           runtime_stats_export_cb,
+                                           &rt);
     runtime_start_control_socket(&rt);
 
     print_config_dir_devices(&rt, config_dir);
