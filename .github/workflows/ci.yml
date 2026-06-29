@@ -36,3 +36,13 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Install
+        run: cmake --install build --prefix "$PWD/install-root"
+
+      - name: Check install tree
+        run: |
+          test -x install-root/bin/midi-ble-rtd
+          test -x install-root/bin/midi-ble-rtctl
+          find install-root -path '*/systemd/user/midi-ble-rtd.service' -print -quit | grep .
+          test -d install-root/share/midi-ble-rt/config
