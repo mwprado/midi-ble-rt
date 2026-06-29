@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
 Version:        0.7.1
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -33,7 +33,7 @@ project target is any usable BLE-MIDI instrument, controller, module or adapter.
 %autosetup -n %{name}-%{version}
 
 %build
-%cmake -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+%cmake -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DSYSTEMD_USER_UNIT_DIR=%{_userunitdir}
 %cmake_build
 
 %install
@@ -61,6 +61,11 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.1-2
+- Install generated systemd user unit from CMake.
+- Align service ExecStart with the installed bindir.
+- Add CMake install validation to CI.
+
 * Sun Jun 28 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.0-1
 - Add multi-session lifecycle/control-plane monitor architecture.
 - Route lifecycle state changes through the monitor.
@@ -81,14 +86,14 @@ for bin in \
 - Add RPM check to fail the build if libmidi-ble-rt-core.so appears as a runtime dependency.
 - Disable test target builds in RPM packaging.
 
-* Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.0-1
+* Fri Jun 26 2026 Moacyr Prado <mwprado@gmail.com> - 0.6.0-1
 - Include internal code cleanup after the stable RPM release.
 - Extract BlueZ, BLE-MIDI GATT and ALSA port helper modules.
 - Add stats v3 with separate ALSA RX and ALSA TX fields.
 - Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
 - Preserve existing BLE-MIDI runtime behavior.
 
-* Fri Jun 26 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.5.2-1
+* Fri Jun 26 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.2-1
 - Add stats v3 with separate ALSA RX and ALSA TX fields.
 - Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
 - Include code cleanup: BlueZ/GATT/ALSA helper extraction and legacy boundary reduction.
