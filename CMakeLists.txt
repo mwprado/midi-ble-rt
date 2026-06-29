@@ -7,8 +7,18 @@ include(CTest)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(SYSTEMD_USER_UNIT_DIR "lib/systemd/user"
+    CACHE PATH "systemd user unit installation directory")
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/systemd/user")
+configure_file(
+    systemd/user/midi-ble-rtd.service.in
+    "${CMAKE_CURRENT_BINARY_DIR}/systemd/user/midi-ble-rtd.service"
+    @ONLY
+)
 
 add_library(midi-ble-rt-core STATIC
     src/mb-alsa.c
@@ -125,5 +135,5 @@ endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.example")
-install(FILES systemd/midi-ble-rtd.service DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/systemd)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/systemd/user/midi-ble-rtd.service" DESTINATION ${SYSTEMD_USER_UNIT_DIR})
 install(FILES docs/MULTI_DEVICE_CONFIG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
