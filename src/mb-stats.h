@@ -46,6 +46,7 @@ void mb_stats_tx_packet(MbStats *stats, size_t bytes, uint64_t now_ns);
 void mb_stats_rx_drop(MbStats *stats);
 void mb_stats_tx_drop(MbStats *stats);
 void mb_stats_queue_depth(MbStats *stats, unsigned rx_queue_depth, unsigned tx_queue_depth);
+void mb_stats_observe_runtime_queue_depth(bool tx, unsigned queue_depth);
 
 char *mb_stats_default_path(void);
 bool mb_stats_export_tsv(MbStats *stats,
