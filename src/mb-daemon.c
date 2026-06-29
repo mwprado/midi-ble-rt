@@ -145,7 +145,14 @@ static gboolean quit_main_loop(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
     if (rt && rt->loop)
         g_main_loop_quit(rt->loop);
-    return G_SOURCE_REMOVE;
+
+    /*
+     * Keep the signal source registered until runtime_cleanup().
+     * Returning G_SOURCE_REMOVE here makes GLib remove it immediately, while
+     * runtime_cleanup() still has the old source id and tries to remove it
+     * again, producing a harmless but noisy GLib-CRITICAL on Ctrl-C shutdown.
+     */
+    return G_SOURCE_CONTINUE;
 }
 
 static bool session_has_bluez_device_path(const MbSession *session) {
@@ -1626,6 +1633,14 @@ static void runtime_stop_alsa_tx_thread(ConfigDirRuntime *rt) {
     rt->alsa_tx_thread = NULL;
 }
 
+static void runtime_close_alsa_client(ConfigDirRuntime *rt) {
+    if (!rt || !rt->seq)
+        return;
+
+    snd_seq_close(rt->seq);
+    rt->seq = NULL;
+}
+
 static gboolean runtime_device_health_cb(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
 
@@ -1747,8 +1762,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         rt->lifecycle_queue = NULL;
         g_mutex_unlock(&rt->lifecycle_lock);
     }
-    if (rt->seq)
-        snd_seq_close(rt->seq);
+    runtime_close_alsa_client(rt);
     if (rt->device_by_char_path)
         g_hash_table_unref(rt->device_by_char_path);
     if (rt->device_by_alsa_port)
