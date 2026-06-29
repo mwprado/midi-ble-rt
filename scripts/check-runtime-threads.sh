@@ -28,7 +28,23 @@ done
 echo
 
 if [ -x "$CTL" ]; then
-    "$CTL" daemon-status || true
+    status=$("$CTL" daemon-status || true)
+    echo "$status"
+
+    echo "$status" | grep -q "alsa_tx_thread=running" || {
+        echo "ERR daemon-status does not report alsa_tx_thread=running" >&2
+        missing=1
+    }
+
+    echo "$status" | grep -q "rx_workers=" || {
+        echo "ERR daemon-status does not report rx_workers" >&2
+        missing=1
+    }
+
+    echo "$status" | grep -q "tx_workers=" || {
+        echo "ERR daemon-status does not report tx_workers" >&2
+        missing=1
+    }
 else
     echo "WARN ctl not executable: $CTL" >&2
 fi
