@@ -36,6 +36,7 @@ static const char *printable_string(const char *value, const char *fallback) {
 }
 
 typedef struct _ConfigDirRuntime ConfigDirRuntime;
+static bool runtime_start_alsa_tx_thread(ConfigDirRuntime *rt);
 
 typedef struct {
     ConfigDirRuntime *owner;
@@ -391,8 +392,11 @@ static bool runtime_open_alsa_client(ConfigDirRuntime *rt) {
 static bool device_ensure_alsa_port(ConfigDeviceRuntime *dev) {
     ConfigDirRuntime *rt = dev->owner;
 
-    if (dev->alsa_port >= 0)
+    if (dev->alsa_port >= 0) {
+        if (!runtime_start_alsa_tx_thread(rt))
+            g_printerr("ALSA TX thread disabled; TX from ALSA will not run.\n");
         return true;
+    }
 
     if (!runtime_open_alsa_client(rt))
         return false;
@@ -421,6 +425,10 @@ static bool device_ensure_alsa_port(ConfigDeviceRuntime *dev) {
             device_label(dev),
             printable_string(rt->cfg.alsa_client_name, "midi-ble-rt"),
             dev->alsa_port);
+
+    if (!runtime_start_alsa_tx_thread(rt))
+        g_printerr("ALSA TX thread disabled; TX from ALSA will not run.\n");
+
     return true;
 }
 
@@ -1766,8 +1774,6 @@ static int run_config_directory_mode(const char *config_dir) {
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
     rt.reconnect_source_id = g_timeout_add(10000, runtime_reconnect_cb, &rt);
     rt.health_source_id = g_timeout_add(1000, runtime_device_health_cb, &rt);
-    if (!runtime_start_alsa_tx_thread(&rt))
-        g_printerr("ALSA TX thread disabled; TX from ALSA will not run.\n");
     runtime_start_control_socket(&rt);
 
     print_config_dir_devices(&rt, config_dir);
