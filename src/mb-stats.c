@@ -38,6 +38,8 @@ static void reset_window(MbSessionStats *s, uint64_t now_ns) {
     s->tx_bytes = 0;
     s->rx_drops = 0;
     s->tx_drops = 0;
+    s->rx_queue_high_watermark = 0;
+    s->tx_queue_high_watermark = 0;
     s->window_started_ns = now_ns;
 }
 
@@ -111,6 +113,15 @@ void mb_stats_tx_drop(MbStats *stats) {
     add_u64_saturating(&stats->session.tx_drops, 1);
 }
 
+void mb_stats_queue_depth(MbStats *stats, unsigned rx_queue_depth, unsigned tx_queue_depth) {
+    if (!stats || !stats->enabled)
+        return;
+    if (rx_queue_depth > stats->session.rx_queue_high_watermark)
+        stats->session.rx_queue_high_watermark = rx_queue_depth;
+    if (tx_queue_depth > stats->session.tx_queue_high_watermark)
+        stats->session.tx_queue_high_watermark = tx_queue_depth;
+}
+
 char *mb_stats_default_path(void) {
     const char *runtime_dir = g_get_user_runtime_dir();
     if (!runtime_dir || !*runtime_dir)
@@ -133,6 +144,8 @@ bool mb_stats_export_tsv(MbStats *stats,
     if (!stats || !stats->enabled || !stats->path)
         return true;
 
+    mb_stats_queue_depth(stats, rx_queue_depth, tx_queue_depth);
+
     char *dir = g_path_get_dirname(stats->path);
     if (g_mkdir_with_parents(dir, 0700) != 0) {
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
@@ -153,9 +166,9 @@ bool mb_stats_export_tsv(MbStats *stats,
     uint64_t window_ms = ns_to_ms(window_ns);
 
     char *content = g_strdup_printf(
-        "v3\n"
-        "label\taddress\tstate\talsa_rx_client_id\talsa_rx_port_id\talsa_tx_client_id\talsa_tx_port_id\tuptime_ms\twindow_ms\trx_packets\ttx_packets\trx_bytes\ttx_bytes\trx_drops\ttx_drops\trx_packets_per_sec\ttx_packets_per_sec\trx_bytes_per_sec\ttx_bytes_per_sec\trx_drops_per_sec\ttx_drops_per_sec\tlast_rx_ms\tlast_tx_ms\trx_gap_avg_ms\trx_gap_max_ms\ttx_gap_avg_ms\ttx_gap_max_ms\trx_queue_depth\ttx_queue_depth\n"
-        "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%u\t%u\n",
+        "v4\n"
+        "label\taddress\tstate\talsa_rx_client_id\talsa_rx_port_id\talsa_tx_client_id\talsa_tx_port_id\tuptime_ms\twindow_ms\trx_packets\ttx_packets\trx_bytes\ttx_bytes\trx_drops\ttx_drops\trx_packets_per_sec\ttx_packets_per_sec\trx_bytes_per_sec\ttx_bytes_per_sec\trx_drops_per_sec\ttx_drops_per_sec\tlast_rx_ms\tlast_tx_ms\trx_gap_avg_ms\trx_gap_max_ms\ttx_gap_avg_ms\ttx_gap_max_ms\trx_queue_depth\ttx_queue_depth\trx_queue_high_watermark\ttx_queue_high_watermark\n"
+        "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%u\t%u\t%u\t%u\n",
         label && *label ? label : "-",
         address && *address ? address : "-",
         state && *state ? state : "-",
@@ -184,7 +197,9 @@ bool mb_stats_export_tsv(MbStats *stats,
         ns_to_ms(s->tx_gap_avg_ns),
         ns_to_ms(s->tx_gap_max_ns),
         rx_queue_depth,
-        tx_queue_depth);
+        tx_queue_depth,
+        s->rx_queue_high_watermark,
+        s->tx_queue_high_watermark);
 
     bool ok = g_file_set_contents(stats->path, content, -1, error);
     reset_window(&stats->session, now_ns);

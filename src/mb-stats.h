@@ -18,6 +18,8 @@ typedef struct {
     uint64_t rx_drops;
     uint64_t tx_drops;
     uint64_t window_started_ns;
+    unsigned rx_queue_high_watermark;
+    unsigned tx_queue_high_watermark;
 
     /* Timing diagnostics since daemon start. */
     uint64_t last_rx_ns;
@@ -43,6 +45,7 @@ void mb_stats_rx_packet(MbStats *stats, size_t bytes, uint64_t now_ns);
 void mb_stats_tx_packet(MbStats *stats, size_t bytes, uint64_t now_ns);
 void mb_stats_rx_drop(MbStats *stats);
 void mb_stats_tx_drop(MbStats *stats);
+void mb_stats_queue_depth(MbStats *stats, unsigned rx_queue_depth, unsigned tx_queue_depth);
 
 char *mb_stats_default_path(void);
 bool mb_stats_export_tsv(MbStats *stats,
