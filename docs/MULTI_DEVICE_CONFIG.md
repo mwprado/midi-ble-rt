@@ -1,31 +1,44 @@
 # Multi-device configuration layout
 
-This document describes the staged configuration model for the multi-device branches.
-
 The public configuration option remains `--config`. The value may be either a single INI file or a configuration directory.
 
-Single-file mode remains supported and uses the existing single-device runtime path:
+Single-file mode remains supported:
 
 ```bash
 midi-ble-rtd --config config/roland-gokeys.ini.example
 ```
 
-Directory mode is introduced as a compatibility-safe staging point:
-
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt
-```
-
-When the `--config` argument is a directory, the daemon automatically loads:
+Directory mode loads:
 
 ```text
 daemon.ini
 devices.d/*.ini
 ```
 
-At this stage, directory mode validates the directory, loads all enabled device files, builds IDLE session skeletons and tries to resolve each configured address to a BlueZ `Device1` object path. It does not connect devices and does not start multi-device streaming yet. The orchestrator will consume this model in later cuts.
+Current directory-mode behavior:
 
-`--config-dir DIR` is kept as a temporary alias during development, but `--config DIR` is the preferred interface.
+```text
+1. validate the config directory
+2. load enabled device configs
+3. build one MbSession per configured device
+4. resolve configured addresses to BlueZ Device1 paths
+5. for devices with connect_on_start = yes:
+   - pair/trust according to device policy
+   - call Device1.Connect() when needed
+   - wait for ServicesResolved
+   - bind the BLE-MIDI service and I/O characteristic
+   - create one ALSA Sequencer port for that session
+   - start one RX worker and one TX worker for the session
+   - enable StartNotify
+6. keep one shared BlueZ system bus and one shared ALSA client
+7. stay alive in a GLib main loop until Ctrl-C or SIGTERM
+```
+
+Directory mode is now a multi-session runtime foundation. The model is centered on `MbDaemon`, `MbSession` and `MbDuplexRuntime`; BlueZ and GATT are transport infrastructure only.
+
+ALSA ports are created only after the device has a valid BlueZ path, GATT service, BLE-MIDI I/O characteristic and runtime workers. No fake ALSA port is exposed for an unbound device.
+
+`--config-dir DIR` is a temporary development alias. Prefer `--config DIR`.
 
 ## Directory shape
 
@@ -37,19 +50,47 @@ At this stage, directory mode validates the directory, loads all enabled device 
     └── standard-ble-midi.ini
 ```
 
-Installed examples are expected to follow the same shape under the package data directory:
+Installed examples follow the same shape under:
 
 ```text
 /usr/share/midi-ble-rt/config/
-├── daemon.ini.example
-└── devices.d/
-    ├── roland-gokeys.ini.example
-    └── standard-ble-midi.ini.example
+```
+
+## Runtime shape
+
+```text
+one daemon process
+one shared BlueZ system bus
+one shared ALSA Sequencer client
+one MbDaemon session index
+one MbSession per enabled device
+one MbDuplexRuntime per streaming-capable device
+one ALSA port per bound device
+one GATT notify subscription per bound device
+```
+
+Expected ALSA shape once multiple devices are bound:
+
+```text
+client 128: 'midi-ble-rt' [type=user]
+    0 'Roland GO KEYS BLE-MIDI'
+    1 'Standard BLE-MIDI Device'
+    2 'CME WIDI Master BLE-MIDI'
+```
+
+Routing model:
+
+```text
+TX:
+  ALSA event dest.port = 0 -> MbSession A -> GATT WriteValue char A
+  ALSA event dest.port = 1 -> MbSession B -> GATT WriteValue char B
+
+RX:
+  GATT notify char A -> MbSession A RX runtime -> ALSA port 0
+  GATT notify char B -> MbSession B RX runtime -> ALSA port 1
 ```
 
 ## Global daemon config
-
-`daemon.ini` contains global defaults:
 
 ```ini
 [daemon]
@@ -78,21 +119,19 @@ print_ble_packets = no
 print_midi_events = no
 ```
 
-Global defaults are inherited by entries in `devices.d/*.ini` unless the device file overrides them.
-
 ## Device config
 
-Each file in `devices.d/*.ini` describes one BLE-MIDI device:
+Configs and packaged examples use the current key names only:
 
 ```ini
 [device]
 id = roland-gokeys
 enabled = yes
 address = CB:81:F4:62:FF:07
-name = Roland GO:KEYS
+name = Roland GO KEYS
 profile = roland_gokeys
 connect_on_start = yes
-alsa_port_name = Roland GO:KEYS BLE-MIDI
+alsa_port_name = Roland GO KEYS BLE-MIDI
 
 [policy]
 pair = no
@@ -119,13 +158,6 @@ manual disconnect
   A user command. It sets desired state to disconnected and suppresses automatic reconnect.
 ```
 
-Compatibility aliases still accepted by the parser:
-
-```text
-autoconnect    -> connect_on_start
-auto_reconnect -> reconnect_on_link_loss
-```
-
 Rules:
 
 ```text
@@ -136,59 +168,15 @@ If an id is duplicated, the first config wins and the duplicate is ignored with 
 Devices with enabled = no are ignored.
 Devices without address are ignored.
 Device identity is address-based; name is diagnostic.
-The profile field is declarative for now and will drive quirk policy later.
+The profile field selects profile/quirk policy such as the Roland GO:KEYS I/O UUID alias.
 ```
 
-Duplicate warning format:
+Validation target for this development branch:
 
 ```text
-Config /path/to/devices.d/example.ini: id 'example' already configured; ignoring duplicate configuration.
-```
-
-## Current branch behavior
-
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt
-```
-
-prints a summary like:
-
-```text
-midi-ble-rtd
-Runtime: config-directory BlueZ discovery skeleton
-Config: /home/user/.config/midi-ble-rt
-ALSA client: midi-ble-rt
-Service UUID: 03b80e5a-ede8-4b33-a751-6ce34ec4c700
-I/O UUID: 7772e5db-3868-4112-a1a9-f2669d106bf3
-Configured devices: 2
-Skeleton sessions: 2
-
-Device[0]: roland-gokeys
-  enabled:        yes
-  address:        CB:81:F4:62:FF:07
-  profile:        roland_gokeys
-  autoconnect:    yes
-  bluez:          found
-  session path:   /org/bluez/hci0/dev_CB_81_F4_62_FF_07
-  session state:  IDLE
-
-Device[1]: standard-ble-midi
-  enabled:        yes
-  address:        AA:BB:CC:DD:EE:FF
-  profile:        standard_ble_midi
-  autoconnect:    no
-  bluez:          not found
-  session path:   config:standard-ble-midi
-  session state:  IDLE
-```
-
-The next implementation step is to move this model into the orchestrator:
-
-```text
-one daemon process
-one shared BlueZ bus
-one ALSA client
-one DeviceSession per enabled device
-one ALSA port per enabled device
-one notify subscription per streaming device
+--config DIR with one configured GO:KEYS device reaches STREAMING
+one real ALSA port appears for that session
+aplaymidi can transmit to the device through that port
+GATT notify events are routed back to the same ALSA port
+single-file orchestrator mode still works unchanged
 ```

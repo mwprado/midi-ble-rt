@@ -9,12 +9,118 @@
 #include "mb-stats.h"
 
 #include <glib.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 int midi_ble_rtctl_bluez_main(int argc, char **argv);
+
+static char *control_socket_default_path(void) {
+    const char *runtime_dir = g_get_user_runtime_dir();
+    if (!runtime_dir || !*runtime_dir)
+        runtime_dir = g_get_tmp_dir();
+
+    return g_build_filename(runtime_dir, "midi-ble-rt", "control.sock", NULL);
+}
+
+static int control_send_command(const char *command) {
+    char *path = control_socket_default_path();
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        g_printerr("Could not create control socket client: %s\n", g_strerror(errno));
+        g_free(path);
+        return 1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        g_printerr("Control socket path too long: %s\n", path);
+        close(fd);
+        g_free(path);
+        return 1;
+    }
+
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        g_printerr("Could not connect to midi-ble-rtd control socket: %s\n", path);
+        g_printerr("Reason: %s\n", g_strerror(errno));
+        g_printerr("Start midi-ble-rtd with config-directory runtime first.\n");
+        close(fd);
+        g_free(path);
+        return 1;
+    }
+
+    char *line = g_strdup_printf("%s\n", command);
+    size_t len = strlen(line);
+    const char *p = line;
+
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            g_printerr("Could not write control command: %s\n", g_strerror(errno));
+            g_free(line);
+            close(fd);
+            g_free(path);
+            return 1;
+        }
+        p += n;
+        len -= (size_t)n;
+    }
+
+    g_free(line);
+
+    char buf[1024];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            g_printerr("Could not read control reply: %s\n", g_strerror(errno));
+            close(fd);
+            g_free(path);
+            return 1;
+        }
+
+        if (n == 0)
+            break;
+
+        buf[n] = '\0';
+        fputs(buf, stdout);
+    }
+
+    close(fd);
+    g_free(path);
+    return 0;
+}
+
+static void control_device_usage(const char *argv0, const char *cmd) {
+    g_printerr("Usage:\n");
+    g_printerr("  %s %s DEVICE\n", argv0, cmd);
+    g_printerr("\n");
+    g_printerr("DEVICE must match a configured device id or Bluetooth address.\n");
+}
+
+static int control_send_device_command(const char *verb, const char *device) {
+    if (!verb || !device || !*device)
+        return 2;
+
+    char *command = g_strdup_printf("%s %s", verb, device);
+    int rc = control_send_command(command);
+    g_free(command);
+    return rc;
+}
 
 typedef struct {
     char *version;
@@ -256,6 +362,37 @@ int main(int argc, char **argv) {
         return cmd_stats_like(argc, argv, false);
     if (argc >= 2 && g_strcmp0(argv[1], "top") == 0)
         return cmd_stats_like(argc, argv, true);
+
+    if (argc == 2 && g_strcmp0(argv[1], "daemon-ping") == 0)
+        return control_send_command("PING");
+    if (argc == 2 && g_strcmp0(argv[1], "daemon-status") == 0)
+        return control_send_command("STATUS");
+    if (argc == 2 && g_strcmp0(argv[1], "daemon-list") == 0)
+        return control_send_command("LIST");
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-connect") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("CONNECT", argv[2]);
+    }
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-disconnect") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("DISCONNECT", argv[2]);
+    }
+
+    if (argc >= 2 && g_strcmp0(argv[1], "daemon-recheck") == 0) {
+        if (argc != 3) {
+            control_device_usage(argv[0], argv[1]);
+            return 2;
+        }
+        return control_send_device_command("RECHECK", argv[2]);
+    }
 
     return midi_ble_rtctl_bluez_main(argc, argv);
 }

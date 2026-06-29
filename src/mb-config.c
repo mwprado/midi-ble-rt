@@ -18,31 +18,71 @@ static char *keyfile_get_string_default(GKeyFile *kf, const char *group, const c
 
 static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char *key, bool fallback) {
     GError *error = NULL;
-    gboolean value = g_key_file_get_boolean(kf, group, key, &error);
+    char *raw = g_key_file_get_string(kf, group, key, &error);
     if (error) {
         g_clear_error(&error);
         return fallback;
     }
-    return value;
+
+    char *value = g_strstrip(raw);
+    bool parsed = fallback;
+
+    if (g_ascii_strcasecmp(value, "true") == 0 ||
+        g_ascii_strcasecmp(value, "yes") == 0 ||
+        g_ascii_strcasecmp(value, "on") == 0 ||
+        g_strcmp0(value, "1") == 0) {
+        parsed = true;
+    } else if (g_ascii_strcasecmp(value, "false") == 0 ||
+               g_ascii_strcasecmp(value, "no") == 0 ||
+               g_ascii_strcasecmp(value, "off") == 0 ||
+               g_strcmp0(value, "0") == 0) {
+        parsed = false;
+    } else {
+        g_printerr("Invalid boolean value for [%s].%s: '%s'; using default %s.\n",
+                   group,
+                   key,
+                   value,
+                   fallback ? "true" : "false");
+    }
+
+    g_free(raw);
+    return parsed;
+}
+
+static bool keyfile_has_key(GKeyFile *kf, const char *group, const char *key) {
+    GError *error = NULL;
+    gboolean has_key = g_key_file_has_key(kf, group, key, &error);
+    if (error) {
+        g_clear_error(&error);
+        return false;
+    }
+    return has_key;
 }
 
 static bool keyfile_get_bool_alias_default(GKeyFile *kf,
                                            const char *group,
-                                           const char *key,
-                                           const char *alias_key,
+                                           const char *canonical_key,
+                                           const char *const *aliases,
                                            bool fallback) {
-    GError *error = NULL;
-    gboolean value = g_key_file_get_boolean(kf, group, key, &error);
-    if (!error)
-        return value;
-    g_clear_error(&error);
+    if (keyfile_has_key(kf, group, canonical_key))
+        return keyfile_get_bool_default(kf, group, canonical_key, fallback);
 
-    value = g_key_file_get_boolean(kf, group, alias_key, &error);
-    if (error) {
-        g_clear_error(&error);
+    if (!aliases)
         return fallback;
+
+    for (unsigned i = 0; aliases[i]; i++) {
+        if (!keyfile_has_key(kf, group, aliases[i]))
+            continue;
+
+        bool value = keyfile_get_bool_default(kf, group, aliases[i], fallback);
+        g_printerr("Config key [%s].%s is deprecated; use %s instead.\n",
+                   group,
+                   aliases[i],
+                   canonical_key);
+        return value;
     }
-    return value;
+
+    return fallback;
 }
 
 static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const char *key, unsigned fallback) {
@@ -94,9 +134,7 @@ static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->name = keyfile_get_string_default(kf, "device", "name", "");
     cfg->pair = keyfile_get_bool_default(kf, "device", "pair", false);
     cfg->trust = keyfile_get_bool_default(kf, "device", "trust", true);
-    cfg->reconnect_on_link_loss = keyfile_get_bool_alias_default(kf,
-        "device", "reconnect_on_link_loss", "auto_reconnect", true);
-    cfg->auto_reconnect = cfg->reconnect_on_link_loss;
+    cfg->reconnect_on_link_loss = keyfile_get_bool_default(kf, "device", "reconnect_on_link_loss", true);
 
     cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
         MB_BLE_MIDI_SERVICE_UUID);
@@ -122,9 +160,7 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->name = g_strdup("");
     cfg->pair = keyfile_get_bool_default(kf, "defaults", "pair", false);
     cfg->trust = keyfile_get_bool_default(kf, "defaults", "trust", true);
-    cfg->reconnect_on_link_loss = keyfile_get_bool_alias_default(kf,
-        "defaults", "reconnect_on_link_loss", "auto_reconnect", true);
-    cfg->auto_reconnect = cfg->reconnect_on_link_loss;
+    cfg->reconnect_on_link_loss = keyfile_get_bool_default(kf, "defaults", "reconnect_on_link_loss", true);
 
     cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
         MB_BLE_MIDI_SERVICE_UUID);
@@ -147,6 +183,12 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
 static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
                                                       const MbConfig *defaults,
                                                       const char *fallback_id) {
+    static const char *const connect_on_start_aliases[] = {
+        "conect_on_start",
+        "autoconnect",
+        NULL
+    };
+
     MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
 
     device->id = keyfile_get_string_default(kf, "device", "id", fallback_id ? fallback_id : "device");
@@ -157,14 +199,14 @@ static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
         str_nonempty_or(defaults ? defaults->alsa_port_name : NULL, "BLE-MIDI"));
     device->enabled = keyfile_get_bool_default(kf, "device", "enabled", true);
     device->connect_on_start = keyfile_get_bool_alias_default(kf,
-        "device", "connect_on_start", "autoconnect", false);
-    device->autoconnect = device->connect_on_start;
+                                                              "device",
+                                                              "connect_on_start",
+                                                              connect_on_start_aliases,
+                                                              false);
     device->pair = keyfile_get_bool_default(kf, "policy", "pair", defaults ? defaults->pair : false);
     device->trust = keyfile_get_bool_default(kf, "policy", "trust", defaults ? defaults->trust : true);
-    device->reconnect_on_link_loss = keyfile_get_bool_alias_default(kf,
-        "policy", "reconnect_on_link_loss", "auto_reconnect",
+    device->reconnect_on_link_loss = keyfile_get_bool_default(kf, "policy", "reconnect_on_link_loss",
         defaults ? defaults->reconnect_on_link_loss : true);
-    device->auto_reconnect = device->reconnect_on_link_loss;
     device->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", defaults ? defaults->enable_tx : true);
 
     return device;
@@ -186,11 +228,9 @@ static void mb_config_add_compat_device(MbConfig *cfg) {
     device->alsa_port_name = g_strdup(str_nonempty_or(cfg->alsa_port_name, "BLE-MIDI"));
     device->enabled = true;
     device->connect_on_start = true;
-    device->autoconnect = device->connect_on_start;
     device->pair = cfg->pair;
     device->trust = cfg->trust;
     device->reconnect_on_link_loss = cfg->reconnect_on_link_loss;
-    device->auto_reconnect = device->reconnect_on_link_loss;
     device->enable_tx = cfg->enable_tx;
 
     g_ptr_array_add(cfg->devices, device);
@@ -296,6 +336,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         char *path = g_build_filename(devices_dir, name, NULL);
         GKeyFile *device_kf = g_key_file_new();
         error = NULL;
+
         if (!g_key_file_load_from_file(device_kf, path, G_KEY_FILE_NONE, &error)) {
             g_printerr("Skipping device config %s: %s\n", path, error->message);
             g_clear_error(&error);

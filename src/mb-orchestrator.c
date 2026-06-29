@@ -644,7 +644,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     }
 
     mb_session_init(&orc.session, NULL, app->cfg.address, app->cfg.name);
-    orc.session.auto_reconnect = app->cfg.auto_reconnect;
+    orc.session.auto_reconnect = app->cfg.reconnect_on_link_loss;
     orc.session_initialized = true;
 
     mb_stats_init(&orc.stats, app->cfg.stats_enabled, app->cfg.stats_interval_ms);

@@ -2,16 +2,15 @@
 id = roland-gokeys
 enabled = yes
 address = CB:81:F4:62:FF:07
-name = Roland GO:KEYS
+name = Roland GO KEYS
 profile = roland_gokeys
-autoconnect = yes
-alsa_port_name = Roland GO:KEYS BLE-MIDI
+connect_on_start = yes
+alsa_port_name = Roland GO KEYS BLE-MIDI
 
 [policy]
 pair = no
 trust = yes
-auto_reconnect = yes
+reconnect_on_link_loss = yes
 
 [midi]
-# GO:KEYS accepted basic ALSA Sequencer -> BLE-MIDI WriteValue tests.
 enable_tx = yes

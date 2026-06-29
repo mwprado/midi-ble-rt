@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
-Version:        0.6.3
-Release:        2%{?dist}
+Version:        0.7.0
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -61,6 +61,13 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Sun Jun 28 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.0-1
+- Add multi-session lifecycle/control-plane monitor architecture.
+- Route lifecycle state changes through the monitor.
+- Keep RX/TX dataplane workers parallel per BLE-MIDI device after STREAMING.
+- Use per-device GATT TX locking for concurrent BLE-MIDI devices.
+- Validate ALSA to BLE-MIDI TX path with real hardware.
+
 * Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.3-2
 - Consolidate cleanup branches into master.
 - Keep midi-ble-rt-core as an internal statically linked library.
