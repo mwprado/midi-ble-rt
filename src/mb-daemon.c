@@ -915,6 +915,13 @@ static void lifecycle_schedule(ConfigDirRuntime *rt) {
     g_mutex_unlock(&rt->lifecycle_lock);
 }
 
+static bool lifecycle_command_should_log(MbLifecycleCommandType type, const char *reason) {
+    if (type == MB_LIFECYCLE_CMD_RECHECK && g_strcmp0(reason, "health") == 0)
+        return false;
+
+    return true;
+}
+
 static void lifecycle_enqueue(ConfigDirRuntime *rt,
                               ConfigDeviceRuntime *dev,
                               MbLifecycleCommandType type,
@@ -943,11 +950,13 @@ static void lifecycle_enqueue(ConfigDirRuntime *rt,
 
     g_mutex_unlock(&rt->lifecycle_lock);
 
-    g_print("Lifecycle queued %s for %s%s%s.\n",
-            lifecycle_command_name(type),
-            device_label(dev),
-            reason && *reason ? ": " : "",
-            reason && *reason ? reason : "");
+    if (lifecycle_command_should_log(type, reason)) {
+        g_print("Lifecycle queued %s for %s%s%s.\n",
+                lifecycle_command_name(type),
+                device_label(dev),
+                reason && *reason ? ": " : "",
+                reason && *reason ? reason : "");
+    }
 
     lifecycle_schedule(rt);
 }
@@ -1084,11 +1093,13 @@ static gboolean lifecycle_process_next_cb(gpointer user_data) {
 
     g_mutex_unlock(&rt->lifecycle_lock);
 
-    g_print("Lifecycle processing %s for %s%s%s.\n",
-            lifecycle_command_name(cmd->type),
-            device_label(cmd->dev),
-            cmd->reason && *cmd->reason ? ": " : "",
-            cmd->reason && *cmd->reason ? cmd->reason : "");
+    if (lifecycle_command_should_log(cmd->type, cmd->reason)) {
+        g_print("Lifecycle processing %s for %s%s%s.\n",
+                lifecycle_command_name(cmd->type),
+                device_label(cmd->dev),
+                cmd->reason && *cmd->reason ? ": " : "",
+                cmd->reason && *cmd->reason ? cmd->reason : "");
+    }
 
     switch (cmd->type) {
     case MB_LIFECYCLE_CMD_DISCOVER:
