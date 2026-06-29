@@ -54,6 +54,16 @@ void mb_runtime_flow_init(MbRuntimeFlow *flow,
     flow->wake_initialized = true;
 }
 
+void mb_runtime_flow_set_depth_observer(MbRuntimeFlow *flow,
+                                        MbRuntimeDepthObserveFunc observe_depth,
+                                        void *user_data) {
+    if (!flow)
+        return;
+
+    flow->observe_depth = observe_depth;
+    flow->observe_depth_user_data = user_data;
+}
+
 void mb_runtime_flow_clear(MbRuntimeFlow *flow) {
     if (!flow)
         return;

@@ -18,6 +18,10 @@ typedef void (*MbRuntimeConsumeFunc)(MbRuntimeFlow *flow,
                                      size_t len,
                                      void *user_data);
 
+typedef void (*MbRuntimeDepthObserveFunc)(MbRuntimeFlow *flow,
+                                          uint8_t queue_depth,
+                                          void *user_data);
+
 typedef struct {
     uint64_t pushed;
     uint64_t consumed;
@@ -43,6 +47,9 @@ struct _MbRuntimeFlow {
     MbRuntimeConsumeFunc consume;
     void *user_data;
 
+    MbRuntimeDepthObserveFunc observe_depth;
+    void *observe_depth_user_data;
+
     uint64_t pushed;
     uint64_t consumed;
     uint64_t dropped;
@@ -55,6 +62,9 @@ void mb_runtime_flow_init(MbRuntimeFlow *flow,
                           MbRuntimeConsumeFunc consume,
                           void *user_data);
 void mb_runtime_flow_clear(MbRuntimeFlow *flow);
+void mb_runtime_flow_set_depth_observer(MbRuntimeFlow *flow,
+                                        MbRuntimeDepthObserveFunc observe_depth,
+                                        void *user_data);
 
 bool mb_runtime_flow_start(MbRuntimeFlow *flow);
 void mb_runtime_flow_stop(MbRuntimeFlow *flow);

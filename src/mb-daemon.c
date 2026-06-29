@@ -398,6 +398,20 @@ static void runtime_stats_tx_drop(ConfigDirRuntime *rt) {
     g_mutex_unlock(&rt->stats_lock);
 }
 
+static void runtime_stats_observe_queue_depth(ConfigDirRuntime *rt,
+                                              bool tx,
+                                              unsigned queue_depth) {
+    if (!rt)
+        return;
+
+    g_mutex_lock(&rt->stats_lock);
+    if (tx)
+        mb_stats_queue_depth(&rt->stats, 0, queue_depth);
+    else
+        mb_stats_queue_depth(&rt->stats, queue_depth, 0);
+    g_mutex_unlock(&rt->stats_lock);
+}
+
 static void runtime_build_sessions(ConfigDirRuntime *rt) {
     mb_daemon_init(&rt->daemon);
 
@@ -737,6 +751,10 @@ static void device_rx_consume(MbRuntimeFlow *flow,
     (void)flow;
     (void)item;
     ConfigDeviceRuntime *dev = user_data;
+    if (dev)
+        runtime_stats_observe_queue_depth(dev->owner,
+                                          false,
+                                          (unsigned)mb_runtime_flow_depth(flow) + 1u);
 
     g_mutex_lock(&dev->owner->alsa_lock);
     device_ble_midi_decode_packet(dev, data, len);
@@ -751,10 +769,32 @@ static void device_tx_consume(MbRuntimeFlow *flow,
     (void)flow;
     (void)item;
     ConfigDeviceRuntime *dev = user_data;
+    if (dev)
+        runtime_stats_observe_queue_depth(dev->owner,
+                                          true,
+                                          (unsigned)mb_runtime_flow_depth(flow) + 1u);
 
     g_mutex_lock(&dev->gatt_write_lock);
     device_ble_midi_write_packet(dev, data, len);
     g_mutex_unlock(&dev->gatt_write_lock);
+}
+
+static void device_rx_observe_depth(MbRuntimeFlow *flow,
+                                    uint8_t queue_depth,
+                                    void *user_data) {
+    (void)flow;
+    ConfigDeviceRuntime *dev = user_data;
+    if (dev)
+        runtime_stats_observe_queue_depth(dev->owner, false, queue_depth);
+}
+
+static void device_tx_observe_depth(MbRuntimeFlow *flow,
+                                    uint8_t queue_depth,
+                                    void *user_data) {
+    (void)flow;
+    ConfigDeviceRuntime *dev = user_data;
+    if (dev)
+        runtime_stats_observe_queue_depth(dev->owner, true, queue_depth);
 }
 
 static bool device_start_workers(ConfigDeviceRuntime *dev) {
@@ -764,6 +804,13 @@ static bool device_start_workers(ConfigDeviceRuntime *dev) {
     mb_duplex_runtime_init(&dev->runtime,
                            device_rx_consume, dev,
                            device_tx_consume, dev);
+    mb_runtime_flow_set_depth_observer(&dev->runtime.rx,
+                                       device_rx_observe_depth,
+                                       dev);
+    mb_runtime_flow_set_depth_observer(&dev->runtime.tx,
+                                       device_tx_observe_depth,
+                                       dev);
+
     if (!mb_duplex_runtime_start(&dev->runtime)) {
         g_printerr("Could not start duplex runtime workers for %s.\n",
                    device_label(dev));
