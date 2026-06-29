@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+G_LOCK_DEFINE_STATIC(observed_queue_depth);
+static unsigned observed_rx_queue_high_watermark;
+static unsigned observed_tx_queue_high_watermark;
+
 static uint64_t ns_to_ms(uint64_t ns) {
     return ns / 1000000ULL;
 }
@@ -122,6 +126,32 @@ void mb_stats_queue_depth(MbStats *stats, unsigned rx_queue_depth, unsigned tx_q
         stats->session.tx_queue_high_watermark = tx_queue_depth;
 }
 
+void mb_stats_observe_runtime_queue_depth(bool tx, unsigned queue_depth) {
+    G_LOCK(observed_queue_depth);
+    if (tx) {
+        if (queue_depth > observed_tx_queue_high_watermark)
+            observed_tx_queue_high_watermark = queue_depth;
+    } else {
+        if (queue_depth > observed_rx_queue_high_watermark)
+            observed_rx_queue_high_watermark = queue_depth;
+    }
+    G_UNLOCK(observed_queue_depth);
+}
+
+static void consume_observed_runtime_queue_depth(MbStats *stats) {
+    if (!stats || !stats->enabled)
+        return;
+
+    G_LOCK(observed_queue_depth);
+    if (observed_rx_queue_high_watermark > stats->session.rx_queue_high_watermark)
+        stats->session.rx_queue_high_watermark = observed_rx_queue_high_watermark;
+    if (observed_tx_queue_high_watermark > stats->session.tx_queue_high_watermark)
+        stats->session.tx_queue_high_watermark = observed_tx_queue_high_watermark;
+    observed_rx_queue_high_watermark = 0;
+    observed_tx_queue_high_watermark = 0;
+    G_UNLOCK(observed_queue_depth);
+}
+
 char *mb_stats_default_path(void) {
     const char *runtime_dir = g_get_user_runtime_dir();
     if (!runtime_dir || !*runtime_dir)
@@ -145,6 +175,7 @@ bool mb_stats_export_tsv(MbStats *stats,
         return true;
 
     mb_stats_queue_depth(stats, rx_queue_depth, tx_queue_depth);
+    consume_observed_runtime_queue_depth(stats);
 
     char *dir = g_path_get_dirname(stats->path);
     if (g_mkdir_with_parents(dir, 0700) != 0) {
