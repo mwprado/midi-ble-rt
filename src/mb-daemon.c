@@ -278,65 +278,6 @@ static void lifecycle_enqueue_event(ConfigDirRuntime *rt,
                                     MbEventType event,
                                     const char *reason);
 
-static unsigned runtime_stats_depth_add(unsigned total, unsigned value) {
-    if (G_MAXUINT - total < value)
-        return G_MAXUINT;
-    return total + value;
-}
-
-static const char *runtime_stats_aggregate_state(ConfigDirRuntime *rt) {
-    bool any_streaming = false;
-    bool any_connecting = false;
-    bool any_reconnecting = false;
-    bool any_error = false;
-
-    for (unsigned i = 0; rt && rt->devices && i < rt->devices->len; i++) {
-        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev)
-            continue;
-
-        MbSessionState state = device_session_state(dev);
-        if (state == MB_SESSION_STREAMING)
-            any_streaming = true;
-        else if (state == MB_SESSION_CONNECTING || state == MB_SESSION_SCANNING)
-            any_connecting = true;
-        else if (state == MB_SESSION_RECONNECTING)
-            any_reconnecting = true;
-        else if (state == MB_SESSION_ERROR)
-            any_error = true;
-    }
-
-    if (any_streaming)
-        return mb_session_state_name(MB_SESSION_STREAMING);
-    if (any_connecting)
-        return mb_session_state_name(MB_SESSION_CONNECTING);
-    if (any_reconnecting)
-        return mb_session_state_name(MB_SESSION_RECONNECTING);
-    if (any_error)
-        return mb_session_state_name(MB_SESSION_ERROR);
-
-    return mb_session_state_name(MB_SESSION_IDLE);
-}
-
-static int runtime_stats_aggregate_alsa_port(ConfigDirRuntime *rt) {
-    int port = -1;
-
-    for (unsigned i = 0; rt && rt->devices && i < rt->devices->len; i++) {
-        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev || dev->alsa_port < 0)
-            continue;
-
-        if (port < 0) {
-            port = dev->alsa_port;
-            continue;
-        }
-
-        if (port != dev->alsa_port)
-            return -1;
-    }
-
-    return port;
-}
 
 static void runtime_device_stats_ensure_window(ConfigDeviceRuntime *dev,
                                                uint64_t now_ns);
@@ -553,22 +494,6 @@ static void runtime_stats_observe_queue_depth(ConfigDirRuntime *rt,
     g_mutex_unlock(&rt->stats_lock);
 }
 
-
-static uint64_t runtime_stats_ns_to_ms(uint64_t ns) {
-    return ns / 1000000ULL;
-}
-
-static uint64_t runtime_stats_elapsed_ms(uint64_t now_ns, uint64_t then_ns) {
-    if (then_ns == 0 || now_ns < then_ns)
-        return 0;
-    return runtime_stats_ns_to_ms(now_ns - then_ns);
-}
-
-static double runtime_stats_rate_per_sec(uint64_t count, uint64_t window_ns) {
-    if (window_ns < 100000000ULL)
-        return 0.0;
-    return ((double)count * 1000000000.0) / (double)window_ns;
-}
 
 static void runtime_stats_add_u64_saturating(uint64_t *value, uint64_t add) {
     if (!value)
