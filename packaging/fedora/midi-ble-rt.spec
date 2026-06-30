@@ -1,6 +1,6 @@
 Name:           midi-ble-rt
-Version:        0.8.0
-Release:        2%{?dist}
+Version:        0.8.1
+Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
 License:        MIT
@@ -62,6 +62,9 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.1-1
+- Package installed multi-device documentation in the Fedora RPM.
+
 * Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-2
 - Package installed multi-device documentation in the Fedora RPM.
 
