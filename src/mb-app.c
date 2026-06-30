@@ -60,38 +60,12 @@ static void alsa_emit_midi_byte(App *app, uint8_t byte) {
     }
 }
 
-static int midi_data_len(uint8_t status) {
-    if (status < 0x80) return -1;
-    if (status >= 0x80 && status <= 0xBF) return 2;
-    if (status >= 0xC0 && status <= 0xDF) return 1;
-    if (status >= 0xE0 && status <= 0xEF) return 2;
-
-    switch (status) {
-        case 0xF1:
-        case 0xF3:
-            return 1;
-        case 0xF2:
-            return 2;
-        case 0xF6:
-        case 0xF7:
-        case 0xF8:
-        case 0xF9:
-        case 0xFA:
-        case 0xFB:
-        case 0xFC:
-        case 0xFD:
-        case 0xFE:
-        case 0xFF:
-            return 0;
-        case 0xF0:
-            return -2;
-        default:
-            return -1;
-    }
+static void mb_app_emit_midi_byte(uint8_t byte, void *user_data) {
+    alsa_emit_midi_byte((App *)user_data, byte);
 }
 
 void mb_app_ble_midi_decode_packet(App *app, const uint8_t *p, size_t len) {
-    if (!p || len < 3)
+    if (!app || !p || len < 3)
         return;
 
     if (app->cfg.print_ble_packets) {
@@ -101,71 +75,15 @@ void mb_app_ble_midi_decode_packet(App *app, const uint8_t *p, size_t len) {
         g_print("\n");
     }
 
-    if ((p[0] & 0x80) == 0) {
+    MbBleMidiDecodeResult result =
+        mb_ble_midi_decode_packet(&app->ble_midi_decoder,
+                                  p,
+                                  len,
+                                  mb_app_emit_midi_byte,
+                                  app);
+
+    if (result == MB_BLE_MIDI_DECODE_INVALID_HEADER)
         g_printerr("Invalid BLE-MIDI header byte: 0x%02x\n", p[0]);
-        return;
-    }
-
-    size_t i = 1;
-
-    while (i < len) {
-        uint8_t ts = p[i];
-
-        if ((ts & 0x80) == 0) {
-            i++;
-            continue;
-        }
-
-        i++;
-        if (i >= len)
-            break;
-
-        uint8_t status = p[i];
-
-        if (status < 0x80) {
-            if (app->running_status >= 0x80) {
-                int n = midi_data_len(app->running_status);
-                if (n > 0 && i + (size_t)n <= len) {
-                    alsa_emit_midi_byte(app, app->running_status);
-                    for (int j = 0; j < n; j++)
-                        alsa_emit_midi_byte(app, p[i++]);
-                    continue;
-                }
-            }
-            i++;
-            continue;
-        }
-
-        i++;
-        alsa_emit_midi_byte(app, status);
-
-        if (status < 0xF0)
-            app->running_status = status;
-        else if (status != 0xF7)
-            app->running_status = 0;
-
-        int data_len = midi_data_len(status);
-
-        if (data_len >= 0) {
-            for (int j = 0; j < data_len && i < len; j++) {
-                if (p[i] & 0x80)
-                    break;
-                alsa_emit_midi_byte(app, p[i++]);
-            }
-            continue;
-        }
-
-        if (data_len == -2) {
-            while (i < len) {
-                alsa_emit_midi_byte(app, p[i]);
-                if (p[i] == 0xF7) {
-                    i++;
-                    break;
-                }
-                i++;
-            }
-        }
-    }
 }
 
 void mb_app_print_midi_bytes(const char *prefix, const uint8_t *bytes, size_t len) {

@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "mb-config.h"
+#include "mb-ble-midi.h"
 
 typedef struct {
     GDBusConnection *bus;
@@ -25,7 +26,7 @@ typedef struct {
     snd_midi_event_t *alsa_midi_decoder;
     guint alsa_rx_source_id;
 
-    uint8_t running_status;
+    MbBleMidiDecoderState ble_midi_decoder;
 } App;
 
 void mb_app_cleanup(App *app);

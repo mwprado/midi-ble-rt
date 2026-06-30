@@ -65,7 +65,7 @@ typedef struct {
     guint device_sub_id;
     guint notify_sub_id;
 
-    uint8_t running_status;
+    MbBleMidiDecoderState ble_midi_decoder;
 } ConfigDeviceRuntime;
 
 typedef enum {
@@ -805,10 +805,14 @@ static void device_alsa_emit_midi_byte(ConfigDeviceRuntime *dev, uint8_t byte) {
     }
 }
 
+static void device_ble_midi_emit_byte(uint8_t byte, void *user_data) {
+    device_alsa_emit_midi_byte((ConfigDeviceRuntime *)user_data, byte);
+}
+
 static void device_ble_midi_decode_packet(ConfigDeviceRuntime *dev,
                                           const uint8_t *p,
                                           size_t len) {
-    if (!p || len < 3)
+    if (!dev || !p || len < 3)
         return;
 
     if (dev->owner->cfg.print_ble_packets) {
@@ -818,68 +822,16 @@ static void device_ble_midi_decode_packet(ConfigDeviceRuntime *dev,
         g_print("\n");
     }
 
-    if (!mb_ble_midi_packet_has_valid_header(p, len)) {
+    MbBleMidiDecodeResult result =
+        mb_ble_midi_decode_packet(&dev->ble_midi_decoder,
+                                  p,
+                                  len,
+                                  device_ble_midi_emit_byte,
+                                  dev);
+
+    if (result == MB_BLE_MIDI_DECODE_INVALID_HEADER)
         g_printerr("Invalid BLE-MIDI header byte from %s: 0x%02x\n",
                    device_label(dev), p[0]);
-        return;
-    }
-
-    size_t i = 1;
-    while (i < len) {
-        uint8_t ts = p[i];
-        if ((ts & 0x80) == 0) {
-            i++;
-            continue;
-        }
-
-        i++;
-        if (i >= len)
-            break;
-
-        uint8_t status = p[i];
-        if (status < 0x80) {
-            if (dev->running_status >= 0x80) {
-                int n = mb_ble_midi_status_data_len(dev->running_status);
-                if (n > 0 && i + (size_t)n <= len) {
-                    device_alsa_emit_midi_byte(dev, dev->running_status);
-                    for (int j = 0; j < n; j++)
-                        device_alsa_emit_midi_byte(dev, p[i++]);
-                    continue;
-                }
-            }
-            i++;
-            continue;
-        }
-
-        i++;
-        device_alsa_emit_midi_byte(dev, status);
-
-        if (status < 0xF0)
-            dev->running_status = status;
-        else if (status != 0xF7)
-            dev->running_status = 0;
-
-        int data_len = mb_ble_midi_status_data_len(status);
-        if (data_len >= 0) {
-            for (int j = 0; j < data_len && i < len; j++) {
-                if (p[i] & 0x80)
-                    break;
-                device_alsa_emit_midi_byte(dev, p[i++]);
-            }
-            continue;
-        }
-
-        if (data_len == -2) {
-            while (i < len) {
-                device_alsa_emit_midi_byte(dev, p[i]);
-                if (p[i] == 0xF7) {
-                    i++;
-                    break;
-                }
-                i++;
-            }
-        }
-    }
 }
 
 static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
