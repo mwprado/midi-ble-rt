@@ -8,12 +8,8 @@
 #include "mb-bluez.h"
 #include "mb-gatt-midi.h"
 
-bool mb_app_load_config(Config *cfg, const char *path) {
-    return mb_config_load((MbConfig *)cfg, path);
-}
-
-static void mb_app_free_config(Config *cfg) {
-    mb_config_clear((MbConfig *)cfg);
+static void mb_app_free_config(MbConfig *cfg) {
+    mb_config_clear(cfg);
 }
 
 static bool uuid_equal(const char *a, const char *b) {
