@@ -29,6 +29,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-ble-midi.c
     src/mb-buffer.c
     src/mb-config.c
+    src/mb-control-protocol.c
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
     src/mb-log.c
@@ -146,6 +147,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-paths PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-paths PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-paths COMMAND test-mb-paths)
+
+    add_executable(test-mb-control-protocol
+        tests/test-mb-control-protocol.c
+    )
+    target_link_libraries(test-mb-control-protocol PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-control-protocol PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-control-protocol COMMAND test-mb-control-protocol)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
