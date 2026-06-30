@@ -17,6 +17,7 @@
 #include "mb-bluez.h"
 #include "mb-ble-midi.h"
 #include "mb-gatt-midi.h"
+#include "mb-device-discovery.h"
 #include "mb-duplex-runtime.h"
 #include "mb-session.h"
 #include "mb-stats.h"
@@ -48,9 +49,6 @@ static uint16_t orchestrator_ble_midi_timestamp_13bit(void) {
     return (uint16_t)(ms & 0x1fff);
 }
 
-static bool orchestrator_load_config(Config *cfg, const char *path) {
-    return mb_app_load_config(cfg, path);
-}
 
 static MbSessionState orchestrator_session_state(MbOrchestrator *orc) {
     g_mutex_lock(&orc->session_lock);
@@ -638,7 +636,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     g_mutex_init(&orc.session_lock);
     g_mutex_init(&orc.stats_lock);
 
-    if (!orchestrator_load_config(&app->cfg, config_path)) {
+    if (!mb_config_load_dir(&app->cfg, config_path)) {
         orchestrator_cleanup(&orc);
         return 1;
     }
@@ -673,7 +671,7 @@ int mb_orchestrator_main(int argc, char **argv) {
         return 1;
     }
 
-    app->device_path = mb_app_find_device(app);
+    app->device_path = mb_device_discovery_find(app->bus, app->cfg.address, app->cfg.name, app->cfg.service_uuid);
     if (!app->device_path) {
         g_printerr("No matching BlueZ Device1 found. Scan/connect once or check the address.\n");
         orchestrator_session_event(&orc, MB_EV_TIMEOUT);

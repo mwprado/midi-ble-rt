@@ -161,14 +161,6 @@ static void mb_config_add_device_if_valid(MbConfig *cfg,
     g_ptr_array_add(cfg->devices, device);
 }
 
-bool mb_config_load(MbConfig *cfg, const char *path) {
-    (void)cfg;
-    (void)path;
-
-    g_printerr("Single-file configuration is not supported. Use a config directory containing daemon.ini and devices.d/*.ini.\n");
-    return false;
-}
-
 bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
     if (!cfg || !dir_path)
         return false;

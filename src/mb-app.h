@@ -30,7 +30,6 @@ typedef struct {
 
 void mb_app_cleanup(App *app);
 
-char *mb_app_find_device(App *app);
 bool mb_app_get_device_bool_property(App *app, const char *property, bool *out);
 bool mb_app_set_device_trusted(App *app);
 bool mb_app_pair_device(App *app);
