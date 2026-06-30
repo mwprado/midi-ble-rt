@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "mb-timeouts.h"
 
 #define BLUEZ_BUS              "org.bluez"
 #define OBJECT_MANAGER_IFACE   "org.freedesktop.DBus.ObjectManager"
@@ -450,7 +451,7 @@ static GVariant *get_managed_objects(Ctl *ctl) {
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, "/", OBJECT_MANAGER_IFACE, "GetManagedObjects",
         NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-        G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_DBUS_GET_MANAGED_OBJECTS_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("GetManagedObjects failed: %s\n", error->message);
@@ -574,7 +575,7 @@ static bool adapter_call(Ctl *ctl, const char *adapter_path, const char *method)
 
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, adapter_path, ADAPTER_IFACE, method,
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_CTL_ADAPTER_CALL_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
@@ -836,7 +837,7 @@ static bool get_device_bool(Ctl *ctl, const char *path, const char *property, bo
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, PROPERTIES_IFACE, "Get",
         g_variant_new("(ss)", DEVICE_IFACE, property), G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_DBUS_DEVICE_PROPERTY_GET_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Get Device1.%s failed: %s\n", property, error->message);
@@ -857,7 +858,7 @@ static char *get_device_object_path_property(Ctl *ctl, const char *path, const c
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, PROPERTIES_IFACE, "Get",
         g_variant_new("(ss)", DEVICE_IFACE, property), G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_DBUS_DEVICE_PROPERTY_GET_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_clear_error(&error);
@@ -877,7 +878,7 @@ static bool set_device_trusted(Ctl *ctl, const char *path, bool trusted) {
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, PROPERTIES_IFACE, "Set",
         g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(trusted)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_SET_TRUSTED_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Set Device1.Trusted=%s failed: %s\n", yesno(trusted), error->message);
@@ -902,7 +903,7 @@ static bool pair_device(Ctl *ctl, const char *path) {
 
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_PAIR_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
@@ -935,7 +936,7 @@ static bool connect_device(Ctl *ctl, const char *path) {
 
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Connect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_CTL_BLUEZ_CONNECT_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
@@ -969,7 +970,7 @@ static bool disconnect_device(Ctl *ctl, const char *path) {
 
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Disconnect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_CTL_BLUEZ_DISCONNECT_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
@@ -995,8 +996,8 @@ static bool wait_services_resolved(Ctl *ctl, const char *path, int timeout_ms) {
         bool resolved = false;
         if (get_device_bool(ctl, path, "ServicesResolved", &resolved) && resolved)
             return true;
-        g_usleep(100 * 1000);
-        elapsed += 100;
+        g_usleep(MB_CTL_SERVICES_RESOLVED_POLL_INTERVAL_MS * G_TIME_SPAN_MILLISECOND);
+        elapsed += MB_CTL_SERVICES_RESOLVED_POLL_INTERVAL_MS;
     }
     return false;
 }
@@ -1017,7 +1018,7 @@ static bool remove_device(Ctl *ctl, const char *path) {
     GVariant *ret = g_dbus_connection_call_sync(
         ctl->bus, BLUEZ_BUS, adapter, ADAPTER_IFACE, "RemoveDevice",
         g_variant_new("(o)", path), NULL,
-        G_DBUS_CALL_FLAGS_NONE, 15000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_CTL_BLUEZ_REMOVE_DEVICE_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Adapter1.RemoveDevice failed: %s\n", error->message);
@@ -1160,7 +1161,7 @@ static char *find_best_midi_characteristic(Ctl *ctl, const char *device_path, co
 }
 
 static bool validate_ble_midi_gatt(Ctl *ctl, const char *device_path, bool print_services) {
-    if (!wait_services_resolved(ctl, device_path, 15000)) {
+    if (!wait_services_resolved(ctl, device_path, MB_GATT_SERVICES_RESOLVED_TIMEOUT_MS)) {
         g_printerr("Timed out waiting for ServicesResolved=true.\n");
         return false;
     }
@@ -1230,7 +1231,7 @@ static int cmd_scan(Ctl *ctl, int timeout_s, const ListOptions *opts) {
     }
 
     for (int i = 0; i < timeout_s; i++)
-        g_usleep(1000 * 1000);
+        g_usleep(MB_CTL_SCAN_SLEEP_INTERVAL_MS * G_TIME_SPAN_MILLISECOND);
 
     adapter_call(ctl, adapter, "StopDiscovery");
     g_free(adapter);

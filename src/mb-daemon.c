@@ -31,6 +31,7 @@
 #include "mb-gatt-midi.h"
 #include "mb-session.h"
 #include "mb-stats.h"
+#include "mb-timeouts.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
@@ -143,7 +144,7 @@ static uint64_t runtime_now_ns(void) {
 }
 
 static uint16_t runtime_ble_midi_timestamp_13bit(void) {
-    gint64 ms = g_get_monotonic_time() / 1000;
+    gint64 ms = g_get_monotonic_time() / G_TIME_SPAN_MILLISECOND;
     return (uint16_t)(ms & 0x1fff);
 }
 
@@ -848,7 +849,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
         return false;
     }
 
-    const size_t max_midi_per_packet = 18;
+    const size_t max_midi_per_packet = MB_BLE_MIDI_MAX_MIDI_BYTES_PER_PACKET;
     size_t off = 0;
     bool ok = true;
 
@@ -857,7 +858,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
         if (chunk > max_midi_per_packet)
             chunk = max_midi_per_packet;
 
-        uint8_t packet[20];
+        uint8_t packet[MB_BLE_MIDI_PACKET_MAX_BYTES];
         size_t packet_len = 0;
         if (!mb_ble_midi_make_packet(runtime_ble_midi_timestamp_13bit(),
                                      &midi[off], chunk,
@@ -881,7 +882,7 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                                char_path,
                                                packet,
                                                packet_len,
-                                               5000)) {
+                                               MB_GATT_WRITE_VALUE_TIMEOUT_MS)) {
             runtime_stats_tx_drop(dev->owner);
         runtime_device_stats_tx_drop(dev);
             lifecycle_enqueue_event(dev->owner,
@@ -1100,7 +1101,7 @@ static bool device_start_notify(ConfigDeviceRuntime *dev) {
 
     if (!mb_gatt_midi_start_notify(dev->owner->bus,
                                    char_path,
-                                   15000,
+                                   MB_GATT_START_NOTIFY_TIMEOUT_MS,
                                    &error)) {
         g_printerr("StartNotify failed for %s: %s\n",
                    device_label(dev), error ? error->message : "unknown error");
@@ -1153,7 +1154,7 @@ static bool device_try_start_streaming(ConfigDeviceRuntime *dev) {
     }
     device_session_event(dev, MB_EV_BLUEZ_CONNECTED);
 
-    if (!mb_bluez_wait_services_resolved(rt->bus, device_path, 15000)) {
+    if (!mb_bluez_wait_services_resolved(rt->bus, device_path, MB_GATT_SERVICES_RESOLVED_TIMEOUT_MS)) {
         device_session_event(dev, MB_EV_TIMEOUT);
         g_free(device_path);
         return false;
@@ -1931,7 +1932,7 @@ static gpointer runtime_alsa_tx_thread_main(gpointer user_data) {
     g_print("ALSA TX thread started.\n");
 
     while (!g_atomic_int_get(&rt->alsa_tx_stop_requested)) {
-        int pr = poll(pfds, (nfds_t)nfds, 100);
+        int pr = poll(pfds, (nfds_t)nfds, MB_ALSA_TX_POLL_TIMEOUT_MS);
         if (pr < 0) {
             if (errno == EINTR)
                 continue;
@@ -2178,8 +2179,8 @@ static int run_config_directory_mode(const char *config_dir) {
     rt.loop = g_main_loop_new(NULL, FALSE);
     rt.sigint_source_id = g_unix_signal_add(SIGINT, quit_main_loop, &rt);
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
-    rt.reconnect_source_id = g_timeout_add(10000, runtime_reconnect_cb, &rt);
-    rt.health_source_id = g_timeout_add(1000, runtime_device_health_cb, &rt);
+    rt.reconnect_source_id = g_timeout_add(MB_RECONNECT_INTERVAL_MS, runtime_reconnect_cb, &rt);
+    rt.health_source_id = g_timeout_add(MB_DEVICE_HEALTH_INTERVAL_MS, runtime_device_health_cb, &rt);
     if (rt.cfg.stats_enabled)
         rt.stats_source_id = g_timeout_add(rt.cfg.stats_interval_ms,
                                            runtime_stats_export_cb,

@@ -10,6 +10,7 @@
 #include "mb-stats.h"
 
 #include <glib.h>
+#include "mb-timeouts.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -580,7 +581,7 @@ static void stats_usage(const char *argv0, const char *cmd) {
 
 static int cmd_stats_like(int argc, char **argv, bool watch) {
     char *path = mb_stats_default_path();
-    unsigned interval_ms = 1000;
+    unsigned interval_ms = MB_STATS_CTL_DEFAULT_INTERVAL_MS;
 
     for (int i = 2; i < argc; i++) {
         if (g_strcmp0(argv[i], "--path") == 0 && i + 1 < argc) {
@@ -588,10 +589,10 @@ static int cmd_stats_like(int argc, char **argv, bool watch) {
             path = g_strdup(argv[++i]);
         } else if (watch && g_strcmp0(argv[i], "--interval") == 0 && i + 1 < argc) {
             interval_ms = (unsigned)atoi(argv[++i]);
-            if (interval_ms < 100)
-                interval_ms = 100;
-            if (interval_ms > 60000)
-                interval_ms = 60000;
+            if (interval_ms < MB_STATS_CTL_MIN_INTERVAL_MS)
+                interval_ms = MB_STATS_CTL_MIN_INTERVAL_MS;
+            if (interval_ms > MB_STATS_CTL_MAX_INTERVAL_MS)
+                interval_ms = MB_STATS_CTL_MAX_INTERVAL_MS;
         } else {
             stats_usage(argv[0], watch ? "top" : "stats");
             g_free(path);

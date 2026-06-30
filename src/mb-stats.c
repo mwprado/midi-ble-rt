@@ -1,4 +1,5 @@
 #include "mb-stats.h"
+#include "mb-timeouts.h"
 
 #include "mb-paths.h"
 
@@ -71,7 +72,7 @@ void mb_stats_init(MbStats *stats, bool enabled, unsigned interval_ms) {
 
     memset(stats, 0, sizeof(*stats));
     stats->enabled = enabled;
-    stats->interval_ms = interval_ms ? interval_ms : 1000;
+    stats->interval_ms = interval_ms ? interval_ms : MB_STATS_DEFAULT_INTERVAL_MS;
     stats->started_ns = (uint64_t)g_get_monotonic_time() * 1000ULL;
     stats->session.window_started_ns = stats->started_ns;
     if (enabled)

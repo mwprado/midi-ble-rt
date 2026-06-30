@@ -1,6 +1,7 @@
 #include "mb-config.h"
 
 #include "mb-ble-midi.h"
+#include "mb-timeouts.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -56,7 +57,7 @@ static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const 
         g_clear_error(&error);
         return fallback;
     }
-    if (value == 0 || value > 60000)
+    if (value == 0 || value > MB_CONFIG_MAX_INTERVAL_MS)
         return fallback;
     return (unsigned)value;
 }
@@ -110,7 +111,7 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
     cfg->enable_tx = keyfile_get_bool_default(kf, "defaults", "enable_tx", true);
     cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
-    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
+    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", MB_STATS_DEFAULT_INTERVAL_MS);
 }
 
 static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,

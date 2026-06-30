@@ -21,6 +21,7 @@
 #include "mb-duplex-runtime.h"
 #include "mb-session.h"
 #include "mb-stats.h"
+#include "mb-timeouts.h"
 
 typedef struct {
     App app;
@@ -45,7 +46,7 @@ static uint64_t orchestrator_now_ns(void) {
 }
 
 static uint16_t orchestrator_ble_midi_timestamp_13bit(void) {
-    gint64 ms = g_get_monotonic_time() / 1000;
+    gint64 ms = g_get_monotonic_time() / G_TIME_SPAN_MILLISECOND;
     return (uint16_t)(ms & 0x1fff);
 }
 
@@ -190,7 +191,7 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
     if (!midi || len == 0)
         return true;
 
-    const size_t max_midi_per_packet = 18;
+    const size_t max_midi_per_packet = MB_BLE_MIDI_MAX_MIDI_BYTES_PER_PACKET;
     size_t off = 0;
 
     while (off < len) {
@@ -198,7 +199,7 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
         if (chunk > max_midi_per_packet)
             chunk = max_midi_per_packet;
 
-        uint8_t packet[20];
+        uint8_t packet[MB_BLE_MIDI_PACKET_MAX_BYTES];
         size_t packet_len = 0;
         if (!mb_ble_midi_make_packet(orchestrator_ble_midi_timestamp_13bit(),
                                      &midi[off], chunk,
@@ -219,7 +220,7 @@ static bool orchestrator_ble_midi_write_packet(MbOrchestrator *orc, const uint8_
                                                app->char_path,
                                                packet,
                                                packet_len,
-                                               5000)) {
+                                               MB_GATT_WRITE_VALUE_TIMEOUT_MS)) {
             orchestrator_stats_tx_drop(orc);
             orchestrator_session_event(orc, MB_EV_GATT_WRITE_FAILED);
             return false;
@@ -428,7 +429,7 @@ static bool orchestrator_start_notify(MbOrchestrator *orc) {
         return false;
     }
 
-    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, 15000, &error)) {
+    if (!mb_gatt_midi_start_notify(app->bus, app->char_path, MB_GATT_START_NOTIFY_TIMEOUT_MS, &error)) {
         g_printerr("StartNotify failed: %s\n", error ? error->message : "unknown error");
         g_printerr("If authorization is required, pair/trust once with bluetoothctl or implement Agent1.\n");
         g_clear_error(&error);
@@ -448,10 +449,10 @@ static void orchestrator_ensure_periodic_sources(MbOrchestrator *orc) {
     App *app = &orc->app;
 
     if (app->cfg.enable_tx && app->alsa_rx_source_id == 0)
-        app->alsa_rx_source_id = g_timeout_add(1, orchestrator_alsa_rx_poll_cb, orc);
+        app->alsa_rx_source_id = g_timeout_add(MB_ALSA_RX_POLL_INTERVAL_MS, orchestrator_alsa_rx_poll_cb, orc);
 
     if (orc->health_source_id == 0)
-        orc->health_source_id = g_timeout_add(1000, orchestrator_device_health_cb, orc);
+        orc->health_source_id = g_timeout_add(MB_DEVICE_HEALTH_INTERVAL_MS, orchestrator_device_health_cb, orc);
 
     if (app->cfg.stats_enabled && orc->stats_source_id == 0)
         orc->stats_source_id = g_timeout_add(app->cfg.stats_interval_ms,
@@ -480,7 +481,7 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
     }
     orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECTED);
 
-    if (!mb_bluez_wait_services_resolved(app->bus, app->device_path, 15000)) {
+    if (!mb_bluez_wait_services_resolved(app->bus, app->device_path, MB_GATT_SERVICES_RESOLVED_TIMEOUT_MS)) {
         orchestrator_session_event(orc, MB_EV_TIMEOUT);
         return false;
     }
@@ -701,7 +702,7 @@ int mb_orchestrator_main(int argc, char **argv) {
         mb_bluez_set_device_trusted(app->bus, app->device_path);
 
     app->loop = g_main_loop_new(NULL, FALSE);
-    orc.reconnect_source_id = g_timeout_add(10000, orchestrator_reconnect_cb, &orc);
+    orc.reconnect_source_id = g_timeout_add(MB_RECONNECT_INTERVAL_MS, orchestrator_reconnect_cb, &orc);
 
     bool streaming = orchestrator_try_start_streaming(&orc);
     if (!streaming && !orchestrator_session_is(&orc, MB_SESSION_RECONNECTING)) {
