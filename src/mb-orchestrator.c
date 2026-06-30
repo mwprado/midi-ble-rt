@@ -333,7 +333,7 @@ static gboolean orchestrator_device_health_cb(gpointer user_data) {
         return G_SOURCE_CONTINUE;
 
     bool connected = false;
-    if (!mb_app_get_device_bool_property(app, "Connected", &connected) || !connected)
+    if (!mb_bluez_get_device_bool_property(app->bus, app->device_path, "Connected", &connected) || !connected)
         orchestrator_mark_device_disconnected(orc, "health check");
 
     return G_SOURCE_CONTINUE;
@@ -474,13 +474,13 @@ static bool orchestrator_try_start_streaming(MbOrchestrator *orc) {
         return false;
     }
 
-    if (!mb_app_connect_device(app)) {
+    if (!mb_bluez_connect_device(app->bus, app->device_path)) {
         orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECT_FAILED);
         return false;
     }
     orchestrator_session_event(orc, MB_EV_BLUEZ_CONNECTED);
 
-    if (!mb_app_wait_services_resolved(app, 15000)) {
+    if (!mb_bluez_wait_services_resolved(app->bus, app->device_path, 15000)) {
         orchestrator_session_event(orc, MB_EV_TIMEOUT);
         return false;
     }
@@ -689,7 +689,7 @@ int mb_orchestrator_main(int argc, char **argv) {
         return 1;
     }
 
-    if (app->cfg.pair && !mb_app_pair_device(app)) {
+    if (app->cfg.pair && !mb_bluez_pair_device(app->bus, app->device_path)) {
         orchestrator_session_event(&orc, MB_EV_BLUEZ_CONNECT_FAILED);
         if (!orchestrator_session_is(&orc, MB_SESSION_RECONNECTING)) {
             orchestrator_cleanup(&orc);
@@ -698,7 +698,7 @@ int mb_orchestrator_main(int argc, char **argv) {
     }
 
     if (app->cfg.trust)
-        mb_app_set_device_trusted(app);
+        mb_bluez_set_device_trusted(app->bus, app->device_path);
 
     app->loop = g_main_loop_new(NULL, FALSE);
     orc.reconnect_source_id = g_timeout_add(10000, orchestrator_reconnect_cb, &orc);

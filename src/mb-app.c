@@ -12,25 +12,10 @@ static void mb_app_free_config(MbConfig *cfg) {
     mb_config_clear(cfg);
 }
 
-bool mb_app_get_device_bool_property(App *app, const char *property, bool *out) {
-    return mb_bluez_get_device_bool_property(app->bus, app->device_path, property, out);
-}
 
-bool mb_app_set_device_trusted(App *app) {
-    return mb_bluez_set_device_trusted(app->bus, app->device_path);
-}
 
-bool mb_app_pair_device(App *app) {
-    return mb_bluez_pair_device(app->bus, app->device_path);
-}
 
-bool mb_app_connect_device(App *app) {
-    return mb_bluez_connect_device(app->bus, app->device_path);
-}
 
-bool mb_app_wait_services_resolved(App *app, int timeout_ms) {
-    return mb_bluez_wait_services_resolved(app->bus, app->device_path, timeout_ms);
-}
 
 char *mb_app_find_ble_midi_service(App *app) {
     return mb_gatt_midi_find_service(app->bus, app->device_path, app->cfg.service_uuid);
