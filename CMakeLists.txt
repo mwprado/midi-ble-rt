@@ -32,6 +32,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
     src/mb-log.c
+    src/mb-paths.c
     src/mb-runtime.c
     src/mb-session.c
     src/mb-slice-ring.c
@@ -75,6 +76,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-session PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-session PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-session COMMAND test-mb-session)
+
+    add_executable(test-mb-session-state
+        tests/test-mb-session-state.c
+    )
+    target_link_libraries(test-mb-session-state PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-session-state PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-session-state COMMAND test-mb-session-state)
 
     add_executable(test-mb-alsa
         tests/test-mb-alsa.c
@@ -131,6 +139,13 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-duplex-runtime PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-duplex-runtime PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-duplex-runtime COMMAND test-mb-duplex-runtime)
+
+    add_executable(test-mb-paths
+        tests/test-mb-paths.c
+    )
+    target_link_libraries(test-mb-paths PRIVATE midi-ble-rt-core)
+    target_compile_options(test-mb-paths PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME mb-paths COMMAND test-mb-paths)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
