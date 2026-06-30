@@ -1,5 +1,7 @@
 #include "mb-stats.h"
 
+#include "mb-paths.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -153,10 +155,7 @@ static void consume_observed_runtime_queue_depth(MbStats *stats) {
 }
 
 char *mb_stats_default_path(void) {
-    const char *runtime_dir = g_get_user_runtime_dir();
-    if (!runtime_dir || !*runtime_dir)
-        runtime_dir = g_get_tmp_dir();
-    return g_build_filename(runtime_dir, "midi-ble-rt", "stats.tsv", NULL);
+    return mb_runtime_stats_default_path();
 }
 
 bool mb_stats_export_tsv(MbStats *stats,
