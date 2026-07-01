@@ -844,6 +844,27 @@ static void device_ble_midi_emit_byte(uint8_t byte, void *user_data) {
     device_alsa_emit_midi_byte((ConfigDeviceRuntime *)user_data, byte);
 }
 
+/*
+ * Per-device realtime dataplane.
+ *
+ * The daemon exposes one stable ALSA port per configured BLE-MIDI device, but
+ * the BLE/GATT streaming session is transient.  RX and TX are independent
+ * asynchronous flows:
+ *
+ *   instrument/controller -> BLE -> buffer RX -> ALSA
+ *   ALSA -> buffer TX -> BLE -> instrument/controller
+ *
+ * Buffer items are jitter absorbers inside a live STREAMING session.  They are
+ * not replay queues across BLE session loss.  If the device leaves STREAMING,
+ * pending RX/TX data for that device should be dropped/invalidated and the next
+ * STREAMING session should start clean, while the ALSA port remains visible.
+ *
+ * Runtime flow consumption is item based: each consumer callback receives one
+ * ring item per call.  The current frame-model payload capacity is
+ * MB_FRAME_MODEL_CAPACITY bytes per item.  TX items may be split later into
+ * multiple BLE-MIDI packets; MB_BLE_MIDI_MAX_MIDI_BYTES_PER_PACKET controls the
+ * per-WriteValue MIDI payload size.
+ */
 static void device_ble_midi_decode_packet(ConfigDeviceRuntime *dev,
                                           const uint8_t *p,
                                           size_t len) {
