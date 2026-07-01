@@ -73,6 +73,12 @@ bool mb_runtime_flow_push_bytes(MbRuntimeFlow *flow,
                                 const uint8_t *data,
                                 size_t len,
                                 uint64_t timestamp_ns);
+bool mb_runtime_flow_push_bytes_with_epoch(MbRuntimeFlow *flow,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            uint64_t timestamp_ns,
+                                            uint64_t epoch);
+void mb_runtime_flow_drop_pending(MbRuntimeFlow *flow);
 void mb_runtime_flow_wake(MbRuntimeFlow *flow);
 
 uint8_t mb_runtime_flow_depth(const MbRuntimeFlow *flow);
