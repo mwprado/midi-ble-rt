@@ -118,6 +118,16 @@ bool mb_runtime_flow_push_bytes(MbRuntimeFlow *flow,
     if (!flow)
         return false;
 
+    if (len > MB_FRAME_MODEL_CAPACITY) {
+        g_printerr("%s runtime frame too large: len=%zu cap=%u; dropping.\n",
+                   flow->name ? flow->name : "flow",
+                   len,
+                   (unsigned)MB_FRAME_MODEL_CAPACITY);
+        flow->push_failures++;
+        flow->dropped++;
+        return false;
+    }
+
     MbFrameModelSlice slice;
     if (!mb_frame_model_make(&flow->pool, data, len, timestamp_ns, &slice)) {
         flow->push_failures++;
