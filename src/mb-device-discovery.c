@@ -78,6 +78,22 @@ char *mb_device_discovery_find(GDBusConnection *bus,
 
         if (exact_address || name_match || has_service_uuid) {
             int score = 0;
+
+            /*
+             * Device1 candidate ranking.
+             *
+             * These are heuristic weights, not timeouts or protocol values.
+             * Keep the ordering intentional:
+             *
+             *   exact configured address  >  advertised BLE-MIDI UUID  >  name/alias hint
+             *
+             * Address is the strongest signal because it identifies the target
+             * device unambiguously.  The BLE-MIDI service UUID is the next
+             * strongest signal because it proves the device exposes the desired
+             * GATT profile.  Name and alias are deliberately weak hints only:
+             * some instruments expose confusing BlueZ names such as "Audio",
+             * "MIDI", model names, or profile-dependent aliases.
+             */
             if (exact_address) score += 10000;
             if (has_service_uuid) score += 1000;
             if (name && string_contains_casefold(name, "midi")) score += 100;

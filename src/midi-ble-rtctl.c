@@ -724,6 +724,22 @@ static char *find_device_path(Ctl *ctl, const char *selector) {
         GVariant *v_uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
 
         int score = -1;
+
+        /*
+         * CLI selector ranking.
+         *
+         * These weights decide which BlueZ Device1 object a user-supplied
+         * selector refers to.  They are intentionally separated from daemon
+         * discovery policy: this is interactive control-plane behavior.
+         *
+         * Priority model:
+         *
+         *   exact object path  >  exact Bluetooth address  >  name match  >  alias match
+         *
+         * A BLE-MIDI UUID bonus is small and additive.  It should prefer MIDI
+         * devices among otherwise similar matches, but it must not override an
+         * exact path or exact address selected by the user.
+         */
         if (g_strcmp0(path, selector) == 0)
             score = 100000;
         else if (address && g_ascii_strcasecmp(address, selector) == 0)
@@ -1116,6 +1132,20 @@ static char *find_best_midi_characteristic(Ctl *ctl, const char *device_path, co
             guint16 mtu = v_mtu ? g_variant_get_uint16(v_mtu) : 0;
 
             int score = 0;
+
+            /*
+             * CLI GATT characteristic ranking.
+             *
+             * Mirrors the daemon-side BLE-MIDI characteristic heuristic for
+             * diagnostics and probe output.  The numbers are ranking weights,
+             * not timeout values.
+             *
+             * The official BLE-MIDI I/O UUID is preferred.  The Roland alias is
+             * slightly weaker but still strong.  Notify and write-command are
+             * the important dataplane capabilities.  Write-request/read are
+             * minor compatibility hints.  A generic notify+write-command
+             * characteristic gets a fallback score for non-standard devices.
+             */
             if (official) score += 1000;
             if (alias) score += 950;
             if (notify) score += 100;
