@@ -59,6 +59,24 @@ typedef struct {
      */
     GMutex gatt_write_lock;
 
+    /*
+     * Stable local ALSA endpoint for this configured device.
+     *
+     * The ALSA port lifetime is tied to the ConfigDeviceRuntime, not to the
+     * momentary BLE/GATT link state.  A short radio drop, notification loss or
+     * reconnect cycle must change the session state and guard/drop dataplane
+     * I/O, but it must not destroy this ALSA port.
+     *
+     * This preserves user routing in ALSA/PipeWire-aware applications:
+     *
+     *   BLE link drops briefly  ->  port remains visible
+     *   BLE link reconnects     ->  same port resumes streaming
+     *   daemon exits            ->  ALSA client and all ports disappear
+     *
+     * Do not close/recreate per-device ALSA ports as part of normal BLE
+     * disconnect/reconnect handling.  Close them only when tearing down the
+     * device runtime or the whole daemon.
+     */
     int alsa_port;
     snd_midi_event_t *alsa_midi_encoder;
     snd_midi_event_t *alsa_midi_decoder;
@@ -91,6 +109,22 @@ struct _ConfigDirRuntime {
 
     GDBusConnection *bus;
     GMainLoop *loop;
+
+    /*
+     * Shared ALSA Sequencer client for the whole daemon process.
+     *
+     * The daemon owns one ALSA client, and each configured BLE-MIDI device
+     * gets its own ALSA port inside that client.  For example:
+     *
+     *   midi-ble-rt client 128
+     *     128:0  first configured instrument/controller
+     *     128:1  second configured instrument/controller
+     *     128:2  third configured instrument/controller
+     *
+     * The client id is assigned dynamically by ALSA and may change between
+     * daemon restarts.  Port numbers are local endpoints created by this
+     * daemon for configured devices.
+     */
     snd_seq_t *seq;
 
     GPtrArray *devices;
@@ -1986,6 +2020,11 @@ static void runtime_close_alsa_client(ConfigDirRuntime *rt) {
     if (!rt || !rt->seq)
         return;
 
+    /*
+     * Closing the shared ALSA client removes every per-device ALSA port.
+     * This is a daemon shutdown/runtime teardown operation, not a normal
+     * response to BLE link loss for one instrument/controller.
+     */
     snd_seq_close(rt->seq);
     rt->seq = NULL;
 }
