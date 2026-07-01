@@ -1,4 +1,5 @@
 #include "mb-bluez.h"
+#include "mb-timeouts.h"
 
 #include <glib.h>
 
@@ -8,7 +9,7 @@ GVariant *mb_bluez_get_managed_objects(GDBusConnection *bus) {
     GVariant *ret = g_dbus_connection_call_sync(
         bus, BLUEZ_BUS, "/", OBJECT_MANAGER_IFACE, "GetManagedObjects",
         NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-        G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_DBUS_GET_MANAGED_OBJECTS_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("GetManagedObjects failed: %s\n", error->message);
@@ -68,7 +69,7 @@ bool mb_bluez_get_device_bool_property(GDBusConnection *bus, const char *device_
         bus, BLUEZ_BUS, device_path, PROPERTIES_IFACE, "Get",
         g_variant_new("(ss)", DEVICE_IFACE, property),
         G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        G_DBUS_CALL_FLAGS_NONE, MB_DBUS_DEVICE_PROPERTY_GET_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Get Device1.%s failed: %s\n", property, error->message);
@@ -91,7 +92,7 @@ bool mb_bluez_set_device_trusted(GDBusConnection *bus, const char *device_path) 
     GVariant *ret = g_dbus_connection_call_sync(
         bus, BLUEZ_BUS, device_path, PROPERTIES_IFACE, "Set",
         g_variant_new("(ssv)", DEVICE_IFACE, "Trusted", g_variant_new_boolean(TRUE)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+        NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_SET_TRUSTED_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Set Trusted=true failed: %s\n", error->message);
@@ -114,7 +115,7 @@ bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
     GError *error = NULL;
     GVariant *ret = g_dbus_connection_call_sync(
         bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 60000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_PAIR_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         g_printerr("Device Pair() failed: %s\n", error->message);
@@ -133,7 +134,7 @@ static bool bluez_device_is_connected(GDBusConnection *bus, const char *device_p
 }
 
 static bool bluez_wait_connected(GDBusConnection *bus, const char *device_path, int timeout_ms) {
-    const int step_ms = 250;
+    const int step_ms = MB_BLUEZ_CONNECTED_POLL_INTERVAL_MS;
     int elapsed = 0;
 
     while (elapsed < timeout_ms) {
@@ -141,7 +142,7 @@ static bool bluez_wait_connected(GDBusConnection *bus, const char *device_path, 
             g_print("Connected=true.\n");
             return true;
         }
-        g_usleep(step_ms * 1000);
+        g_usleep(step_ms * G_TIME_SPAN_MILLISECOND);
         elapsed += step_ms;
     }
 
@@ -209,7 +210,7 @@ bool mb_bluez_disconnect_device(GDBusConnection *bus, const char *device_path) {
 
     GVariant *ret = g_dbus_connection_call_sync(
         bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Disconnect",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &error);
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_DISCONNECT_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
         const char *remote = g_dbus_error_get_remote_error(error);
@@ -234,7 +235,7 @@ static void bluez_reset_after_failed_lifecycle_step(GDBusConnection *bus,
                                                     const char *reason) {
     g_printerr("%s; resetting BlueZ device connection.\n", reason);
     mb_bluez_disconnect_device(bus, device_path);
-    g_usleep(1000 * 1000);
+    g_usleep(MB_BLUEZ_RESET_AFTER_FAILURE_DELAY_MS * G_TIME_SPAN_MILLISECOND);
 }
 
 bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
@@ -245,11 +246,11 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
 
     bool in_progress = false;
     bool ambiguous_timeout = false;
-    if (bluez_connect_call_once(bus, device_path, 20000, &in_progress, &ambiguous_timeout))
+    if (bluez_connect_call_once(bus, device_path, MB_BLUEZ_CONNECT_TIMEOUT_MS, &in_progress, &ambiguous_timeout))
         return true;
 
     if (in_progress) {
-        if (bluez_wait_connected(bus, device_path, 15000))
+        if (bluez_wait_connected(bus, device_path, MB_BLUEZ_CONNECTED_WAIT_TIMEOUT_MS))
             return true;
 
         bluez_reset_after_failed_lifecycle_step(bus,
@@ -259,7 +260,7 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
     }
 
     if (ambiguous_timeout) {
-        if (bluez_wait_connected(bus, device_path, 3000))
+        if (bluez_wait_connected(bus, device_path, MB_BLUEZ_AMBIGUOUS_TIMEOUT_GRACE_MS))
             return true;
 
         bluez_reset_after_failed_lifecycle_step(bus,
@@ -272,7 +273,7 @@ bool mb_bluez_connect_device(GDBusConnection *bus, const char *device_path) {
 }
 
 static bool wait_services_resolved_once(GDBusConnection *bus, const char *device_path, int timeout_ms) {
-    const int step_ms = 100;
+    const int step_ms = MB_GATT_SERVICES_RESOLVED_POLL_INTERVAL_MS;
     int elapsed = 0;
 
     while (elapsed < timeout_ms) {
@@ -282,7 +283,7 @@ static bool wait_services_resolved_once(GDBusConnection *bus, const char *device
             return true;
         }
 
-        g_usleep(step_ms * 1000);
+        g_usleep(step_ms * G_TIME_SPAN_MILLISECOND);
         elapsed += step_ms;
     }
 

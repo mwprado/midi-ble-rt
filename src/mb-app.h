@@ -8,22 +8,13 @@
 #include <stdint.h>
 
 #include "mb-config.h"
-
-/*
- * Shared daemon application context.
- *
- * This replaces the transitional legacy include boundary.  Keep this type as
- * runtime state only; policy remains in mb-orchestrator.c and low-level I/O
- * remains in the BlueZ/GATT/ALSA helper modules.
- */
-
-typedef MbConfig Config;
+#include "mb-ble-midi.h"
 
 typedef struct {
     GDBusConnection *bus;
     GMainLoop *loop;
 
-    Config cfg;
+    MbConfig cfg;
 
     char *device_path;
     char *service_path;
@@ -35,18 +26,11 @@ typedef struct {
     snd_midi_event_t *alsa_midi_decoder;
     guint alsa_rx_source_id;
 
-    uint8_t running_status;
+    MbBleMidiDecoderState ble_midi_decoder;
 } App;
 
-bool mb_app_load_config(Config *cfg, const char *path);
 void mb_app_cleanup(App *app);
 
-char *mb_app_find_device(App *app);
-bool mb_app_get_device_bool_property(App *app, const char *property, bool *out);
-bool mb_app_set_device_trusted(App *app);
-bool mb_app_pair_device(App *app);
-bool mb_app_connect_device(App *app);
-bool mb_app_wait_services_resolved(App *app, int timeout_ms);
 
 char *mb_app_find_ble_midi_service(App *app);
 char *mb_app_find_ble_midi_characteristic(App *app);

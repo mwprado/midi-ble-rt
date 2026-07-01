@@ -37,17 +37,9 @@ typedef struct MbConfig {
     bool stats_enabled;
     unsigned stats_interval_ms;
 
-    /*
-     * Multi-device configuration model.
-     *
-     * Existing single-device configs using [device] remain valid. When no
-     * INI entries from the devices.d directory are loaded, a single
-     * compatibility device is synthesized from [device] if address is set.
-     */
     GPtrArray *devices; /* element type: MbDeviceConfig* */
 } MbConfig;
 
-bool mb_config_load(MbConfig *cfg, const char *path);
 bool mb_config_load_dir(MbConfig *cfg, const char *dir_path);
 void mb_config_clear(MbConfig *cfg);
 

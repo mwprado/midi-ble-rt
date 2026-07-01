@@ -123,6 +123,26 @@ char *mb_gatt_midi_find_characteristic(GDBusConnection *bus,
 
         if (in_service) {
             int score = 0;
+
+            /*
+             * BLE-MIDI I/O characteristic ranking.
+             *
+             * These weights choose the most plausible GATT characteristic under
+             * the already-selected BLE-MIDI service.  They are not timeouts,
+             * capacities or MIDI protocol constants.
+             *
+             * Priority model:
+             *
+             *   official BLE-MIDI I/O UUID  >  known vendor alias  >  usable flags
+             *
+             * The official UUID must win when present.  The Roland GO:KEYS alias
+             * is kept slightly below the official UUID, but still high enough to
+             * beat generic flag-only candidates.  Notify/indicate and
+             * write-without-response are the core BLE-MIDI dataplane flags.
+             * Write-request/read are weaker compatibility signals.  A generic
+             * notify+write-command characteristic receives a fallback score so
+             * unusual but usable devices can still be selected.
+             */
             if (official) score += 1000;
             if (alias) score += 950;
             if (notify || indicate) score += 100;

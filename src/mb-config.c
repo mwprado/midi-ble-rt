@@ -1,6 +1,7 @@
 #include "mb-config.h"
 
 #include "mb-ble-midi.h"
+#include "mb-timeouts.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -49,42 +50,6 @@ static bool keyfile_get_bool_default(GKeyFile *kf, const char *group, const char
     return parsed;
 }
 
-static bool keyfile_has_key(GKeyFile *kf, const char *group, const char *key) {
-    GError *error = NULL;
-    gboolean has_key = g_key_file_has_key(kf, group, key, &error);
-    if (error) {
-        g_clear_error(&error);
-        return false;
-    }
-    return has_key;
-}
-
-static bool keyfile_get_bool_alias_default(GKeyFile *kf,
-                                           const char *group,
-                                           const char *canonical_key,
-                                           const char *const *aliases,
-                                           bool fallback) {
-    if (keyfile_has_key(kf, group, canonical_key))
-        return keyfile_get_bool_default(kf, group, canonical_key, fallback);
-
-    if (!aliases)
-        return fallback;
-
-    for (unsigned i = 0; aliases[i]; i++) {
-        if (!keyfile_has_key(kf, group, aliases[i]))
-            continue;
-
-        bool value = keyfile_get_bool_default(kf, group, aliases[i], fallback);
-        g_printerr("Config key [%s].%s is deprecated; use %s instead.\n",
-                   group,
-                   aliases[i],
-                   canonical_key);
-        return value;
-    }
-
-    return fallback;
-}
-
 static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const char *key, unsigned fallback) {
     GError *error = NULL;
     guint64 value = g_key_file_get_uint64(kf, group, key, &error);
@@ -92,7 +57,7 @@ static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const 
         g_clear_error(&error);
         return fallback;
     }
-    if (value == 0 || value > 60000)
+    if (value == 0 || value > MB_CONFIG_MAX_INTERVAL_MS)
         return fallback;
     return (unsigned)value;
 }
@@ -124,37 +89,6 @@ static GPtrArray *mb_config_new_device_array(void) {
     return g_ptr_array_new_with_free_func(mb_device_config_free);
 }
 
-static void mb_config_ensure_device_array(MbConfig *cfg) {
-    if (!cfg->devices)
-        cfg->devices = mb_config_new_device_array();
-}
-
-static void mb_config_load_defaults_from_key_file(MbConfig *cfg, GKeyFile *kf) {
-    cfg->address = keyfile_get_string_default(kf, "device", "address", "");
-    cfg->name = keyfile_get_string_default(kf, "device", "name", "");
-    cfg->pair = keyfile_get_bool_default(kf, "device", "pair", false);
-    cfg->trust = keyfile_get_bool_default(kf, "device", "trust", true);
-    cfg->reconnect_on_link_loss = keyfile_get_bool_default(kf, "device", "reconnect_on_link_loss", true);
-
-    cfg->service_uuid = keyfile_get_string_default(kf, "gatt", "service_uuid",
-        MB_BLE_MIDI_SERVICE_UUID);
-    cfg->io_uuid = keyfile_get_string_default(kf, "gatt", "io_uuid",
-        MB_BLE_MIDI_IO_UUID);
-    cfg->io_uuid_alias = keyfile_get_string_default(kf, "gatt", "io_uuid_alias",
-        MB_BLE_MIDI_ROLAND_IO_UUID_ALIAS);
-    cfg->require_notify = keyfile_get_bool_default(kf, "gatt", "require_notify", true);
-    cfg->require_write_without_response = keyfile_get_bool_default(kf, "gatt", "require_write_without_response", true);
-
-    cfg->alsa_client_name = keyfile_get_string_default(kf, "alsa", "client_name", "midi-ble-rt");
-    cfg->alsa_port_name = keyfile_get_string_default(kf, "alsa", "port_name", "BLE-MIDI In");
-
-    cfg->print_ble_packets = keyfile_get_bool_default(kf, "debug", "print_ble_packets", false);
-    cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
-    cfg->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", true);
-    cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
-    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
-}
-
 static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->address = g_strdup("");
     cfg->name = g_strdup("");
@@ -177,18 +111,12 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
     cfg->enable_tx = keyfile_get_bool_default(kf, "defaults", "enable_tx", true);
     cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
-    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", 1000);
+    cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", MB_STATS_DEFAULT_INTERVAL_MS);
 }
 
 static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
                                                       const MbConfig *defaults,
                                                       const char *fallback_id) {
-    static const char *const connect_on_start_aliases[] = {
-        "conect_on_start",
-        "autoconnect",
-        NULL
-    };
-
     MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
 
     device->id = keyfile_get_string_default(kf, "device", "id", fallback_id ? fallback_id : "device");
@@ -198,11 +126,7 @@ static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
     device->alsa_port_name = keyfile_get_string_default(kf, "device", "alsa_port_name",
         str_nonempty_or(defaults ? defaults->alsa_port_name : NULL, "BLE-MIDI"));
     device->enabled = keyfile_get_bool_default(kf, "device", "enabled", true);
-    device->connect_on_start = keyfile_get_bool_alias_default(kf,
-                                                              "device",
-                                                              "connect_on_start",
-                                                              connect_on_start_aliases,
-                                                              false);
+    device->connect_on_start = keyfile_get_bool_default(kf, "device", "connect_on_start", false);
     device->pair = keyfile_get_bool_default(kf, "policy", "pair", defaults ? defaults->pair : false);
     device->trust = keyfile_get_bool_default(kf, "policy", "trust", defaults ? defaults->trust : true);
     device->reconnect_on_link_loss = keyfile_get_bool_default(kf, "policy", "reconnect_on_link_loss",
@@ -210,30 +134,6 @@ static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
     device->enable_tx = keyfile_get_bool_default(kf, "midi", "enable_tx", defaults ? defaults->enable_tx : true);
 
     return device;
-}
-
-static void mb_config_add_compat_device(MbConfig *cfg) {
-    if (!cfg || !cfg->address || !*cfg->address)
-        return;
-
-    mb_config_ensure_device_array(cfg);
-    if (cfg->devices->len > 0)
-        return;
-
-    MbDeviceConfig *device = g_new0(MbDeviceConfig, 1);
-    device->id = g_strdup("device");
-    device->address = g_strdup(cfg->address);
-    device->name = g_strdup(str_nonempty_or(cfg->name, ""));
-    device->profile = g_strdup("standard_ble_midi");
-    device->alsa_port_name = g_strdup(str_nonempty_or(cfg->alsa_port_name, "BLE-MIDI"));
-    device->enabled = true;
-    device->connect_on_start = true;
-    device->pair = cfg->pair;
-    device->trust = cfg->trust;
-    device->reconnect_on_link_loss = cfg->reconnect_on_link_loss;
-    device->enable_tx = cfg->enable_tx;
-
-    g_ptr_array_add(cfg->devices, device);
 }
 
 static void mb_config_add_device_if_valid(MbConfig *cfg,
@@ -260,31 +160,6 @@ static void mb_config_add_device_if_valid(MbConfig *cfg,
         g_hash_table_add(seen_ids, g_strdup(device->id));
 
     g_ptr_array_add(cfg->devices, device);
-}
-
-bool mb_config_load(MbConfig *cfg, const char *path) {
-    if (!cfg || !path)
-        return false;
-
-    GKeyFile *kf = g_key_file_new();
-    GError *error = NULL;
-
-    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
-        g_printerr("Failed to load config %s: %s\n", path, error->message);
-        g_clear_error(&error);
-        g_key_file_unref(kf);
-        return false;
-    }
-
-    MbConfig tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    mb_config_load_defaults_from_key_file(&tmp, kf);
-    g_key_file_unref(kf);
-    mb_config_add_compat_device(&tmp);
-
-    mb_config_clear(cfg);
-    *cfg = tmp;
-    return true;
 }
 
 bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
