@@ -35,6 +35,7 @@ typedef struct MbConfig {
     bool print_midi_events;
     bool enable_tx;
     bool stats_enabled;
+    bool stats_latency_diagnostics;
     unsigned stats_interval_ms;
 
     GPtrArray *devices; /* element type: MbDeviceConfig* */
