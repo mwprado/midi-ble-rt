@@ -62,16 +62,40 @@ bool mb_duplex_runtime_push_rx(MbDuplexRuntime *runtime,
                                const uint8_t *data,
                                size_t len,
                                uint64_t timestamp_ns) {
+    return mb_duplex_runtime_push_rx_with_epoch(runtime, data, len, timestamp_ns, 0);
+}
+
+bool mb_duplex_runtime_push_rx_with_epoch(MbDuplexRuntime *runtime,
+                                           const uint8_t *data,
+                                           size_t len,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch) {
     return runtime && runtime->initialized &&
-           mb_runtime_flow_push_bytes(&runtime->rx, data, len, timestamp_ns);
+           mb_runtime_flow_push_bytes_with_epoch(&runtime->rx, data, len, timestamp_ns, epoch);
 }
 
 bool mb_duplex_runtime_push_tx(MbDuplexRuntime *runtime,
                                const uint8_t *data,
                                size_t len,
                                uint64_t timestamp_ns) {
+    return mb_duplex_runtime_push_tx_with_epoch(runtime, data, len, timestamp_ns, 0);
+}
+
+bool mb_duplex_runtime_push_tx_with_epoch(MbDuplexRuntime *runtime,
+                                           const uint8_t *data,
+                                           size_t len,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch) {
     return runtime && runtime->initialized &&
-           mb_runtime_flow_push_bytes(&runtime->tx, data, len, timestamp_ns);
+           mb_runtime_flow_push_bytes_with_epoch(&runtime->tx, data, len, timestamp_ns, epoch);
+}
+
+void mb_duplex_runtime_drop_pending(MbDuplexRuntime *runtime) {
+    if (!runtime || !runtime->initialized)
+        return;
+
+    mb_runtime_flow_drop_pending(&runtime->rx);
+    mb_runtime_flow_drop_pending(&runtime->tx);
 }
 
 uint8_t mb_duplex_runtime_rx_depth(const MbDuplexRuntime *runtime) {

@@ -51,7 +51,8 @@ void mb_slice_ring_clear(MbSliceRing *ring) {
 
 static bool push_item(MbSliceRing *ring,
                       MbFrameModelSlice slice,
-                      uint64_t timestamp_ns) {
+                      uint64_t timestamp_ns,
+                      uint64_t epoch) {
     if (!ring || !ring->pool || !mb_frame_model_slice_ok(slice))
         return false;
 
@@ -68,6 +69,7 @@ static bool push_item(MbSliceRing *ring,
     item->slice = slice;
     item->seq = ring->next_seq++;
     item->timestamp_ns = timestamp_ns;
+    item->epoch = epoch;
     item->flags = 0;
 
     ring->pushed++;
@@ -78,19 +80,33 @@ static bool push_item(MbSliceRing *ring,
 bool mb_slice_ring_push_owned(MbSliceRing *ring,
                               MbFrameModelSlice slice,
                               uint64_t timestamp_ns) {
-    return push_item(ring, slice, timestamp_ns);
+    return mb_slice_ring_push_owned_with_epoch(ring, slice, timestamp_ns, 0);
+}
+
+bool mb_slice_ring_push_owned_with_epoch(MbSliceRing *ring,
+                                          MbFrameModelSlice slice,
+                                          uint64_t timestamp_ns,
+                                          uint64_t epoch) {
+    return push_item(ring, slice, timestamp_ns, epoch);
 }
 
 bool mb_slice_ring_push_shared(MbSliceRing *ring,
                                MbFrameModelSlice slice,
                                uint64_t timestamp_ns) {
+    return mb_slice_ring_push_shared_with_epoch(ring, slice, timestamp_ns, 0);
+}
+
+bool mb_slice_ring_push_shared_with_epoch(MbSliceRing *ring,
+                                           MbFrameModelSlice slice,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch) {
     if (!ring || !ring->pool)
         return false;
 
     if (!mb_frame_model_hold(ring->pool, slice))
         return false;
 
-    if (!push_item(ring, slice, timestamp_ns)) {
+    if (!push_item(ring, slice, timestamp_ns, epoch)) {
         mb_frame_model_done(ring->pool, slice);
         return false;
     }

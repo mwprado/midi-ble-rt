@@ -2,6 +2,15 @@
 
 #include <string.h>
 
+static void mb_runtime_flow_notify_depth(MbRuntimeFlow *flow) {
+    if (!flow || !flow->observe_depth)
+        return;
+
+    flow->observe_depth(flow,
+                        mb_runtime_flow_depth(flow),
+                        flow->observe_depth_user_data);
+}
+
 static gpointer runtime_flow_thread(gpointer data) {
     MbRuntimeFlow *flow = data;
 
@@ -19,6 +28,8 @@ static gpointer runtime_flow_thread(gpointer data) {
             MbSliceRingItem item;
             if (!mb_slice_ring_take(&flow->ring, &item))
                 break;
+
+            mb_runtime_flow_notify_depth(flow);
 
             size_t len = 0;
             const uint8_t *bytes = mb_frame_model_get(&flow->pool, item.slice, &len);
@@ -115,6 +126,14 @@ bool mb_runtime_flow_push_bytes(MbRuntimeFlow *flow,
                                 const uint8_t *data,
                                 size_t len,
                                 uint64_t timestamp_ns) {
+    return mb_runtime_flow_push_bytes_with_epoch(flow, data, len, timestamp_ns, 0);
+}
+
+bool mb_runtime_flow_push_bytes_with_epoch(MbRuntimeFlow *flow,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            uint64_t timestamp_ns,
+                                            uint64_t epoch) {
     if (!flow)
         return false;
 
@@ -134,15 +153,26 @@ bool mb_runtime_flow_push_bytes(MbRuntimeFlow *flow,
         return false;
     }
 
-    if (!mb_slice_ring_push_owned(&flow->ring, slice, timestamp_ns)) {
+    if (!mb_slice_ring_push_owned_with_epoch(&flow->ring, slice, timestamp_ns, epoch)) {
         mb_frame_model_done(&flow->pool, slice);
         flow->push_failures++;
         return false;
     }
 
     flow->pushed++;
+    mb_runtime_flow_notify_depth(flow);
     mb_runtime_flow_wake(flow);
     return true;
+}
+
+void mb_runtime_flow_drop_pending(MbRuntimeFlow *flow) {
+    if (!flow)
+        return;
+
+    while (mb_slice_ring_drop(&flow->ring))
+        flow->dropped++;
+
+    mb_runtime_flow_notify_depth(flow);
 }
 
 uint8_t mb_runtime_flow_depth(const MbRuntimeFlow *flow) {
@@ -151,4 +181,18 @@ uint8_t mb_runtime_flow_depth(const MbRuntimeFlow *flow) {
 
 uint64_t mb_runtime_flow_overflows(const MbRuntimeFlow *flow) {
     return flow ? mb_slice_ring_overflow_count(&flow->ring) : 0;
+}
+
+MbRuntimeFlowStats mb_runtime_flow_stats(const MbRuntimeFlow *flow) {
+    MbRuntimeFlowStats stats = {0};
+    if (!flow)
+        return stats;
+
+    stats.pushed = flow->pushed;
+    stats.consumed = flow->consumed;
+    stats.dropped = flow->dropped;
+    stats.push_failures = flow->push_failures;
+    stats.overflows = mb_runtime_flow_overflows(flow);
+    stats.depth = mb_runtime_flow_depth(flow);
+    return stats;
 }

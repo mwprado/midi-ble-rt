@@ -29,10 +29,21 @@ bool mb_duplex_runtime_push_rx(MbDuplexRuntime *runtime,
                                const uint8_t *data,
                                size_t len,
                                uint64_t timestamp_ns);
+bool mb_duplex_runtime_push_rx_with_epoch(MbDuplexRuntime *runtime,
+                                           const uint8_t *data,
+                                           size_t len,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch);
 bool mb_duplex_runtime_push_tx(MbDuplexRuntime *runtime,
                                const uint8_t *data,
                                size_t len,
                                uint64_t timestamp_ns);
+bool mb_duplex_runtime_push_tx_with_epoch(MbDuplexRuntime *runtime,
+                                           const uint8_t *data,
+                                           size_t len,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch);
+void mb_duplex_runtime_drop_pending(MbDuplexRuntime *runtime);
 
 uint8_t mb_duplex_runtime_rx_depth(const MbDuplexRuntime *runtime);
 uint8_t mb_duplex_runtime_tx_depth(const MbDuplexRuntime *runtime);

@@ -23,6 +23,7 @@ typedef struct {
     MbFrameModelSlice slice;
     uint64_t seq;
     uint64_t timestamp_ns;
+    uint64_t epoch;
     uint32_t flags;
 } MbSliceRingItem;
 
@@ -52,9 +53,17 @@ void mb_slice_ring_clear(MbSliceRing *ring);
 bool mb_slice_ring_push_owned(MbSliceRing *ring,
                               MbFrameModelSlice slice,
                               uint64_t timestamp_ns);
+bool mb_slice_ring_push_owned_with_epoch(MbSliceRing *ring,
+                                          MbFrameModelSlice slice,
+                                          uint64_t timestamp_ns,
+                                          uint64_t epoch);
 bool mb_slice_ring_push_shared(MbSliceRing *ring,
                                MbFrameModelSlice slice,
                                uint64_t timestamp_ns);
+bool mb_slice_ring_push_shared_with_epoch(MbSliceRing *ring,
+                                           MbFrameModelSlice slice,
+                                           uint64_t timestamp_ns,
+                                           uint64_t epoch);
 bool mb_slice_ring_peek(const MbSliceRing *ring, const MbSliceRingItem **item);
 bool mb_slice_ring_take(MbSliceRing *ring, MbSliceRingItem *out_item);
 bool mb_slice_ring_drop(MbSliceRing *ring);
