@@ -62,6 +62,15 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Wed Jul 01 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.0-1
+- Add dataplane epoch fencing to prevent stale RX/TX after session changes.
+- Drop pending RX/TX data when a device leaves STREAMING.
+- Make the BLE-MIDI decoder stateful across packets.
+- Handle fragmented Note On, running status, SysEx and realtime interleaving.
+- Fail closed on ambiguous BLE-MIDI framing and emit MIDI panic on RX resync.
+- Document BLE-MIDI fragmentation and resync policy.
+- Remove the legacy single-file configuration path; keep directory-based multi-session runtime only.
+
 * Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.1-1
 - Package installed multi-device documentation in the Fedora RPM.
 
