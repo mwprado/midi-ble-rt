@@ -1,6 +1,22 @@
 #include "mb-runtime.h"
 
+#include "mb-latency-diagnostics.h"
+
 #include <string.h>
+
+static uint64_t mb_runtime_now_ns(void) {
+    return (uint64_t)g_get_monotonic_time() * 1000ULL;
+}
+
+static MbLatencyDirection mb_runtime_flow_latency_direction(const MbRuntimeFlow *flow) {
+    if (flow &&
+        (flow->ring.kind == MB_SLICE_RING_TX_RAW ||
+         flow->ring.kind == MB_SLICE_RING_TX_DECODED ||
+         flow->ring.kind == MB_SLICE_RING_TX_ACTIVE))
+        return MB_LATENCY_TX;
+
+    return MB_LATENCY_RX;
+}
 
 static void mb_runtime_flow_notify_depth(MbRuntimeFlow *flow) {
     if (!flow || !flow->observe_depth)
@@ -33,8 +49,15 @@ static gpointer runtime_flow_thread(gpointer data) {
 
             size_t len = 0;
             const uint8_t *bytes = mb_frame_model_get(&flow->pool, item.slice, &len);
+            uint64_t consume_started_ns = mb_runtime_now_ns();
             if (bytes && flow->consume)
                 flow->consume(flow, &item, bytes, len, flow->user_data);
+            uint64_t consume_finished_ns = mb_runtime_now_ns();
+
+            mb_latency_diagnostics_record(mb_runtime_flow_latency_direction(flow),
+                                          item.timestamp_ns,
+                                          consume_started_ns,
+                                          consume_finished_ns);
 
             flow->consumed++;
             mb_slice_ring_item_done(&flow->ring, &item);
