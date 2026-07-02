@@ -2,6 +2,7 @@
 
 #include "mb-ble-midi.h"
 #include "mb-timeouts.h"
+#include "mb-latency-diagnostics.c"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -176,6 +177,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_key_file_unref(daemon_kf);
         g_free(daemon_path);
+        mb_latency_diagnostics_configure(false, 0);
         return false;
     }
 
@@ -193,6 +195,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_free(devices_dir);
         mb_config_clear(&tmp);
+        mb_latency_diagnostics_configure(false, 0);
         return false;
     }
 
@@ -236,6 +239,8 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
 
     mb_config_clear(cfg);
     *cfg = tmp;
+    mb_latency_diagnostics_configure(cfg->stats_latency_diagnostics,
+                                     cfg->stats_interval_ms);
     return true;
 }
 
