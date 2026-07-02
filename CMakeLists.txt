@@ -23,7 +23,6 @@ configure_file(
 add_library(midi-ble-rt-core STATIC
     src/mb-alsa.c
     src/mb-alsa-port.c
-    src/mb-app.c
     src/mb-bluez.c
     src/mb-gatt-midi.c
     src/mb-ble-midi.c
@@ -51,7 +50,6 @@ target_compile_options(midi-ble-rt-core PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wext
 
 add_executable(midi-ble-rtd
     src/mb-daemon.c
-    src/mb-orchestrator.c
 )
 
 add_executable(midi-ble-rtctl

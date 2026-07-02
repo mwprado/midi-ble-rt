@@ -1,13 +1,13 @@
 /*
  * midi-ble-rtd process entry point.
  *
- * Single-file configurations are delegated to the existing orchestrator.  A
- * configuration directory is handled here as a multi-session runtime: one
- * MbDaemon, one shared BlueZ bus, one shared ALSA client, one MbSession and one
- * duplex runtime per configured device.
+ * The daemon now supports only configuration-directory mode: one MbDaemon,
+ * one shared BlueZ bus, one shared ALSA client, one MbSession and one duplex
+ * runtime per configured BLE-MIDI device.
+ *
+ * The old single-file/single-session compatibility path was removed so every
+ * runtime execution uses the same multi-device session/dataplane model.
  */
-
-#include "mb-orchestrator.h"
 
 #include <alsa/asoundlib.h>
 #include <errno.h>
@@ -2465,15 +2465,17 @@ static int run_config_directory_mode(const char *config_dir) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 3 && g_strcmp0(argv[1], "--config") == 0) {
-        if (g_file_test(argv[2], G_FILE_TEST_IS_DIR))
-            return run_config_directory_mode(argv[2]);
+    if (argc == 3 &&
+        (g_strcmp0(argv[1], "--config") == 0 ||
+         g_strcmp0(argv[1], "--config-dir") == 0)) {
+        if (!g_file_test(argv[2], G_FILE_TEST_IS_DIR)) {
+            g_printerr("Config path must be a directory: %s\n", argv[2]);
+            return 1;
+        }
 
-        return mb_orchestrator_main(argc, argv);
+        return run_config_directory_mode(argv[2]);
     }
 
-    if (argc == 3 && g_strcmp0(argv[1], "--config-dir") == 0)
-        return run_config_directory_mode(argv[2]);
-
-    return mb_orchestrator_main(argc, argv);
+    g_printerr("Usage: %s --config <config-dir>\n", argv[0]);
+    return 1;
 }
