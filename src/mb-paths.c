@@ -22,3 +22,7 @@ char *mb_runtime_control_socket_default_path(void) {
 char *mb_runtime_stats_default_path(void) {
     return mb_runtime_build_path(MB_STATS_FILE_NAME);
 }
+
+char *mb_runtime_latency_default_path(void) {
+    return mb_runtime_build_path(MB_LATENCY_FILE_NAME);
+}
