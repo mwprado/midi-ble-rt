@@ -111,6 +111,7 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->print_midi_events = keyfile_get_bool_default(kf, "debug", "print_midi_events", false);
     cfg->enable_tx = keyfile_get_bool_default(kf, "defaults", "enable_tx", true);
     cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
+    cfg->stats_latency_diagnostics = keyfile_get_bool_default(kf, "stats", "latency_diagnostics", false);
     cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", MB_STATS_DEFAULT_INTERVAL_MS);
 }
 
