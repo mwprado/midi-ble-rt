@@ -32,6 +32,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-device-discovery.c
     src/mb-duplex-runtime.c
     src/mb-frame-model.c
+    src/mb-latency-diagnostics.c
     src/mb-log.c
     src/mb-paths.c
     src/mb-runtime.c

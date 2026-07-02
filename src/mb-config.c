@@ -2,7 +2,7 @@
 
 #include "mb-ble-midi.h"
 #include "mb-timeouts.h"
-#include "mb-latency-diagnostics.c"
+#include "mb-latency-diagnostics.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
