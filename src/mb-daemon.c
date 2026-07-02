@@ -46,6 +46,12 @@ typedef struct {
     MbSession *session;
     GMutex session_lock;
 
+    GMutex dataplane_lock;
+    bool dataplane_streaming;
+    uint64_t dataplane_epoch;
+    uint64_t dataplane_closed_epoch;
+    uint64_t dataplane_closed_at_ns;
+
     MbDuplexRuntime runtime;
     bool runtime_started;
     MbSessionStats stats;
@@ -182,6 +188,95 @@ static uint16_t runtime_ble_midi_timestamp_13bit(void) {
     return (uint16_t)(ms & 0x1fff);
 }
 
+static bool device_dataplane_fence_accept(ConfigDeviceRuntime *dev,
+                                          uint64_t epoch,
+                                          uint64_t timestamp_ns) {
+    if (!dev)
+        return false;
+
+    g_mutex_lock(&dev->dataplane_lock);
+
+    bool ok = dev->dataplane_streaming &&
+              epoch == dev->dataplane_epoch;
+
+    if (ok &&
+        epoch == dev->dataplane_closed_epoch &&
+        timestamp_ns <= dev->dataplane_closed_at_ns)
+        ok = false;
+
+    g_mutex_unlock(&dev->dataplane_lock);
+    return ok;
+}
+
+static bool device_dataplane_stamp(ConfigDeviceRuntime *dev,
+                                   uint64_t *epoch,
+                                   uint64_t *timestamp_ns) {
+    if (!dev || !epoch || !timestamp_ns)
+        return false;
+
+    uint64_t now_ns = runtime_now_ns();
+
+    g_mutex_lock(&dev->dataplane_lock);
+
+    bool ok = dev->dataplane_streaming;
+    if (ok) {
+        *epoch = dev->dataplane_epoch;
+        *timestamp_ns = now_ns;
+    }
+
+    g_mutex_unlock(&dev->dataplane_lock);
+    return ok;
+}
+
+static void device_dataplane_reset_partial_state(ConfigDeviceRuntime *dev) {
+    if (!dev)
+        return;
+
+    if (dev->owner)
+        g_mutex_lock(&dev->owner->alsa_lock);
+
+    mb_ble_midi_decoder_reset(&dev->ble_midi_decoder);
+
+    if (dev->alsa_midi_encoder)
+        snd_midi_event_reset_encode(dev->alsa_midi_encoder);
+
+    if (dev->alsa_midi_decoder)
+        snd_midi_event_reset_decode(dev->alsa_midi_decoder);
+
+    if (dev->owner)
+        g_mutex_unlock(&dev->owner->alsa_lock);
+}
+
+static void device_dataplane_on_session_change(ConfigDeviceRuntime *dev,
+                                               MbSessionState before,
+                                               MbSessionState after) {
+    if (!dev || before == after)
+        return;
+
+    uint64_t now_ns = runtime_now_ns();
+
+    if (before != MB_SESSION_STREAMING && after == MB_SESSION_STREAMING) {
+        g_mutex_lock(&dev->dataplane_lock);
+        dev->dataplane_epoch++;
+        if (dev->dataplane_epoch == 0)
+            dev->dataplane_epoch = 1;
+        dev->dataplane_streaming = true;
+        g_mutex_unlock(&dev->dataplane_lock);
+        return;
+    }
+
+    if (before == MB_SESSION_STREAMING && after != MB_SESSION_STREAMING) {
+        g_mutex_lock(&dev->dataplane_lock);
+        dev->dataplane_streaming = false;
+        dev->dataplane_closed_epoch = dev->dataplane_epoch;
+        dev->dataplane_closed_at_ns = now_ns;
+        g_mutex_unlock(&dev->dataplane_lock);
+
+        mb_duplex_runtime_drop_pending(&dev->runtime);
+        device_dataplane_reset_partial_state(dev);
+    }
+}
+
 static gboolean quit_main_loop(gpointer user_data) {
     ConfigDirRuntime *rt = user_data;
     if (rt && rt->loop)
@@ -285,6 +380,9 @@ static bool device_session_event(ConfigDeviceRuntime *dev, MbEventType event) {
             g_print(" rejected");
         g_print("\n");
     }
+
+    if (ok && before != after)
+        device_dataplane_on_session_change(dev, before, after);
 
     return ok;
 }
@@ -705,6 +803,7 @@ static void device_runtime_free(gpointer data) {
     mb_alsa_midi_event_pair_free(&dev->alsa_midi_encoder,
                                   &dev->alsa_midi_decoder);
     g_mutex_clear(&dev->gatt_write_lock);
+    g_mutex_clear(&dev->dataplane_lock);
     g_mutex_clear(&dev->session_lock);
     g_free(dev);
 }
@@ -729,6 +828,7 @@ static void runtime_create_devices(ConfigDirRuntime *rt) {
         dev->alsa_port = -1;
         dev->stats.window_started_ns = runtime_now_ns();
         g_mutex_init(&dev->session_lock);
+        g_mutex_init(&dev->dataplane_lock);
         g_mutex_init(&dev->gatt_write_lock);
         g_ptr_array_add(rt->devices, dev);
     }
@@ -892,9 +992,17 @@ static void device_ble_midi_decode_packet(ConfigDeviceRuntime *dev,
 
 static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
                                          const uint8_t *midi,
-                                         size_t len) {
+                                         size_t len,
+                                         uint64_t epoch,
+                                         uint64_t timestamp_ns) {
     if (!midi || len == 0)
         return true;
+
+    if (!device_dataplane_fence_accept(dev, epoch, timestamp_ns)) {
+        runtime_stats_tx_drop(dev->owner);
+        runtime_device_stats_tx_drop(dev);
+        return false;
+    }
 
     char *char_path = device_dup_char_path(dev);
     if (!char_path) {
@@ -909,6 +1017,13 @@ static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
     bool ok = true;
 
     while (off < len) {
+        if (!device_dataplane_fence_accept(dev, epoch, timestamp_ns)) {
+            runtime_stats_tx_drop(dev->owner);
+            runtime_device_stats_tx_drop(dev);
+            ok = false;
+            break;
+        }
+
         size_t chunk = len - off;
         if (chunk > max_midi_per_packet)
             chunk = max_midi_per_packet;
@@ -963,14 +1078,19 @@ static void device_rx_consume(MbRuntimeFlow *flow,
                               const uint8_t *data,
                               size_t len,
                               void *user_data) {
-    (void)flow;
-    (void)item;
     ConfigDeviceRuntime *dev = user_data;
-    if (dev) {
-        unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
-        runtime_stats_observe_queue_depth(dev->owner, false, depth);
-        runtime_device_stats_observe_queue_depth(dev, false, depth);
+    if (!dev)
+        return;
+
+    if (!item || !device_dataplane_fence_accept(dev, item->epoch, item->timestamp_ns)) {
+        runtime_stats_rx_drop(dev->owner);
+        runtime_device_stats_rx_drop(dev);
+        return;
     }
+
+    unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
+    runtime_stats_observe_queue_depth(dev->owner, false, depth);
+    runtime_device_stats_observe_queue_depth(dev, false, depth);
 
     g_mutex_lock(&dev->owner->alsa_lock);
     device_ble_midi_decode_packet(dev, data, len);
@@ -982,17 +1102,26 @@ static void device_tx_consume(MbRuntimeFlow *flow,
                               const uint8_t *data,
                               size_t len,
                               void *user_data) {
-    (void)flow;
-    (void)item;
     ConfigDeviceRuntime *dev = user_data;
-    if (dev) {
-        unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
-        runtime_stats_observe_queue_depth(dev->owner, true, depth);
-        runtime_device_stats_observe_queue_depth(dev, true, depth);
+    if (!dev)
+        return;
+
+    if (!item || !device_dataplane_fence_accept(dev, item->epoch, item->timestamp_ns)) {
+        runtime_stats_tx_drop(dev->owner);
+        runtime_device_stats_tx_drop(dev);
+        return;
     }
 
+    unsigned depth = (unsigned)mb_runtime_flow_depth(flow) + 1u;
+    runtime_stats_observe_queue_depth(dev->owner, true, depth);
+    runtime_device_stats_observe_queue_depth(dev, true, depth);
+
     g_mutex_lock(&dev->gatt_write_lock);
-    device_ble_midi_write_packet(dev, data, len);
+    device_ble_midi_write_packet(dev,
+                                 data,
+                                 len,
+                                 item->epoch,
+                                 item->timestamp_ns);
     g_mutex_unlock(&dev->gatt_write_lock);
 }
 
@@ -1087,8 +1216,16 @@ static void device_on_properties_changed(GDBusConnection *connection,
         if (value) {
             gsize len = 0;
             const guint8 *bytes = g_variant_get_fixed_array(value, &len, sizeof(guint8));
-            uint64_t now_ns = runtime_now_ns();
-            if (!mb_duplex_runtime_push_rx(&dev->runtime, bytes, len, now_ns)) {
+            uint64_t epoch = 0;
+            uint64_t now_ns = 0;
+            if (!device_dataplane_stamp(dev, &epoch, &now_ns)) {
+                runtime_stats_rx_drop(dev->owner);
+                runtime_device_stats_rx_drop(dev);
+            } else if (!mb_duplex_runtime_push_rx_with_epoch(&dev->runtime,
+                                                             bytes,
+                                                             len,
+                                                             now_ns,
+                                                             epoch)) {
                 g_printerr("RX runtime queue push failed for %s; BLE notification dropped.\n",
                            device_label(dev));
                 runtime_stats_rx_drop(dev->owner);
@@ -1939,6 +2076,14 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
         if (n == 0)
             continue;
 
+        uint64_t epoch = 0;
+        uint64_t now_ns = 0;
+        if (!device_dataplane_stamp(dev, &epoch, &now_ns)) {
+            runtime_stats_tx_drop(rt);
+            runtime_device_stats_tx_drop(dev);
+            continue;
+        }
+
         if (rt->cfg.print_midi_events) {
             g_print("ALSA->BLE MIDI[%s]:", device_label(dev));
             for (long i = 0; i < n; i++)
@@ -1946,7 +2091,11 @@ static void runtime_drain_alsa_tx_queue(ConfigDirRuntime *rt) {
             g_print("\n");
         }
 
-        if (!mb_duplex_runtime_push_tx(&dev->runtime, midi, (size_t)n, runtime_now_ns())) {
+        if (!mb_duplex_runtime_push_tx_with_epoch(&dev->runtime,
+                                                  midi,
+                                                  (size_t)n,
+                                                  now_ns,
+                                                  epoch)) {
             g_printerr("TX runtime queue push failed for %s; ALSA event dropped.\n",
                        device_label(dev));
             runtime_stats_tx_drop(rt);
