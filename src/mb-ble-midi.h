@@ -14,12 +14,18 @@
 
 typedef struct {
     uint8_t running_status;
+    uint8_t pending_status;
+    uint8_t pending_data[2];
+    uint8_t pending_len;
+    uint8_t pending_expected;
+    bool sysex_active;
 } MbBleMidiDecoderState;
 
 typedef enum {
     MB_BLE_MIDI_DECODE_OK,
     MB_BLE_MIDI_DECODE_IGNORED,
     MB_BLE_MIDI_DECODE_INVALID_HEADER,
+    MB_BLE_MIDI_DECODE_RESYNC,
 } MbBleMidiDecodeResult;
 
 typedef void (*MbBleMidiEmitByteFunc)(uint8_t byte, void *user_data);

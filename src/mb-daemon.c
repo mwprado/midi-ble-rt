@@ -940,6 +940,47 @@ static void device_alsa_emit_midi_byte(ConfigDeviceRuntime *dev, uint8_t byte) {
     }
 }
 
+
+static void device_alsa_emit_midi_panic(ConfigDeviceRuntime *dev, const char *reason) {
+    if (!dev || !dev->alsa_midi_encoder)
+        return;
+
+    /*
+     * RX resync policy: if BLE-MIDI framing becomes ambiguous, do not let an
+     * old partial message be completed by future bytes.  Reset ALSA's byte
+     * encoder and emit a conservative MIDI panic to downstream ALSA clients so
+     * a lost Note Off, sustain-off, or controller reset does not leave sound
+     * stuck after we drop the suspect fragment.
+     */
+    g_printerr("MIDI RX resync for %s%s%s; emitting panic to ALSA.\n",
+               device_label(dev),
+               reason && *reason ? ": " : "",
+               reason && *reason ? reason : "");
+
+    snd_midi_event_reset_encode(dev->alsa_midi_encoder);
+
+    for (uint8_t ch = 0; ch < 16; ch++) {
+        uint8_t cc = 0xB0 | ch;
+        uint8_t bend = 0xE0 | ch;
+
+        device_alsa_emit_midi_byte(dev, cc);
+        device_alsa_emit_midi_byte(dev, 64);
+        device_alsa_emit_midi_byte(dev, 0);
+
+        device_alsa_emit_midi_byte(dev, cc);
+        device_alsa_emit_midi_byte(dev, 120);
+        device_alsa_emit_midi_byte(dev, 0);
+
+        device_alsa_emit_midi_byte(dev, cc);
+        device_alsa_emit_midi_byte(dev, 123);
+        device_alsa_emit_midi_byte(dev, 0);
+
+        device_alsa_emit_midi_byte(dev, bend);
+        device_alsa_emit_midi_byte(dev, 0x00);
+        device_alsa_emit_midi_byte(dev, 0x40);
+    }
+}
+
 static void device_ble_midi_emit_byte(uint8_t byte, void *user_data) {
     device_alsa_emit_midi_byte((ConfigDeviceRuntime *)user_data, byte);
 }
@@ -985,9 +1026,18 @@ static void device_ble_midi_decode_packet(ConfigDeviceRuntime *dev,
                                   device_ble_midi_emit_byte,
                                   dev);
 
-    if (result == MB_BLE_MIDI_DECODE_INVALID_HEADER)
+    if (result == MB_BLE_MIDI_DECODE_INVALID_HEADER) {
         g_printerr("Invalid BLE-MIDI header byte from %s: 0x%02x\n",
                    device_label(dev), p[0]);
+        mb_ble_midi_decoder_reset(&dev->ble_midi_decoder);
+        device_alsa_emit_midi_panic(dev, "invalid BLE-MIDI header");
+        runtime_stats_rx_drop(dev->owner);
+        runtime_device_stats_rx_drop(dev);
+    } else if (result == MB_BLE_MIDI_DECODE_RESYNC) {
+        device_alsa_emit_midi_panic(dev, "ambiguous or orphaned MIDI fragment");
+        runtime_stats_rx_drop(dev->owner);
+        runtime_device_stats_rx_drop(dev);
+    }
 }
 
 static bool device_ble_midi_write_packet(ConfigDeviceRuntime *dev,
