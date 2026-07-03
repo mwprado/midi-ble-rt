@@ -23,6 +23,13 @@ require_write_without_response = yes
 [stats]
 enabled = yes
 interval_ms = 1000
+latency_diagnostics = no
+
+[realtime]
+# Optional RtKit scheduling for runtime RX/TX workers.
+# Keep disabled by default; enable only after collecting baseline latency/jitter.
+rtkit = no
+rt_priority = 10
 
 [debug]
 print_ble_packets = no
