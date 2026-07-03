@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.9.1
+Version:        0.9.2
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -62,6 +62,14 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.2-1
+- Add compiled version reporting with -v and -vv.
+- Add optional RtKit scheduling through RealtimeKit.
+- Allow realtime scheduling selection per RX and TX worker.
+- Default realtime worker policy to RX enabled and TX disabled when RtKit is active.
+- Add latency capture and comparison helper scripts.
+- Document Roland GO:KEYS latency and RtKit validation results.
+
 * Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.1-1
 - Add optional measurement-only latency diagnostics.
 - Export latency.tsv separately from stats.tsv.
@@ -78,91 +86,3 @@ for bin in \
 - Fail closed on ambiguous BLE-MIDI framing and emit MIDI panic on RX resync.
 - Document BLE-MIDI fragmentation and resync policy.
 - Remove the legacy single-file configuration path; keep directory-based multi-session runtime only.
-
-* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.1-1
-- Package installed multi-device documentation in the Fedora RPM.
-
-* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-2
-- Package installed multi-device documentation in the Fedora RPM.
-
-* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.8.0-1
-- Complete multi-device runtime statistics with stats v5.
-- Export one RX and one TX statistics row per configured BLE-MIDI device.
-- Show ALSA client:port per device instead of ambiguous aggregate ports.
-- Track queue depth and peak buffer fill per device and direction.
-- Update midi-ble-rtctl stats/top for the multi-device v5 format.
-- Keep the daemon generic for BLE-MIDI instruments, controllers, modules and adapters.
-
-* Mon Jun 29 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.1-2
-- Install generated systemd user unit from CMake.
-- Align service ExecStart with the installed bindir.
-- Add CMake install validation to CI.
-
-* Sun Jun 28 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.7.0-1
-- Add multi-session lifecycle/control-plane monitor architecture.
-- Route lifecycle state changes through the monitor.
-- Keep RX/TX dataplane workers parallel per BLE-MIDI device after STREAMING.
-- Use per-device GATT TX locking for concurrent BLE-MIDI devices.
-- Validate ALSA to BLE-MIDI TX path with real hardware.
-
-* Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.3-2
-- Consolidate cleanup branches into master.
-- Keep midi-ble-rt-core as an internal statically linked library.
-- Avoid runtime dependency on libmidi-ble-rt-core.so.
-- Add generic BLE-MIDI device documentation.
-- Confirm Fedora RPM installation works on real laptop setup.
-
-* Sat Jun 27 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.6.2-2
-- Harden Fedora package against private core shared-library dependency.
-- Keep midi-ble-rt-core linked statically into installed executables.
-- Add RPM check to fail the build if libmidi-ble-rt-core.so appears as a runtime dependency.
-- Disable test target builds in RPM packaging.
-
-* Fri Jun 26 2026 Moacyr Prado <mwprado@gmail.com> - 0.6.0-1
-- Include internal code cleanup after the stable RPM release.
-- Extract BlueZ, BLE-MIDI GATT and ALSA port helper modules.
-- Add stats v3 with separate ALSA RX and ALSA TX fields.
-- Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
-- Preserve existing BLE-MIDI runtime behavior.
-
-* Fri Jun 26 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.2-1
-- Add stats v3 with separate ALSA RX and ALSA TX fields.
-- Update midi-ble-rtctl stats/top to display ALSA RX and ALSA TX separately.
-- Include code cleanup: BlueZ/GATT/ALSA helper extraction and legacy boundary reduction.
-- Preserve existing BLE-MIDI runtime behavior.
-
-* Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.1-2
-- Build the internal midi-ble-rt-core library statically.
-- Avoid a broken runtime dependency on libmidi-ble-rt-core.so()(64bit).
-
-* Thu Jun 25 2026 Moacyr Prado <mwprado@gmail.com> - 0.5.0-1
-- Add session statistics monitoring.
-- Export runtime statistics to stats.tsv under the user runtime directory.
-- Add midi-ble-rtctl stats and midi-ble-rtctl top.
-- Document the statistics format and operational semantics.
-
-* Wed Jun 24 2026 Moacyr Prado <mwprado@gmail.com> - 0.4.0-1
-- Use single public midi-ble-rtd daemon with internal orchestrator runtime.
-- Stop building the experimental midi-ble-rtd-duplex target.
-- Add mb-alsa core helpers and tests for ALSA event classification.
-- Update architecture documentation for daemon, orchestrator and core split.
-
-* Tue Jun 23 2026 Moacyr Prado <mwprado@gmail.com> - 0.2.0-1
-- Add MIDI session state core and daemon session registry.
-- Add unit tests for state transitions, multi-session isolation and address identity.
-- Document developer architecture and session state diagrams.
-- Keep BlueZ as Bluetooth/GATT source of truth and ALSA as MIDI endpoint.
-
-* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.1-1
-- Consolidate Fedora spec under packaging/fedora.
-- Do not install missing examples/midi/README.md.
-
-* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.3
-- Point Source0 to GitHub tag tarball for COPR SCM/spec builds.
-
-* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.2
-- Switch package license to MIT and install LICENSE as %license.
-
-* Mon Jun 22 2026 Moacyr Prado <mwprado@gmail.com> - 0.1.0-0.1
-- Initial COPR-oriented Fedora package.
-- Package BLE-MIDI daemon, control CLI, user systemd unit and MIDI smoke tests.
