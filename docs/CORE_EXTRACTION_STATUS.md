@@ -1,59 +1,53 @@
 # Core extraction status
 
-This document records the post-`v0.4.0` extraction state so new work does not
-accidentally grow the remaining legacy core.
+This document records the v1.0.0 cleanup state so new work does not reintroduce
+legacy daemon paths.
 
 ## Current public daemon
 
 ```text
 midi-ble-rtd
-  -> mb-daemon
-      -> mb-orchestrator
-          -> core modules / runtime queues / legacy core being extracted
+  -> mb-daemon-main.c
+      -> mb-daemon.c
+          -> core modules / runtime queues
 ```
 
-`midi-ble-rtd` is the only public daemon.  The former `midi-ble-rtd-duplex`
-validation wrapper has been removed.
+`midi-ble-rtd` is the only public daemon. The former validation wrappers and the
+former monolithic daemon source were removed before v1.0.0 cleanup.
 
 ## Extracted core modules
 
 ```text
 mb-session          session state and invariants
 mb-alsa             ALSA Sequencer event classification
+mb-alsa-port        shared ALSA client and per-device duplex ports
 mb-config           runtime config parsing and defaults
-mb-ble-midi         BLE-MIDI UUIDs, status lengths and short packet helpers
-mb-buffer           adaptive session buffers
-mb-runtime          runtime flow primitives
-mb-duplex-runtime   threaded RX/TX runtime
-mb-slice-ring       fixed-size queue primitive
-mb-frame-model      frame/model helpers
+mb-bluez            BlueZ Device1/ObjectManager/Properties helpers
+mb-gatt-midi        BLE-MIDI service/characteristic discovery and GATT I/O
+mb-ble-midi         BLE-MIDI packet encode/decode
+mb-runtime          runtime flow primitive
+mb-duplex-runtime   threaded RX/TX runtime wrapper
+mb-slice-ring       active fixed-size runtime queue
+mb-frame-model      active runtime frame pool
+mb-stats            stats counters and default path helpers
 mb-log              structured logging
+mb-paths            runtime path helpers
+mb-rtkit            optional RTKit integration
 ```
 
-## Remaining legacy concentration
+## Removed legacy code
 
-`src/midi-ble-rtd.c` is still included by `mb-orchestrator.c` during the ongoing
-extraction.  It still contains static helpers for BlueZ, GATT, ALSA I/O and the
-BLE-MIDI RX parser.
-
-Do not add new feature logic to `src/midi-ble-rtd.c`.
-
-## Remaining extraction targets
-
-Recommended order:
+Removed before or during the v1.0.0 cleanup branch:
 
 ```text
-1. mb-bluez
-   Device1 discovery, pair/trust/connect, ServicesResolved polling
-
-2. mb-gatt
-   BLE-MIDI service discovery, characteristic discovery, StartNotify, WriteValue
-
-3. mb-ble-midi RX parser
-   BLE-MIDI notification packet parsing with callback-based MIDI byte output
-
-4. mb-alsa I/O
-   ALSA Sequencer client/port creation and MIDI byte encode/decode ownership
+src/midi-ble-rtd.c              former monolithic daemon
+mb-legacy-core.h                temporary compatibility shim
+mb-buffer.[ch]                  unused adaptive session buffer prototype
+MbSessionBuffers                obsolete per-session buffer fields
+test-mb-buffer                  tests for removed buffer prototype
+mb_alsa_port_open_duplex()      single-device ALSA wrapper
+mb_alsa_port_close()            single-device ALSA wrapper
+mb_stats_export_tsv()           obsolete stats.tsv v4 exporter
 ```
 
 ## Rule for new functionality
@@ -61,37 +55,36 @@ Recommended order:
 New functionality should be implemented in one of these places:
 
 ```text
-mb-orchestrator     runtime/session policy
+mb-daemon.c          runtime/session policy and dataplane glue
 explicit core module low-level domain operation
-midi-ble-rtctl      user-facing control plane
+midi-ble-rtctl       user-facing control plane
 ```
 
-Avoid this pattern:
+Avoid reintroducing:
 
 ```text
-new feature -> src/midi-ble-rtd.c
+single-device daemon compatibility path
+hidden #include of implementation .c files
+parallel BLE-MIDI decoders
+parallel ALSA port lifecycle wrappers
+unused queue/buffer abstractions outside the active dataplane
 ```
 
-Preferred pattern:
+## Current dataplane
 
 ```text
-new feature -> mb-orchestrator -> core module
+BLE notification
+  -> mb_duplex_runtime_push_rx_with_epoch()
+  -> mb-runtime / mb-slice-ring / mb-frame-model
+  -> mb_ble_midi_decode_packet()
+  -> ALSA Sequencer output
+
+ALSA Sequencer input
+  -> mb_duplex_runtime_push_tx_with_epoch()
+  -> mb-runtime / mb-slice-ring / mb-frame-model
+  -> mb_ble_midi_make_packet()
+  -> GATT WriteValue(command)
 ```
 
-## Next feature candidate
-
-The next high-value feature is controlled reconnect:
-
-```text
-BlueZ disconnect or notify/write failure
-  -> session leaves STREAMING
-  -> reconnect policy decides retry/backoff/give-up
-  -> Device1 connect
-  -> wait ServicesResolved
-  -> rebind BLE-MIDI GATT characteristic
-  -> StartNotify
-  -> return to STREAMING
-```
-
-This feature should be implemented in `mb-orchestrator` first and only extract
-more BlueZ/GATT helpers when the boundary is stable.
+The active runtime queue is `mb-slice-ring` over `mb-frame-model`. Do not add new
+runtime behavior to the removed adaptive `mb-buffer` model.
