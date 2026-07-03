@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(midi_ble_rt C)
+
+set(MIDI_BLE_RT_VERSION "0.9.2" CACHE STRING "midi-ble-rt project version")
+project(midi_ble_rt VERSION ${MIDI_BLE_RT_VERSION} LANGUAGES C)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -12,6 +14,12 @@ set(SYSTEMD_USER_UNIT_DIR "lib/systemd/user"
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
+
+configure_file(
+    src/mb-version.h.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/mb-version.h"
+    @ONLY
+)
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/systemd/user")
 configure_file(
@@ -44,6 +52,7 @@ add_library(midi-ble-rt-core STATIC
 
 target_include_directories(midi-ble-rt-core
     PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${DEPS_INCLUDE_DIRS}
 )
