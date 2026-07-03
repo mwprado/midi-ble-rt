@@ -143,7 +143,7 @@ static void help_global(const char *argv0) {
         "  %s scan --timeout 10 --midi-only\n"
         "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config\n"
         "  %s probe CB:81:F4:62:FF:07\n"
-        "  ./build/midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
+        "  midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
         "\n",
         argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
