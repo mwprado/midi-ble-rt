@@ -3,6 +3,10 @@
 This document records the measurement procedure used to evaluate `latency.tsv`
 and RtKit scheduling changes.
 
+See also `docs/GOKEYS_TESTS.md` for the empirical Roland GO:KEYS validation run
+that motivated the default RtKit policy: RX enabled when realtime is active, TX
+disabled unless the user explicitly opts in.
+
 ## Runtime configuration
 
 Enable latency diagnostics in `daemon.ini`:
