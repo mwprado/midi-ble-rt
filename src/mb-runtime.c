@@ -226,7 +226,7 @@ MbRuntimeFlowStats mb_runtime_flow_stats(const MbRuntimeFlow *flow) {
     stats.consumed = flow->consumed;
     stats.dropped = flow->dropped;
     stats.push_failures = flow->push_failures;
-    stats.overflow_count = flow->ring.overflow_count;
+    stats.overflows = mb_runtime_flow_overflows(flow);
     stats.depth = mb_runtime_flow_depth(flow);
     return stats;
 }
