@@ -17,26 +17,66 @@ static const char *ctl_argv0(void) {
     return "midi-ble-rtctl";
 }
 
+static void ctl_help_global(void) {
+    const char *argv0 = ctl_argv0();
+    g_print(
+        "midi-ble-rtctl - control and diagnostics CLI for midi-ble-rt\n"
+        "\n"
+        "Usage:\n"
+        "  %s COMMAND [ARGS...]\n"
+        "  %s --help\n"
+        "  %s help [COMMAND]\n"
+        "\n"
+        "BlueZ/device commands:\n"
+        "  list                 List known BlueZ devices\n"
+        "  scan                 Run BlueZ discovery, then list devices\n"
+        "  info                 Show one device's BlueZ properties\n"
+        "  probe                Connect if needed and inspect BLE-MIDI GATT objects\n"
+        "  pair                 Pair a device through BlueZ Device1.Pair\n"
+        "  trust                Set BlueZ Device1.Trusted=true\n"
+        "  untrust              Set BlueZ Device1.Trusted=false\n"
+        "  connect              Prepare a BLE-MIDI device using BlueZ\n"
+        "  configure            Write a local midi-ble-rtd config file\n"
+        "  disconnect           Disconnect a BlueZ device\n"
+        "  forget               Remove a device from BlueZ cache/pairing records\n"
+        "\n"
+        "Daemon control commands:\n"
+        "  daemon-ping          Ping a running midi-ble-rtd instance\n"
+        "  daemon-status        Print daemon runtime status\n"
+        "  daemon-list          List configured daemon sessions\n"
+        "  daemon-connect       Ask daemon to connect a configured device\n"
+        "  daemon-disconnect    Ask daemon to disconnect a configured device\n"
+        "  daemon-recheck       Ask daemon to recheck a configured device\n"
+        "\n"
+        "Diagnostics commands:\n"
+        "  stats                Print stats.tsv snapshot\n"
+        "  top                  Watch stats.tsv continuously\n"
+        "  latency              Print latency.tsv diagnostics snapshot\n"
+        "  latency-top          Watch latency.tsv diagnostics continuously\n"
+        "\n"
+        "Help:\n"
+        "  %s help configure\n"
+        "  %s connect --help\n"
+        "  %s help latency\n"
+        "  %s latency-top --help\n"
+        "\n"
+        "Typical GO:KEYS flow:\n"
+        "  %s scan --timeout 10 --midi-only\n"
+        "  %s connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config\n"
+        "  %s probe CB:81:F4:62:FF:07\n"
+        "  midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
+        "\n",
+        argv0, argv0, argv0,
+        argv0, argv0, argv0, argv0,
+        argv0, argv0, argv0);
+}
+
 static void latency_usage(const char *argv0, const char *cmd) {
     g_printerr(
         "Usage:\n"
         "  %s %s [--path PATH]\n"
         "  %s latency-top [--path PATH] [--interval MS]\n",
         argv0, cmd, argv0);
-}
-
-static void latency_help_global(const char *argv0) {
-    g_print(
-        "\n"
-        "Latency diagnostics commands:\n"
-        "  latency      Print latency.tsv diagnostics snapshot\n"
-        "  latency-top  Watch latency.tsv diagnostics continuously\n"
-        "\n"
-        "Help:\n"
-        "  %s help latency\n"
-        "  %s help latency-top\n"
-        "\n",
-        argv0, argv0);
 }
 
 static void latency_help_command(const char *argv0, const char *cmd) {
@@ -159,10 +199,9 @@ int main(int argc, char **argv) {
 
     if ((argc == 2 && is_help_arg(argv[1])) ||
         (argc == 2 && g_strcmp0(argv[1], "help") == 0)) {
-        int rc = midi_ble_rtctl_stats_main(argc, display_argv);
-        latency_help_global(ctl_argv0());
+        ctl_help_global();
         g_free(display_argv);
-        return rc;
+        return 0;
     }
 
     int rc = midi_ble_rtctl_stats_main(argc, display_argv);
