@@ -82,84 +82,84 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test-mb-session PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-session PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-session COMMAND test-mb-session)
+    add_test(NAME mb-session COMMAND $<TARGET_FILE:test-mb-session>)
 
     add_executable(test-mb-session-state
         tests/test-mb-session-state.c
     )
     target_link_libraries(test-mb-session-state PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-session-state PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-session-state COMMAND test-mb-session-state)
+    add_test(NAME mb-session-state COMMAND $<TARGET_FILE:test-mb-session-state>)
 
     add_executable(test-mb-alsa
         tests/test-mb-alsa.c
     )
     target_link_libraries(test-mb-alsa PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-alsa PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-alsa COMMAND test-mb-alsa)
+    add_test(NAME mb-alsa COMMAND $<TARGET_FILE:test-mb-alsa>)
 
     add_executable(test-mb-ble-midi
         tests/test-mb-ble-midi.c
     )
     target_link_libraries(test-mb-ble-midi PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-ble-midi PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-ble-midi COMMAND test-mb-ble-midi)
+    add_test(NAME mb-ble-midi COMMAND $<TARGET_FILE:test-mb-ble-midi>)
 
     add_executable(test-mb-config
         tests/test-mb-config.c
     )
     target_link_libraries(test-mb-config PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-config PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-config COMMAND test-mb-config)
+    add_test(NAME mb-config COMMAND $<TARGET_FILE:test-mb-config>)
 
     add_executable(test-mb-buffer
         tests/test-mb-buffer.c
     )
     target_link_libraries(test-mb-buffer PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-buffer PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-buffer COMMAND test-mb-buffer)
+    add_test(NAME mb-buffer COMMAND $<TARGET_FILE:test-mb-buffer>)
 
     add_executable(test-mb-frame-model
         tests/test-mb-frame-model.c
     )
     target_link_libraries(test-mb-frame-model PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-frame-model PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-frame-model COMMAND test-mb-frame-model)
+    add_test(NAME mb-frame-model COMMAND $<TARGET_FILE:test-mb-frame-model>)
 
     add_executable(test-mb-slice-ring
         tests/test-mb-slice-ring.c
     )
     target_link_libraries(test-mb-slice-ring PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-slice-ring PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-slice-ring COMMAND test-mb-slice-ring)
+    add_test(NAME mb-slice-ring COMMAND $<TARGET_FILE:test-mb-slice-ring>)
 
     add_executable(test-mb-runtime
         tests/test-mb-runtime.c
     )
     target_link_libraries(test-mb-runtime PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-runtime PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-runtime COMMAND test-mb-runtime)
+    add_test(NAME mb-runtime COMMAND $<TARGET_FILE:test-mb-runtime>)
 
     add_executable(test-mb-duplex-runtime
         tests/test-mb-duplex-runtime.c
     )
     target_link_libraries(test-mb-duplex-runtime PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-duplex-runtime PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-duplex-runtime COMMAND test-mb-duplex-runtime)
+    add_test(NAME mb-duplex-runtime COMMAND $<TARGET_FILE:test-mb-duplex-runtime>)
 
     add_executable(test-mb-paths
         tests/test-mb-paths.c
     )
     target_link_libraries(test-mb-paths PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-paths PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-paths COMMAND test-mb-paths)
+    add_test(NAME mb-paths COMMAND $<TARGET_FILE:test-mb-paths>)
 
     add_executable(test-mb-control-protocol
         tests/test-mb-control-protocol.c
     )
     target_link_libraries(test-mb-control-protocol PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-control-protocol PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-control-protocol COMMAND test-mb-control-protocol)
+    add_test(NAME mb-control-protocol COMMAND $<TARGET_FILE:test-mb-control-protocol>)
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
