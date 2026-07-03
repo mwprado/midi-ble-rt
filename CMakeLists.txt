@@ -54,8 +54,13 @@ add_executable(midi-ble-rtd
 )
 
 add_executable(midi-ble-rtctl
+    src/mb-ctl-main.c
     src/mb-stats-ctl.c
     src/midi-ble-rtctl.c
+)
+
+set_source_files_properties(src/mb-stats-ctl.c
+    PROPERTIES COMPILE_DEFINITIONS "main=midi_ble_rtctl_stats_main"
 )
 
 set_source_files_properties(src/midi-ble-rtctl.c
