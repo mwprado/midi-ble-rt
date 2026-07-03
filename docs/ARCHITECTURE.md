@@ -6,49 +6,53 @@
 midi-ble-rtd
 ```
 
-The previous `midi-ble-rtd-duplex` path was a validation wrapper for the threaded
-RX/TX runtime.  Its logic is now represented as the daemon's internal
-orchestrator path.  There should not be two daemon concepts in the installed
-interface.
+The previous duplex validation path was folded into the daemon runtime. There
+should not be two daemon concepts in the installed interface.
 
 ## Layer model
 
 ```text
 midi-ble-rtd
-  -> mb-daemon
-      -> mb-orchestrator
-          -> core modules / session model / runtime queues
+  -> process entry / argument handling
+  -> config-directory runtime
+      -> MbDaemon session index
+      -> MbSession per device
+      -> MbDuplexRuntime per streaming-capable device
+      -> core modules / runtime queues
 ```
 
 ## `midi-ble-rtd`
 
-`midi-ble-rtd` is the public executable.  Users, service files and packages
-should refer to this binary.
+`midi-ble-rtd` is the public executable. Users, service files and packages should
+refer to this binary.
 
 It remains the stable command-line entry point:
 
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
+```text
+midi-ble-rtd --config ~/.config/midi-ble-rt
 ```
 
-## `mb-daemon`
+The `--config` value is the configuration directory containing `daemon.ini` and
+`devices.d/*.ini`.
 
-`mb-daemon` owns process-level concerns:
+## Process boundary
+
+The process entry owns process-level concerns:
 
 ```text
-main()
 argument handling
+version reporting
 process startup
 exit code
 signal/cleanup boundary
 ```
 
-It should stay small.  It should not contain BLE-MIDI policy, ALSA decode logic,
+It should stay small. It should not contain BLE-MIDI policy, ALSA decode logic,
 BlueZ/GATT discovery logic or runtime queue mechanics.
 
-## `mb-orchestrator`
+## Runtime policy
 
-`mb-orchestrator` owns runtime policy:
+The daemon runtime owns policy and coordination:
 
 ```text
 session lifecycle
@@ -57,11 +61,13 @@ threaded runtime startup/shutdown
 queue push/consume decisions
 ALSA polling policy
 GATT notification callback policy
-reconnect policy, later
-multi-session policy, later
+reconnect policy
+multi-session policy
+control socket handling
+stats and latency snapshot export
 ```
 
-The orchestrator is the right place to answer questions such as:
+The runtime is the right place to answer questions such as:
 
 ```text
 Which session is active?
@@ -69,6 +75,7 @@ When should a session transition state?
 When should RX data be pushed into the runtime?
 When should ALSA TX data be written to GATT?
 When should reconnect be attempted?
+Which ALSA port maps to which configured device?
 ```
 
 It should not become the implementation owner of low-level primitives.
@@ -78,43 +85,38 @@ It should not become the implementation owner of low-level primitives.
 The core modules define domain objects and primitive operations:
 
 ```text
-mb-session          session state and invariants
-mb-alsa             ALSA Sequencer event classification
-mb-config           runtime config parsing and defaults
-mb-ble-midi         BLE-MIDI UUIDs and short packet helpers
-mb-buffer           adaptive session buffers
-mb-runtime          runtime flow primitives
-mb-duplex-runtime   threaded RX/TX runtime
-mb-slice-ring       fixed-size queue primitive
-mb-frame-model      frame/model helpers
-mb-log              structured logging
+mb-session              session state and invariants
+mb-alsa                 ALSA Sequencer event classification
+mb-alsa-port            ALSA port helpers
+mb-bluez                BlueZ Device1 operations
+mb-gatt-midi            BLE-MIDI service/characteristic operations
+mb-config               runtime config parsing and defaults
+mb-ble-midi             BLE-MIDI UUIDs and packet helpers
+mb-buffer               adaptive session buffers
+mb-runtime              runtime flow primitives
+mb-duplex-runtime       threaded RX/TX runtime
+mb-slice-ring           fixed-size queue primitive
+mb-frame-model          frame/model helpers
+mb-log                  structured logging
+mb-stats                stats snapshot export
+mb-latency-diagnostics  latency snapshot export
+mb-rtkit                optional RealtimeKit scheduling helper
 ```
 
-The current transition still reuses some legacy static helpers from the original
-daemon implementation.  The remaining extraction targets are:
-
-```text
-mb-bluez            Device1 discovery, pair/trust/connect
-mb-gatt             BLE-MIDI service/characteristic, StartNotify, WriteValue
-mb-ble-midi RX      BLE-MIDI notification parser with callback-based MIDI output
-mb-alsa I/O         ALSA Sequencer client/ports and encode/decode ownership
-```
-
-New functionality should be added to `mb-orchestrator` or an explicit core
-module.  Avoid adding new behavior to `src/midi-ble-rtd.c`; it is legacy core
-that is still included by the orchestrator during extraction.
+New functionality should be added to an explicit core module when it is a
+primitive, or to the daemon runtime when it is process/session policy.
 
 ## Session ownership rule
 
-The session object belongs to the core.  Session lifecycle policy belongs to the
-orchestrator.
+The session object belongs to the core. Session lifecycle policy belongs to the
+daemon runtime.
 
 ```text
 core:
   what is a session?
   what states and invariants are valid?
 
-orchestrator:
+runtime:
   what should happen to this session now?
   when should it connect, notify, stream, reconnect or stop?
 ```
@@ -122,12 +124,13 @@ orchestrator:
 This separation makes debugging direct:
 
 ```text
-argument/config failure          -> mb-daemon / mb-config
-state transition/reconnect issue -> mb-orchestrator / mb-session
+argument/config failure          -> process entry / mb-config
+state transition/reconnect issue -> daemon runtime / mb-session
 ALSA event/decode issue          -> mb-alsa
-BlueZ/GATT issue                 -> mb-bluez / mb-gatt
+BlueZ/GATT issue                 -> mb-bluez / mb-gatt-midi
 BLE-MIDI packet issue            -> mb-ble-midi
 queue/drop/overflow issue        -> mb-buffer / mb-runtime
+RtKit scheduling issue           -> mb-rtkit
 ```
 
 ## BlueZ boundary
@@ -157,9 +160,11 @@ BLE-MIDI parser state
 ALSA Sequencer port mapping
 runtime queues
 reconnect policy
+stats and latency export
+optional realtime worker scheduling
 ```
 
-The daemon may cache BlueZ values for decisions.  BlueZ remains the authority for
+The daemon may cache BlueZ values for decisions. BlueZ remains the authority for
 Bluetooth truth.
 
 ## Runtime flow
@@ -167,13 +172,13 @@ Bluetooth truth.
 ```text
 BLE-MIDI notification
   -> BlueZ PropertiesChanged(Value)
-  -> mb-orchestrator RX callback
+  -> daemon RX callback
   -> mb-duplex-runtime RX queue
   -> BLE-MIDI decode
   -> ALSA Sequencer output
 
 ALSA Sequencer input
-  -> mb-orchestrator TX poll
+  -> daemon ALSA TX poll
   -> ALSA event filter
   -> MIDI bytes
   -> mb-duplex-runtime TX queue
@@ -182,19 +187,19 @@ ALSA Sequencer input
 ```
 
 ALSA Sequencer control events such as `PORT_SUBSCRIBED` and `PORT_UNSUBSCRIBED`
-are not MIDI payload.  They must be ignored before `snd_midi_event_decode()`.
+are not MIDI payload. They must be ignored before `snd_midi_event_decode()`.
 
 ## Installed interface
 
-The installed binaries should be:
+The installed binaries are:
 
 ```text
 midi-ble-rtd
 midi-ble-rtctl
 ```
 
-`midi-ble-rtd-duplex` was useful during validation but should not be treated as a
-separate installed daemon model.
+`midi-ble-rtd-duplex` was useful during validation but is not an installed daemon
+model.
 
 ## Future fast path
 
