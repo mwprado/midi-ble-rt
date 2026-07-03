@@ -17,6 +17,8 @@
 #define MB_RTKIT_RTTIME_USEC 200000u
 
 static gint rtkit_enabled_flag;
+static gint rtkit_realtime_rx_flag = 1;
+static gint rtkit_realtime_tx_flag;
 static unsigned rtkit_configured_priority = MB_RTKIT_DEFAULT_PRIORITY;
 static gint rtkit_warning_emitted;
 
@@ -47,11 +49,16 @@ static unsigned rtkit_clamp_priority(unsigned priority) {
     return priority;
 }
 
-void mb_rtkit_configure(bool enabled, unsigned priority) {
+void mb_rtkit_configure(bool enabled,
+                        unsigned priority,
+                        bool realtime_rx,
+                        bool realtime_tx) {
     if (!enabled)
         g_atomic_int_set(&rtkit_enabled_flag, 0);
 
     rtkit_configured_priority = rtkit_clamp_priority(priority);
+    g_atomic_int_set(&rtkit_realtime_rx_flag, realtime_rx ? 1 : 0);
+    g_atomic_int_set(&rtkit_realtime_tx_flag, realtime_tx ? 1 : 0);
     g_atomic_int_set(&rtkit_warning_emitted, 0);
 
     if (enabled)
@@ -60,6 +67,14 @@ void mb_rtkit_configure(bool enabled, unsigned priority) {
 
 bool mb_rtkit_enabled(void) {
     return g_atomic_int_get(&rtkit_enabled_flag) != 0;
+}
+
+bool mb_rtkit_realtime_rx_enabled(void) {
+    return mb_rtkit_enabled() && g_atomic_int_get(&rtkit_realtime_rx_flag) != 0;
+}
+
+bool mb_rtkit_realtime_tx_enabled(void) {
+    return mb_rtkit_enabled() && g_atomic_int_get(&rtkit_realtime_tx_flag) != 0;
 }
 
 unsigned mb_rtkit_priority(void) {
