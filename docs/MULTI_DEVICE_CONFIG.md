@@ -1,28 +1,25 @@
 # Multi-device configuration layout
 
-The public configuration option remains `--config`. The value may be either a single INI file or a configuration directory.
+The public configuration option remains `--config`, but the value is now a
+configuration directory. The removed legacy single-file compatibility path should
+not be used for current runtime validation.
 
-Single-file mode remains supported:
-
-```bash
-midi-ble-rtd --config config/roland-gokeys.ini.example
-```
-
-Directory mode loads:
+The configuration directory loads:
 
 ```text
 daemon.ini
 devices.d/*.ini
 ```
 
-Current directory-mode behavior:
+Current runtime behavior:
 
 ```text
 1. validate the config directory
-2. load enabled device configs
-3. build one MbSession per configured device
-4. resolve configured addresses to BlueZ Device1 paths
-5. for devices with connect_on_start = yes:
+2. load daemon.ini
+3. load enabled device configs from devices.d/*.ini
+4. build one MbSession per configured device
+5. resolve configured addresses to BlueZ Device1 paths
+6. for devices with connect_on_start = yes:
    - pair/trust according to device policy
    - call Device1.Connect() when needed
    - wait for ServicesResolved
@@ -30,15 +27,18 @@ Current directory-mode behavior:
    - create one ALSA Sequencer port for that session
    - start one RX worker and one TX worker for the session
    - enable StartNotify
-6. keep one shared BlueZ system bus and one shared ALSA client
-7. stay alive in a GLib main loop until Ctrl-C or SIGTERM
+7. keep one shared BlueZ system bus and one shared ALSA client
+8. stay alive in a GLib main loop until Ctrl-C or SIGTERM
 ```
 
-Directory mode is now a multi-session runtime foundation. The model is centered on `MbDaemon`, `MbSession` and `MbDuplexRuntime`; BlueZ and GATT are transport infrastructure only.
+The model is centered on `MbDaemon`, `MbSession` and `MbDuplexRuntime`; BlueZ and
+GATT are transport infrastructure only.
 
-ALSA ports are created only after the device has a valid BlueZ path, GATT service, BLE-MIDI I/O characteristic and runtime workers. No fake ALSA port is exposed for an unbound device.
+ALSA ports are created only after the device has a valid BlueZ path, GATT service,
+BLE-MIDI I/O characteristic and runtime workers. No fake ALSA port is exposed for
+an unbound device.
 
-`--config-dir DIR` is a temporary development alias. Prefer `--config DIR`.
+`--config-dir DIR` may exist as a development alias. Prefer `--config DIR`.
 
 ## Directory shape
 
@@ -113,6 +113,13 @@ require_write_without_response = yes
 [stats]
 enabled = yes
 interval_ms = 1000
+latency_diagnostics = no
+
+[realtime]
+rtkit = no
+rt_priority = 1
+realtime_rx = yes
+realtime_tx = no
 
 [debug]
 print_ble_packets = no
@@ -146,7 +153,7 @@ Connection policy names:
 
 ```text
 connect_on_start
-  If yes, the daemon may initiate connection when it starts or when the device model is activated.
+  If yes, the daemon may initiate connection when it starts.
 
 reconnect_on_link_loss
   If yes, the daemon may reconnect after unexpected link loss. It must not override a manual disconnect.
@@ -171,12 +178,11 @@ Device identity is address-based; name is diagnostic.
 The profile field selects profile/quirk policy such as the Roland GO:KEYS I/O UUID alias.
 ```
 
-Validation target for this development branch:
+Current validation target:
 
 ```text
 --config DIR with one configured GO:KEYS device reaches STREAMING
 one real ALSA port appears for that session
 aplaymidi can transmit to the device through that port
 GATT notify events are routed back to the same ALSA port
-single-file orchestrator mode still works unchanged
 ```
