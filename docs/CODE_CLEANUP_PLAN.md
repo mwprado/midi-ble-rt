@@ -2,9 +2,11 @@
 
 ## Goal
 
-Reduce technical debt after the validated RPM release without changing runtime behavior.
+Prepare the v1.0.0 codebase by removing obsolete compatibility code without
+changing runtime behavior.
 
-This branch is for conservative cleanup only. Feature work belongs in later branches.
+This cleanup is conservative: no protocol changes, no reconnect policy changes,
+no ALSA routing changes and no RPM/spec changes.
 
 ## Rules
 
@@ -19,31 +21,42 @@ This branch is for conservative cleanup only. Feature work belongs in later bran
 
 ## Cleanup status
 
-Completed in the cleanup series:
+Completed before this v1.0.0 cleanup branch:
 
 - BlueZ helpers were extracted to `mb-bluez.[ch]`.
 - BLE-MIDI GATT helpers were extracted to `mb-gatt-midi.[ch]`.
 - ALSA port lifecycle helpers were extracted to `mb-alsa-port.[ch]`.
-- Shared daemon app/context helpers were moved to `mb-app.[ch]`.
 - The monolithic `src/midi-ble-rtd.c` source was removed.
 - The hidden `#include "midi-ble-rtd.c"` pattern was removed.
-- `mb-orchestrator.c` now calls the `mb_app_*` API directly.
 - The temporary `mb-legacy-core.h` compatibility shim was removed.
 - CI was added to build the project and run CTest on pushes and pull requests.
 
+Completed in `cleanup-v1.0.0-remove-legacy`:
+
+- Removed the legacy adaptive `mb-buffer.[ch]` module.
+- Removed `MbSessionBuffers` from `MbSession`.
+- Removed the obsolete `test-mb-buffer` target.
+- Removed the legacy single-device ALSA wrapper API.
+- Removed the obsolete `mb_stats_export_tsv()` v4 exporter.
+- Kept the active v5 daemon stats exporter used by the multi-device runtime.
+
 Remaining before merge:
 
-- Check GitHub Actions results for `remove-legacy-core` after the final cleanup commits.
+- Build the branch with CMake.
+- Run CTest.
 - Run the physical GO:KEYS smoke test before merging to `master`.
 
-## Target module split
+## Current module split
 
+- `mb-daemon-main.c`: daemon executable entry point and version handling.
+- `mb-daemon.c`: multi-device daemon runtime, lifecycle queue and dataplane glue.
 - `mb-bluez.[ch]`: BlueZ Device1, ObjectManager and property helpers.
 - `mb-gatt-midi.[ch]`: BLE-MIDI service/characteristic discovery, notify and write helpers.
-- `mb-alsa-port.[ch]`: ALSA Sequencer client/port lifecycle.
-- `mb-app.[ch]`: daemon app context, config bridge, discovery glue and BLE-MIDI decode to ALSA.
-- `mb-daemon.c`: thin process entrypoint.
-- `mb-orchestrator.c`: session orchestration, lifecycle and state transitions.
+- `mb-alsa-port.[ch]`: shared ALSA client and per-device duplex port lifecycle.
+- `mb-ble-midi.[ch]`: BLE-MIDI packet encode/decode.
+- `mb-session.[ch]`: session state and invariants.
+- `mb-runtime.[ch]`, `mb-duplex-runtime.[ch]`, `mb-slice-ring.[ch]`, `mb-frame-model.[ch]`: active threaded RX/TX dataplane queues.
+- `mb-stats.[ch]`: stats counters and default path helpers.
 
 ## Validation
 
@@ -58,6 +71,7 @@ ctest --test-dir build --output-on-failure
 Local validation before merge:
 
 ```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
