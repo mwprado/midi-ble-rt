@@ -26,10 +26,18 @@ interval_ms = 1000
 latency_diagnostics = no
 
 [realtime]
-# Optional RtKit scheduling for runtime RX/TX workers.
-# Keep disabled by default; enable only after collecting baseline latency/jitter.
+# Optional RtKit scheduling for runtime workers.
+# Global safety switch. Keep disabled until after collecting a baseline.
 rtkit = no
+
+# Priority is intentionally conservative.
 rt_priority = 1
+
+# Directional worker selection used when rtkit = yes.
+# RX is the useful DAW input path for BLE-MIDI -> ALSA.
+# TX is disabled by default because baseline testing showed worse TX worst-case jitter.
+realtime_rx = yes
+realtime_tx = no
 
 [debug]
 print_ble_packets = no
