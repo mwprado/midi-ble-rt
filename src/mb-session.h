@@ -6,8 +6,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mb-buffer.h"
-
 G_BEGIN_DECLS
 
 typedef enum {
@@ -107,8 +105,6 @@ typedef struct {
     unsigned reconnect_attempts;
 
     uint8_t running_status;
-
-    MbSessionBuffers buffers;
 } MbSession;
 
 typedef struct {
