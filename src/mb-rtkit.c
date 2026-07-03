@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #ifdef __linux__
+#include <errno.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -12,6 +14,7 @@
 #define MB_RTKIT_DBUS_PATH "/org/freedesktop/RealtimeKit1"
 #define MB_RTKIT_DBUS_IFACE "org.freedesktop.RealtimeKit1"
 #define MB_RTKIT_DBUS_TIMEOUT_MS 1000
+#define MB_RTKIT_RTTIME_USEC 200000u
 
 static gint rtkit_enabled_flag;
 static unsigned rtkit_configured_priority = MB_RTKIT_DEFAULT_PRIORITY;
@@ -25,6 +28,16 @@ static void rtkit_warn_once(const char *message, const GError *error) {
         g_printerr(". Continuing without realtime scheduling.\n");
     }
 }
+
+#ifdef __linux__
+static void rtkit_warn_errno_once(const char *message) {
+    if (g_atomic_int_compare_and_exchange(&rtkit_warning_emitted, 0, 1)) {
+        g_printerr("RtKit unavailable: %s: %s. Continuing without realtime scheduling.\n",
+                   message ? message : "unknown errno error",
+                   g_strerror(errno));
+    }
+}
+#endif
 
 static unsigned rtkit_clamp_priority(unsigned priority) {
     if (priority == 0)
@@ -57,6 +70,41 @@ unsigned mb_rtkit_priority(void) {
 static uint64_t rtkit_current_thread_id(void) {
     return (uint64_t)syscall(SYS_gettid);
 }
+
+static bool rtkit_ensure_rttime_limit(void) {
+#ifdef RLIMIT_RTTIME
+    struct rlimit current;
+    if (getrlimit(RLIMIT_RTTIME, &current) != 0) {
+        rtkit_warn_errno_once("could not read RLIMIT_RTTIME");
+        return false;
+    }
+
+    if (current.rlim_cur != RLIM_INFINITY && current.rlim_cur <= MB_RTKIT_RTTIME_USEC)
+        return true;
+
+    rlim_t desired = MB_RTKIT_RTTIME_USEC;
+    if (current.rlim_max != RLIM_INFINITY && current.rlim_max < desired)
+        desired = current.rlim_max;
+
+    if (desired == 0) {
+        rtkit_warn_once("RLIMIT_RTTIME hard limit is zero", NULL);
+        return false;
+    }
+
+    struct rlimit updated = current;
+    updated.rlim_cur = desired;
+
+    if (setrlimit(RLIMIT_RTTIME, &updated) != 0) {
+        rtkit_warn_errno_once("could not set RLIMIT_RTTIME");
+        return false;
+    }
+
+    return true;
+#else
+    rtkit_warn_once("RLIMIT_RTTIME is not available on this platform", NULL);
+    return false;
+#endif
+}
 #else
 static uint64_t rtkit_current_thread_id(void) {
     return 0;
@@ -68,6 +116,9 @@ void mb_rtkit_make_current_thread_realtime(const char *thread_name) {
         return;
 
 #ifdef __linux__
+    if (!rtkit_ensure_rttime_limit())
+        return;
+
     uint64_t thread_id = rtkit_current_thread_id();
     if (thread_id == 0) {
         rtkit_warn_once("could not resolve current Linux thread id", NULL);
@@ -105,10 +156,11 @@ void mb_rtkit_make_current_thread_realtime(const char *thread_name) {
     g_variant_unref(reply);
     g_object_unref(bus);
 
-    g_printerr("RtKit realtime scheduling enabled for %s thread=%" G_GUINT64_FORMAT " priority=%u.\n",
+    g_printerr("RtKit realtime scheduling enabled for %s thread=%" G_GUINT64_FORMAT " priority=%u rttime_usec=%u.\n",
                thread_name && *thread_name ? thread_name : "runtime",
                (guint64)thread_id,
-               rtkit_configured_priority);
+               rtkit_configured_priority,
+               MB_RTKIT_RTTIME_USEC);
 #else
     rtkit_warn_once("RtKit scheduling is only implemented on Linux", NULL);
 #endif
