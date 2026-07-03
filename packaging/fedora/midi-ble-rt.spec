@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.9.0
+Version:        0.9.1
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -62,6 +62,14 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.1-1
+- Add optional measurement-only latency diagnostics.
+- Export latency.tsv separately from stats.tsv.
+- Measure RX/TX queue latency and total daemon latency.
+- Report count, average, p95, p99 and max latency metrics.
+- Add midi-ble-rtctl latency and latency-top commands.
+- Keep RtKit/realtime scheduling out of this release.
+
 * Wed Jul 01 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.0-1
 - Add dataplane epoch fencing to prevent stale RX/TX after session changes.
 - Drop pending RX/TX data when a device leaves STREAMING.
