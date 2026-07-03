@@ -34,7 +34,6 @@ add_library(midi-ble-rt-core STATIC
     src/mb-bluez.c
     src/mb-gatt-midi.c
     src/mb-ble-midi.c
-    src/mb-buffer.c
     src/mb-config.c
     src/mb-control-protocol.c
     src/mb-device-discovery.c
@@ -125,13 +124,6 @@ if(BUILD_TESTING)
     target_link_libraries(test-mb-config PRIVATE midi-ble-rt-core)
     target_compile_options(test-mb-config PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME mb-config COMMAND $<TARGET_FILE:test-mb-config>)
-
-    add_executable(test-mb-buffer
-        tests/test-mb-buffer.c
-    )
-    target_link_libraries(test-mb-buffer PRIVATE midi-ble-rt-core)
-    target_compile_options(test-mb-buffer PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME mb-buffer COMMAND $<TARGET_FILE:test-mb-buffer>)
 
     add_executable(test-mb-frame-model
         tests/test-mb-frame-model.c
