@@ -1,10 +1,13 @@
 # midi-ble-rt developer README
 
 This document describes the internal architecture of `midi-ble-rt`: state
-ownership, MIDI session lifecycle, multi-keyboard identity, and tests.
+ownership, MIDI session lifecycle, multi-device identity, runtime queues and
+tests.
 
 The user-facing quick start remains in [`README.md`](README.md).  The daemon
-layer split is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+layer split is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and
+the v1.0.0 cleanup state is tracked in
+[`docs/CORE_EXTRACTION_STATUS.md`](docs/CORE_EXTRACTION_STATUS.md).
 
 ## Design boundary
 
@@ -44,54 +47,39 @@ midi-ble-rt models MIDI sessions.
 
 ## Runtime model
 
-The intended daemon model is:
+The daemon model is:
 
 ```text
 1 public daemon = midi-ble-rtd
 1 daemon = 1 BlueZ adapter context + 1 ALSA Sequencer client + N MIDI sessions
-1 BLE-MIDI keyboard = 1 MbSession + 1 parser state + 1 ALSA port
+1 BLE-MIDI device = 1 MbSession + 1 parser state + 1 ALSA port
 ```
 
 A failure in one `MbSession` must not affect any other active session.
-
-Internally, the daemon is split into:
-
-```text
-midi-ble-rtd
-  -> mb-daemon
-      -> mb-orchestrator
-          -> core modules / session model / runtime queues
-```
-
-The former `midi-ble-rtd-duplex` path was a validation wrapper.  The public
-interface should now be a single daemon, while the threaded RX/TX path lives in
-`mb-orchestrator`.
 
 ## High-level architecture
 
 ```mermaid
 flowchart LR
-    K[BLE-MIDI keyboard] <--> B[BlueZ / GATT]
-    B <--> O[mb-orchestrator]
-    O <--> S[MbSession]
-    S <--> P[BLE-MIDI parser]
-    O <--> R[Runtime queues]
+    K[BLE-MIDI device] <--> B[BlueZ / GATT]
+    B <--> D[mb-daemon]
+    D <--> S[MbSession]
+    D <--> P[BLE-MIDI parser]
+    D <--> R[Runtime queues]
     P <--> A[ALSA Sequencer port]
 ```
 
-For multiple keyboards:
+For multiple devices:
 
 ```mermaid
 flowchart TB
     D[midi-ble-rtd]
-    O[mb-orchestrator]
-    A[ALSA Sequencer client]
+    A[shared ALSA Sequencer client]
 
-    D --> O
-    O --> A
-    O --> S1[MbSession A]
-    O --> S2[MbSession B]
-    O --> S3[MbSession C]
+    D --> A
+    D --> S1[MbSession A]
+    D --> S2[MbSession B]
+    D --> S3[MbSession C]
 
     S1 --> P1[ALSA port 0]
     S2 --> P2[ALSA port 1]
@@ -100,33 +88,35 @@ flowchart TB
 
 ## Layer responsibilities
 
-### `mb-daemon`
+### `mb-daemon-main.c`
 
-`mb-daemon` is the process entry layer.  It owns:
+`mb-daemon-main.c` owns process entry concerns:
 
 ```text
 main()
-argument handling
-process startup
-exit code
-signal/cleanup boundary
+version handling
+argv display name normalization
+exit code boundary
 ```
 
-It should stay small and delegate runtime behavior to `mb-orchestrator`.
+### `mb-daemon.c`
 
-### `mb-orchestrator`
-
-`mb-orchestrator` owns runtime policy:
+`mb-daemon.c` owns runtime policy and daemon-owned resources:
 
 ```text
-session lifecycle
+config-directory runtime
+shared BlueZ bus
+shared ALSA Sequencer client
+one device runtime per configured BLE-MIDI device
+session lifecycle queue
 RX/TX coordination
 threaded runtime startup/shutdown
 queue push/consume decisions
 ALSA polling policy
 GATT notification callback policy
-reconnect policy, later
-multi-session policy, later
+reconnect policy
+control socket
+stats export v5
 ```
 
 ### Core/session modules
@@ -136,39 +126,55 @@ The session object and primitive runtime structures belong to the core:
 ```text
 mb-session
 mb-alsa
-mb-buffer
+mb-alsa-port
+mb-bluez
+mb-gatt-midi
+mb-ble-midi
 mb-runtime
 mb-duplex-runtime
 mb-slice-ring
 mb-frame-model
+mb-stats
 mb-log
+mb-paths
+mb-rtkit
 ```
 
-`mb-alsa` owns ALSA Sequencer event classification shared by the daemon and tests.
-In particular, ALSA Sequencer topology/control events such as `PORT_SUBSCRIBED`
-and `PORT_UNSUBSCRIBED` are not MIDI payload and must be rejected before
+`mb-alsa` owns ALSA Sequencer event classification shared by the daemon and
+tests. ALSA Sequencer topology/control events such as `PORT_SUBSCRIBED` and
+`PORT_UNSUBSCRIBED` are not MIDI payload and must be rejected before
 `snd_midi_event_decode()`.
 
-Remaining extraction targets from the legacy daemon implementation:
+## Removed legacy code
+
+The v1.0.0 cleanup removed or keeps removed:
 
 ```text
-mb-config
-mb-bluez
-mb-gatt
-mb-ble-midi
+src/midi-ble-rtd.c              former monolithic daemon
+mb-legacy-core.h                temporary compatibility shim
+mb-buffer.[ch]                  unused adaptive buffer prototype
+MbSessionBuffers                obsolete per-session buffer field
+MbSession.running_status        obsolete parser state field
+mb_alsa_port_open_duplex()      single-device ALSA wrapper
+mb_alsa_port_close()            single-device ALSA wrapper
+mb_stats_export_tsv()           obsolete stats.tsv v4 exporter
+test-mb-buffer                  tests for removed buffer prototype
 ```
+
+Do not reintroduce single-device daemon compatibility paths or hidden inclusion
+of implementation `.c` files.
 
 ## Session ownership rule
 
-The session object belongs to the core.  Session lifecycle policy belongs to the
-orchestrator.
+The session object belongs to the core. Session lifecycle policy belongs to the
+daemon runtime.
 
 ```text
 core:
   what is a session?
   what states and invariants are valid?
 
-orchestrator:
+daemon runtime:
   what should happen to this session now?
   when should it connect, notify, stream, reconnect or stop?
 ```
@@ -176,12 +182,12 @@ orchestrator:
 This improves debugging:
 
 ```text
-argument/config failure          -> mb-daemon
-state transition/reconnect issue -> mb-orchestrator / mb-session
+argument/config failure          -> mb-daemon-main / mb-config
+state transition/reconnect issue -> mb-daemon / mb-session
 ALSA event/decode issue          -> mb-alsa
-BlueZ/GATT issue                 -> mb-bluez / mb-gatt
+BlueZ/GATT issue                 -> mb-bluez / mb-gatt-midi
 BLE-MIDI packet issue            -> mb-ble-midi
-queue/drop/overflow issue        -> mb-buffer / mb-runtime
+queue/drop/overflow issue        -> mb-runtime / mb-slice-ring / mb-frame-model
 ```
 
 ## Session states
@@ -284,35 +290,7 @@ The address is authoritative. If the same address appears again with a different
 BlueZ object path, the daemon must reindex the existing `MbSession` instead of
 creating a duplicate.
 
-This prevents inconsistent indexes like:
-
-```text
-address index -> session A
-path index    -> session A and stale session B
-```
-
-## Identical keyboards
-
-Two identical Roland GO:KEYS units can expose the same name and the same GATT
-shape. That is normal.
-
-Correct model:
-
-```text
-GO:KEYS 11:22:33:44:55:66 -> Session A -> ALSA port A
-GO:KEYS AA:BB:CC:DD:EE:FF -> Session B -> ALSA port B
-```
-
 Name and alias are diagnostics only. They must not be decisive identity.
-
-A user-facing index is acceptable:
-
-```text
-gokeys-1 -> 11:22:33:44:55:66
-gokeys-2 -> AA:BB:CC:DD:EE:FF
-```
-
-But the index is only a label. It must resolve to a stored Bluetooth address.
 
 ## GO:KEYS operational rule
 
@@ -346,18 +324,11 @@ The Roland alias is treated as a quirk inside the standard BLE-MIDI service.
 
 ## Source layout
 
-Public process entry and orchestrator:
+Daemon executable/runtime:
 
 ```text
+src/mb-daemon-main.c
 src/mb-daemon.c
-src/mb-orchestrator.h
-src/mb-orchestrator.c
-```
-
-Current legacy daemon core still being extracted:
-
-```text
-src/midi-ble-rtd.c
 ```
 
 Core session/runtime model:
@@ -367,8 +338,14 @@ src/mb-session.h
 src/mb-session.c
 src/mb-alsa.h
 src/mb-alsa.c
-src/mb-buffer.h
-src/mb-buffer.c
+src/mb-alsa-port.h
+src/mb-alsa-port.c
+src/mb-bluez.h
+src/mb-bluez.c
+src/mb-gatt-midi.h
+src/mb-gatt-midi.c
+src/mb-ble-midi.h
+src/mb-ble-midi.c
 src/mb-runtime.h
 src/mb-runtime.c
 src/mb-duplex-runtime.h
@@ -377,13 +354,19 @@ src/mb-slice-ring.h
 src/mb-slice-ring.c
 src/mb-frame-model.h
 src/mb-frame-model.c
+src/mb-stats.h
+src/mb-stats.c
 src/mb-log.h
 src/mb-log.c
+src/mb-paths.h
+src/mb-paths.c
 ```
 
 Control plane:
 
 ```text
+src/mb-ctl-main.c
+src/mb-stats-ctl.c
 src/midi-ble-rtctl.c
 ```
 
@@ -391,21 +374,16 @@ Tests:
 
 ```text
 tests/test-mb-session.c
+tests/test-mb-session-state.c
 tests/test-mb-alsa.c
-tests/test-mb-buffer.c
+tests/test-mb-ble-midi.c
+tests/test-mb-config.c
 tests/test-mb-frame-model.c
 tests/test-mb-slice-ring.c
 tests/test-mb-runtime.c
 tests/test-mb-duplex-runtime.c
-```
-
-Supporting docs:
-
-```text
-docs/ARCHITECTURE.md
-docs/session-state.md
-docs/TESTING.md
-docs/ALSA.md
+tests/test-mb-paths.c
+tests/test-mb-control-protocol.c
 ```
 
 ## Session core tests
@@ -416,7 +394,7 @@ The GLib unit tests cover:
 single-session happy path to STREAMING
 BlueZ disconnect -> RECONNECTING
 independence between two sessions
-identical keyboard names with different addresses
+identical device names with different addresses
 duplicate address reuses/reindexes the same session
 error path for missing MIDI characteristic
 session removal and index cleanup
@@ -448,62 +426,24 @@ If the FluidSynth ALSA input port is not auto-detected:
 FLUIDSYNTH_PORT=128:0 scripts/test-fluidsynth-smoke.sh
 ```
 
-## Runtime refactor direction
+## Validation before v1.0.0
 
-The current user workflow remains compatible with:
-
-```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
-```
-
-The multi-session runtime should evolve toward:
+Before merging this cleanup to `master` and tagging v1.0.0:
 
 ```bash
-midi-ble-rtd --config gokeys-1.ini --config gokeys-2.ini
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-with:
+Then run the physical GO:KEYS smoke test:
 
 ```text
-1 ALSA client
-N ALSA ports
-N MbSession instances
-N BLE-MIDI parser states
+start daemon
+confirm STREAMING
+confirm ALSA client:port
+send TX via aplaymidi
+receive RX via aseqdump
+power-cycle device
+confirm RECONNECTING -> STREAMING
 ```
-
-The control plane may later grow a user-facing label map:
-
-```text
-gokeys-1 = 11:22:33:44:55:66
-gokeys-2 = AA:BB:CC:DD:EE:FF
-```
-
-The daemon must still resolve labels to addresses before selecting a device.
-
-## Implementation rule of thumb
-
-Keep BlueZ properties as snapshots, not as duplicated state ownership.
-
-Acceptable daemon-owned state:
-
-```text
-midi_char_path
-notify_enabled
-alsa_port_id
-parser running status
-runtime queue state
-reconnect attempts
-```
-
-BlueZ-owned state:
-
-```text
-Connected
-ServicesResolved
-Paired
-Trusted
-GATT object existence
-```
-
-The daemon may cache BlueZ values for decision-making, but it must not become the
-authority for Bluetooth truth.
