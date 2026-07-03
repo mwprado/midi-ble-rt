@@ -11,22 +11,23 @@ statistics, and try again periodically.
 
 ## Configuration
 
-Automatic reconnect is controlled by the device config:
+Automatic reconnect is controlled by the device policy config:
 
 ```ini
-[device]
-auto_reconnect = yes
+[policy]
+reconnect_on_link_loss = yes
 ```
 
-When `auto_reconnect = yes`, recoverable transport failures move the session to
-`RECONNECTING`. The daemon remains alive and retries connection attempts by timer.
+When `reconnect_on_link_loss = yes`, recoverable transport failures move the
+session to `RECONNECTING`. The daemon remains alive and retries connection
+attempts by timer.
 
-When `auto_reconnect = no`, those failures are treated as terminal for the
+When `reconnect_on_link_loss = no`, those failures are treated as terminal for the
 current daemon run and the session moves to `ERROR`.
 
 ## Timing constants
 
-The current orchestrator uses these timings:
+The current runtime uses these timings:
 
 | Operation | Timeout / interval | Meaning |
 | --- | ---: | --- |
@@ -55,7 +56,7 @@ IDLE
 -> STREAMING
 ```
 
-Expected reconnect path when the keyboard is unavailable:
+Expected reconnect path when the device is unavailable:
 
 ```text
 CONNECTING
@@ -64,7 +65,7 @@ CONNECTING
 -> ...
 ```
 
-Expected reconnect path after the keyboard comes back:
+Expected reconnect path after the device comes back:
 
 ```text
 RECONNECTING
@@ -78,7 +79,7 @@ RECONNECTING
 
 ## Recoverable failures
 
-With `auto_reconnect = yes`, these failures are recoverable:
+With `reconnect_on_link_loss = yes`, these failures are recoverable:
 
 | Failure | Session result |
 | --- | --- |
@@ -95,7 +96,7 @@ on the next successful connection attempt.
 ## Non-fatal ALSA errors
 
 Some ALSA events are not MIDI payload and must not kill the BLE session. The
-orchestrator ignores ALSA Sequencer control events before MIDI decode.
+daemon ignores ALSA Sequencer control events before MIDI decode.
 
 ALSA decode or I/O errors during `STREAMING` are recorded as non-fatal session
 errors and drops, but the session remains in `STREAMING` unless the runtime worker
@@ -154,11 +155,11 @@ file after a connection timeout.
 
 ## Manual test
 
-Start with the keyboard powered off:
+Start with the device powered off:
 
 ```bash
 rm -f /run/user/$UID/midi-ble-rt/stats.tsv
-midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini
+midi-ble-rtd --config ~/.config/midi-ble-rt
 ```
 
 Expected sequence:
@@ -177,9 +178,9 @@ Check stats:
 cat /run/user/$UID/midi-ble-rt/stats.tsv
 ```
 
-The `state` column should show `RECONNECTING` while the keyboard is unavailable.
+The `state` column should show `RECONNECTING` while the device is unavailable.
 
-Then power on the keyboard. On a later reconnect timer, the session should reach:
+Then power on the device. On a later reconnect timer, the session should reach:
 
 ```text
 Session: ENABLING_NOTIFY --NOTIFY_OK--> STREAMING
