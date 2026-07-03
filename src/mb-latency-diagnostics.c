@@ -182,6 +182,8 @@ void mb_latency_diagnostics_configure(bool enabled, unsigned interval_ms) {
         g_atomic_int_set(&latency_enabled_flag, 0);
 
     uint64_t now_ns = latency_now_ns();
+    char *content = NULL;
+    char *path = NULL;
 
     G_LOCK(latency_state);
     g_free(latency_state.path);
@@ -192,9 +194,19 @@ void mb_latency_diagnostics_configure(bool enabled, unsigned interval_ms) {
     latency_state.started_ns = now_ns;
     latency_state.window_started_ns = now_ns;
     latency_state.last_export_ns = now_ns;
-    if (enabled)
+
+    if (enabled) {
         latency_state.path = mb_latency_diagnostics_default_path();
+        content = latency_build_tsv_locked(now_ns);
+        path = g_strdup(latency_state.path);
+    }
     G_UNLOCK(latency_state);
+
+    if (content && path)
+        latency_write_file(path, content);
+
+    g_free(content);
+    g_free(path);
 
     if (enabled)
         g_atomic_int_set(&latency_enabled_flag, 1);
