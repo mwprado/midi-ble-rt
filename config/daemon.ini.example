@@ -29,7 +29,7 @@ latency_diagnostics = no
 # Optional RtKit scheduling for runtime RX/TX workers.
 # Keep disabled by default; enable only after collecting baseline latency/jitter.
 rtkit = no
-rt_priority = 10
+rt_priority = 1
 
 [debug]
 print_ble_packets = no
