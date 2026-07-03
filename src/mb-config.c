@@ -3,6 +3,7 @@
 #include "mb-ble-midi.h"
 #include "mb-timeouts.h"
 #include "mb-latency-diagnostics.h"
+#include "mb-rtkit.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -63,6 +64,31 @@ static unsigned keyfile_get_uint_default(GKeyFile *kf, const char *group, const 
     return (unsigned)value;
 }
 
+static unsigned keyfile_get_uint_range_default(GKeyFile *kf,
+                                               const char *group,
+                                               const char *key,
+                                               unsigned fallback,
+                                               unsigned min_value,
+                                               unsigned max_value) {
+    GError *error = NULL;
+    guint64 value = g_key_file_get_uint64(kf, group, key, &error);
+    if (error) {
+        g_clear_error(&error);
+        return fallback;
+    }
+
+    if (value < min_value || value > max_value) {
+        g_printerr("Invalid unsigned value for [%s].%s: '%" G_GUINT64_FORMAT "'; using default %u.\n",
+                   group,
+                   key,
+                   value,
+                   fallback);
+        return fallback;
+    }
+
+    return (unsigned)value;
+}
+
 static const char *str_nonempty_or(const char *value, const char *fallback) {
     return value && *value ? value : fallback;
 }
@@ -114,6 +140,13 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->stats_enabled = keyfile_get_bool_default(kf, "stats", "enabled", true);
     cfg->stats_latency_diagnostics = keyfile_get_bool_default(kf, "stats", "latency_diagnostics", false);
     cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", MB_STATS_DEFAULT_INTERVAL_MS);
+    cfg->rtkit_enabled = keyfile_get_bool_default(kf, "realtime", "rtkit", false);
+    cfg->rtkit_priority = keyfile_get_uint_range_default(kf,
+                                                        "realtime",
+                                                        "rt_priority",
+                                                        MB_RTKIT_DEFAULT_PRIORITY,
+                                                        1,
+                                                        MB_RTKIT_MAX_PRIORITY);
 }
 
 static MbDeviceConfig *mb_device_config_from_key_file(GKeyFile *kf,
@@ -177,6 +210,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_key_file_unref(daemon_kf);
         g_free(daemon_path);
+        mb_rtkit_configure(false, 0);
         mb_latency_diagnostics_configure(false, 0);
         return false;
     }
@@ -195,6 +229,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_free(devices_dir);
         mb_config_clear(&tmp);
+        mb_rtkit_configure(false, 0);
         mb_latency_diagnostics_configure(false, 0);
         return false;
     }
@@ -239,6 +274,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
 
     mb_config_clear(cfg);
     *cfg = tmp;
+    mb_rtkit_configure(cfg->rtkit_enabled, cfg->rtkit_priority);
     mb_latency_diagnostics_configure(cfg->stats_latency_diagnostics,
                                      cfg->stats_interval_ms);
     return true;
