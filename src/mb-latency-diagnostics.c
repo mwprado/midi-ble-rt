@@ -18,6 +18,13 @@ typedef struct {
 } MbLatencyAccumulator;
 
 typedef struct {
+    MbLatencyAccumulator latency;
+    MbLatencyAccumulator jitter;
+    uint64_t last_latency_ns;
+    bool has_last_latency;
+} MbLatencyMetric;
+
+typedef struct {
     bool enabled;
     unsigned interval_ms;
     uint64_t started_ns;
@@ -25,10 +32,10 @@ typedef struct {
     uint64_t last_export_ns;
     char *path;
 
-    MbLatencyAccumulator rx_queue;
-    MbLatencyAccumulator rx_total;
-    MbLatencyAccumulator tx_queue;
-    MbLatencyAccumulator tx_total;
+    MbLatencyMetric rx_queue;
+    MbLatencyMetric rx_total;
+    MbLatencyMetric tx_queue;
+    MbLatencyMetric tx_total;
 } MbLatencyState;
 
 G_LOCK_DEFINE_STATIC(latency_state);
@@ -100,35 +107,70 @@ static unsigned latency_accumulator_percentile_ms(const MbLatencyAccumulator *ac
     return MB_LATENCY_BUCKETS - 1u;
 }
 
+static void latency_metric_reset(MbLatencyMetric *metric) {
+    if (!metric)
+        return;
+
+    latency_accumulator_reset(&metric->latency);
+    latency_accumulator_reset(&metric->jitter);
+    metric->last_latency_ns = 0;
+    metric->has_last_latency = false;
+}
+
+static void latency_metric_observe(MbLatencyMetric *metric, uint64_t latency_ns) {
+    if (!metric)
+        return;
+
+    latency_accumulator_observe(&metric->latency, latency_ns);
+
+    if (metric->has_last_latency) {
+        uint64_t jitter_ns = latency_ns >= metric->last_latency_ns
+                              ? latency_ns - metric->last_latency_ns
+                              : metric->last_latency_ns - latency_ns;
+        latency_accumulator_observe(&metric->jitter, jitter_ns);
+    }
+
+    metric->last_latency_ns = latency_ns;
+    metric->has_last_latency = true;
+}
+
 static const char *latency_direction_name(MbLatencyDirection direction) {
     return direction == MB_LATENCY_TX ? "TX" : "RX";
 }
 
 static void latency_append_row(GString *content,
                                MbLatencyDirection direction,
-                               const char *metric,
-                               const MbLatencyAccumulator *acc,
+                               const char *metric_name,
+                               const MbLatencyMetric *metric,
                                uint64_t uptime_ms,
                                uint64_t window_ms) {
+    const MbLatencyAccumulator *latency = metric ? &metric->latency : NULL;
+    const MbLatencyAccumulator *jitter = metric ? &metric->jitter : NULL;
+
     g_string_append_printf(
         content,
-        "global\t%s\t%s\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%u\t%u\t%.3f\n",
+        "global\t%s\t%s\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%" G_GUINT64_FORMAT "\t%.3f\t%u\t%u\t%.3f\t%" G_GUINT64_FORMAT "\t%.3f\t%u\t%u\t%.3f\n",
         latency_direction_name(direction),
-        metric,
+        metric_name,
         uptime_ms,
         window_ms,
-        acc ? acc->count : 0,
-        latency_accumulator_avg_ms(acc),
-        latency_accumulator_percentile_ms(acc, 95),
-        latency_accumulator_percentile_ms(acc, 99),
-        acc ? latency_ns_to_ms_double(acc->max_ns) : 0.0);
+        latency ? latency->count : 0,
+        latency_accumulator_avg_ms(latency),
+        latency_accumulator_percentile_ms(latency, 95),
+        latency_accumulator_percentile_ms(latency, 99),
+        latency ? latency_ns_to_ms_double(latency->max_ns) : 0.0,
+        jitter ? jitter->count : 0,
+        latency_accumulator_avg_ms(jitter),
+        latency_accumulator_percentile_ms(jitter, 95),
+        latency_accumulator_percentile_ms(jitter, 99),
+        jitter ? latency_ns_to_ms_double(jitter->max_ns) : 0.0);
 }
 
 static void latency_reset_window_locked(uint64_t now_ns) {
-    latency_accumulator_reset(&latency_state.rx_queue);
-    latency_accumulator_reset(&latency_state.rx_total);
-    latency_accumulator_reset(&latency_state.tx_queue);
-    latency_accumulator_reset(&latency_state.tx_total);
+    latency_metric_reset(&latency_state.rx_queue);
+    latency_metric_reset(&latency_state.rx_total);
+    latency_metric_reset(&latency_state.tx_queue);
+    latency_metric_reset(&latency_state.tx_total);
     latency_state.window_started_ns = now_ns;
     latency_state.last_export_ns = now_ns;
 }
@@ -143,8 +185,8 @@ static char *latency_build_tsv_locked(uint64_t now_ns) {
         window_ms = latency_ns_to_ms_u64(now_ns - latency_state.window_started_ns);
 
     GString *content = g_string_new(
-        "v1\n"
-        "scope\tdir\tmetric\tuptime_ms\twindow_ms\tcount\tavg_ms\tp95_ms\tp99_ms\tmax_ms\n");
+        "v2\n"
+        "scope\tdir\tmetric\tuptime_ms\twindow_ms\tcount\tavg_ms\tp95_ms\tp99_ms\tmax_ms\tjitter_count\tjitter_avg_ms\tjitter_p95_ms\tjitter_p99_ms\tjitter_max_ms\n");
 
     latency_append_row(content, MB_LATENCY_RX, "queue", &latency_state.rx_queue, uptime_ms, window_ms);
     latency_append_row(content, MB_LATENCY_RX, "total", &latency_state.rx_total, uptime_ms, window_ms);
@@ -234,11 +276,11 @@ void mb_latency_diagnostics_record(MbLatencyDirection direction,
     G_LOCK(latency_state);
     if (latency_state.enabled && latency_state.path) {
         if (direction == MB_LATENCY_TX) {
-            latency_accumulator_observe(&latency_state.tx_queue, queue_ns);
-            latency_accumulator_observe(&latency_state.tx_total, total_ns);
+            latency_metric_observe(&latency_state.tx_queue, queue_ns);
+            latency_metric_observe(&latency_state.tx_total, total_ns);
         } else {
-            latency_accumulator_observe(&latency_state.rx_queue, queue_ns);
-            latency_accumulator_observe(&latency_state.rx_total, total_ns);
+            latency_metric_observe(&latency_state.rx_queue, queue_ns);
+            latency_metric_observe(&latency_state.rx_total, total_ns);
         }
 
         uint64_t interval_ns = (uint64_t)latency_state.interval_ms * 1000000ULL;
