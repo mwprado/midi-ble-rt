@@ -37,6 +37,8 @@ typedef struct MbConfig {
     bool stats_enabled;
     bool stats_latency_diagnostics;
     unsigned stats_interval_ms;
+    bool rtkit_enabled;
+    unsigned rtkit_priority;
 
     GPtrArray *devices; /* element type: MbDeviceConfig* */
 } MbConfig;
