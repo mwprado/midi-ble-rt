@@ -7,7 +7,7 @@
 
 G_BEGIN_DECLS
 
-#define MB_RTKIT_DEFAULT_PRIORITY 10u
+#define MB_RTKIT_DEFAULT_PRIORITY 1u
 #define MB_RTKIT_MAX_PRIORITY 20u
 
 void mb_rtkit_configure(bool enabled, unsigned priority);
