@@ -11,10 +11,6 @@ static void replace_string(char **dst, const char *src) {
     *dst = dup_or_null(src);
 }
 
-static uint64_t mb_now_ns(void) {
-    return (uint64_t)g_get_monotonic_time() * 1000ULL;
-}
-
 static void mb_session_reset_runtime(MbSession *session, bool keep_alsa_port) {
     if (!session)
         return;
@@ -23,7 +19,6 @@ static void mb_session_reset_runtime(MbSession *session, bool keep_alsa_port) {
     session->services_resolved = false;
     session->notify_enabled = false;
     session->running_status = 0;
-    mb_session_buffers_reset(&session->buffers, mb_now_ns());
 
     g_clear_pointer(&session->midi_service_path, g_free);
     g_clear_pointer(&session->midi_char_path, g_free);
@@ -116,7 +111,6 @@ void mb_session_init(MbSession *session,
     session->error = MB_ERR_NONE;
     session->alsa_port_id = -1;
     session->auto_reconnect = true;
-    mb_session_buffers_init(&session->buffers, mb_now_ns());
     mb_session_set_identity(session, device_path, address, name);
 }
 
@@ -141,7 +135,6 @@ void mb_session_clear(MbSession *session) {
 
     memset(session, 0, sizeof(*session));
     session->alsa_port_id = -1;
-    mb_session_buffers_init(&session->buffers, mb_now_ns());
 }
 
 void mb_session_free(MbSession *session) {
