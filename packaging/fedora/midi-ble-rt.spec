@@ -33,7 +33,7 @@ project target is any usable BLE-MIDI instrument, controller, module or adapter.
 %autosetup -n %{name}-%{version}
 
 %build
-%cmake -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DSYSTEMD_USER_UNIT_DIR=%{_userunitdir}
+%cmake -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DMIDI_BLE_RT_VERSION=%{version} -DSYSTEMD_USER_UNIT_DIR=%{_userunitdir}
 %cmake_build
 
 %install
