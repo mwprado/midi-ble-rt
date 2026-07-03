@@ -35,6 +35,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-latency-diagnostics.c
     src/mb-log.c
     src/mb-paths.c
+    src/mb-rtkit.c
     src/mb-runtime.c
     src/mb-session.c
     src/mb-slice-ring.c
