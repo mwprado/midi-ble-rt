@@ -60,6 +60,7 @@ target_link_libraries(midi-ble-rt-core PUBLIC ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rt-core PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
 
 add_executable(midi-ble-rtd
+    src/mb-daemon-main.c
     src/mb-daemon.c
 )
 
@@ -67,6 +68,10 @@ add_executable(midi-ble-rtctl
     src/mb-ctl-main.c
     src/mb-stats-ctl.c
     src/midi-ble-rtctl.c
+)
+
+set_source_files_properties(src/mb-daemon.c
+    PROPERTIES COMPILE_DEFINITIONS "main=midi_ble_rtd_runtime_main"
 )
 
 set_source_files_properties(src/mb-stats-ctl.c
