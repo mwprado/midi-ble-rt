@@ -141,6 +141,8 @@ static void mb_config_load_daemon_from_key_file(MbConfig *cfg, GKeyFile *kf) {
     cfg->stats_latency_diagnostics = keyfile_get_bool_default(kf, "stats", "latency_diagnostics", false);
     cfg->stats_interval_ms = keyfile_get_uint_default(kf, "stats", "interval_ms", MB_STATS_DEFAULT_INTERVAL_MS);
     cfg->rtkit_enabled = keyfile_get_bool_default(kf, "realtime", "rtkit", false);
+    cfg->rtkit_realtime_rx = keyfile_get_bool_default(kf, "realtime", "realtime_rx", true);
+    cfg->rtkit_realtime_tx = keyfile_get_bool_default(kf, "realtime", "realtime_tx", false);
     cfg->rtkit_priority = keyfile_get_uint_range_default(kf,
                                                         "realtime",
                                                         "rt_priority",
@@ -210,7 +212,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_key_file_unref(daemon_kf);
         g_free(daemon_path);
-        mb_rtkit_configure(false, 0);
+        mb_rtkit_configure(false, 0, false, false);
         mb_latency_diagnostics_configure(false, 0);
         return false;
     }
@@ -229,7 +231,7 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
         g_clear_error(&error);
         g_free(devices_dir);
         mb_config_clear(&tmp);
-        mb_rtkit_configure(false, 0);
+        mb_rtkit_configure(false, 0, false, false);
         mb_latency_diagnostics_configure(false, 0);
         return false;
     }
@@ -274,7 +276,10 @@ bool mb_config_load_dir(MbConfig *cfg, const char *dir_path) {
 
     mb_config_clear(cfg);
     *cfg = tmp;
-    mb_rtkit_configure(cfg->rtkit_enabled, cfg->rtkit_priority);
+    mb_rtkit_configure(cfg->rtkit_enabled,
+                       cfg->rtkit_priority,
+                       cfg->rtkit_realtime_rx,
+                       cfg->rtkit_realtime_tx);
     mb_latency_diagnostics_configure(cfg->stats_latency_diagnostics,
                                      cfg->stats_interval_ms);
     return true;
