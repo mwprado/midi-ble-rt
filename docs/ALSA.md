@@ -9,7 +9,7 @@ The project should not depend on PipeWire, JACK, a DAW API or any desktop-sessio
 The daemon should expose BLE-MIDI devices as ALSA Sequencer ports:
 
 ```text
-BLE-MIDI keyboard/controller
+BLE-MIDI instrument/controller
 → BlueZ GATT
 → midi-ble-rtd
 → ALSA Sequencer client/port
@@ -69,11 +69,18 @@ Each device should have a predictable ALSA port name derived from the configured
 Example:
 
 ```ini
-[device.roland-gokeys]
+[device]
+id = roland-gokeys
 address = CB:81:F4:62:FF:07
 profile = roland_gokeys
-alsa_client_name = midi-ble-rt
 alsa_port_name = Roland GO:KEYS BLE-MIDI
+```
+
+The shared ALSA client name comes from the daemon config:
+
+```ini
+[daemon]
+client_name = midi-ble-rt
 ```
 
 ## PipeWire note
@@ -87,18 +94,11 @@ aseqdump
 
 ## Troubleshooting
 
-If the daemon receives BLE packets but no ALSA port appears:
+If the daemon receives BLE packets but no ALSA port appears, inspect the ALSA Sequencer device and clients directly:
 
 ```bash
 aconnect -l
 ls -l /dev/snd/seq
-ls -Z /dev/snd/seq
-getenforce
 ```
 
-If SELinux is enforcing and the port does not appear or ALSA open fails, check:
-
-```bash
-./scripts/selinux-diagnose.sh
-sudo ausearch -m avc,user_avc -ts recent
-```
+If `/dev/snd/seq` is missing, the ALSA Sequencer kernel interface is not available in the current environment. If it exists but the daemon still cannot create a port, inspect daemon logs and regular file permissions for the user session running `midi-ble-rtd`.
