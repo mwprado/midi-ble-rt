@@ -18,7 +18,6 @@ static void mb_session_reset_runtime(MbSession *session, bool keep_alsa_port) {
     session->bluez_connected = false;
     session->services_resolved = false;
     session->notify_enabled = false;
-    session->running_status = 0;
 
     g_clear_pointer(&session->midi_service_path, g_free);
     g_clear_pointer(&session->midi_char_path, g_free);
