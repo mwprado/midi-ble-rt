@@ -249,7 +249,7 @@ no runtime dependency on private internal libraries
 regular Fedora install works
 rpm-ostree install works
 systemd user service works
-SELinux behavior is documented or policy is supplied
+system policy behavior is documented or policy is supplied
 Roland GO:KEYS is validated
 at least one standard BLE-MIDI device is validated
 midi-ble-rtctl scan/list/probe/connect/disconnect/forget is stable

@@ -406,7 +406,6 @@ docs/ARCHITECTURE.md
 docs/session-state.md
 docs/TESTING.md
 docs/ALSA.md
-docs/SELINUX.md
 ```
 
 ## Session core tests

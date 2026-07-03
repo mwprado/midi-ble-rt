@@ -358,7 +358,6 @@ The generic path requires the BLE-MIDI GATT service.
 
 - check whether `/dev/snd/seq` is available;
 - run `aconnect -l`;
-- see `docs/SELINUX.md` if SELinux blocks the ALSA Sequencer side.
 
 ## 14. When to create a device-specific profile
 
