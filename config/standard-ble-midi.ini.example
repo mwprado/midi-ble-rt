@@ -1,52 +1,14 @@
-[device]
-# Generic BLE-MIDI device configuration.
-# Replace this with the Bluetooth address shown by:
-#   midi-ble-rtctl scan --timeout 10 --midi-only
-#   midi-ble-rtctl list --midi-only
-address = AA:BB:CC:DD:EE:FF
-
-# Diagnostic only. Address is the technical identity.
-# Keep this broad for generic devices, or replace it with the observed name.
-name = BLE-MIDI
-
-# Generic BLE-MIDI devices should not assume vendor-specific connection order.
-connect_order = default
-
-# Pairing may require an external/default BlueZ Agent until Agent1 support is
-# implemented in midi-ble-rtd.
-pair = no
-trust = yes
-
-# Keep the daemon alive on recoverable BlueZ/GATT failures.
-# With auto_reconnect=yes, recoverable failures move the session to RECONNECTING.
-# Current timings: Connect 30 s, ServicesResolved 15 s, StartNotify 15 s,
-# WriteValue 5 s, health check 1 s, reconnect retry 10 s.
-# See docs/SESSION_RESILIENCE.md.
-auto_reconnect = yes
-
-[gatt]
-# Official BLE-MIDI service UUID.
-service_uuid = 03b80e5a-ede8-4b33-a751-6ce34ec4c700
-
-# Official BLE-MIDI I/O characteristic UUID.
-io_uuid = 7772e5db-3868-4112-a1a9-f2669d106bf3
-
-# Generic config intentionally leaves vendor aliases empty.
-# Device-specific configs may set aliases such as the Roland GO:KEYS UUID.
-io_uuid_alias =
-
-require_notify = yes
-require_write_without_response = yes
-
-[alsa]
-client_name = midi-ble-rt
-port_name = BLE-MIDI
-
-[midi]
-# Enable ALSA Sequencer -> BLE-MIDI WriteValue path.
-# Disable if the device exposes receive-only behavior or if TX is unstable.
-enable_tx = yes
-
-[debug]
-print_ble_packets = no
-print_midi_events = no
+# Deprecated legacy single-file example.
+#
+# Current runtime validation uses the directory layout:
+#
+#   daemon.ini
+#   devices.d/*.ini
+#
+# Use:
+#
+#   config/daemon.ini.example
+#   config/devices.d/standard-ble-midi.ini.example
+#
+# This file remains only as a compatibility marker for older documentation and
+# should not be used with the current config-directory runtime.
