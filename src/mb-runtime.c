@@ -1,6 +1,7 @@
 #include "mb-runtime.h"
 
 #include "mb-latency-diagnostics.h"
+#include "mb-rtkit.h"
 
 #include <string.h>
 
@@ -29,6 +30,8 @@ static void mb_runtime_flow_notify_depth(MbRuntimeFlow *flow) {
 
 static gpointer runtime_flow_thread(gpointer data) {
     MbRuntimeFlow *flow = data;
+
+    mb_rtkit_make_current_thread_realtime(flow ? flow->name : "runtime-flow");
 
     for (;;) {
         g_mutex_lock(&flow->wake_lock);
