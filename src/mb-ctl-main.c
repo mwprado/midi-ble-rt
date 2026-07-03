@@ -9,12 +9,66 @@
 
 int midi_ble_rtctl_stats_main(int argc, char **argv);
 
+static bool is_help_arg(const char *s) {
+    return g_strcmp0(s, "--help") == 0 || g_strcmp0(s, "-h") == 0;
+}
+
 static void latency_usage(const char *argv0, const char *cmd) {
     g_printerr(
         "Usage:\n"
         "  %s %s [--path PATH]\n"
         "  %s latency-top [--path PATH] [--interval MS]\n",
         argv0, cmd, argv0);
+}
+
+static void latency_help_global(const char *argv0) {
+    g_print(
+        "\n"
+        "Latency diagnostics commands:\n"
+        "  latency      Print latency.tsv diagnostics snapshot\n"
+        "  latency-top  Watch latency.tsv diagnostics continuously\n"
+        "\n"
+        "Help:\n"
+        "  %s help latency\n"
+        "  %s help latency-top\n"
+        "\n",
+        argv0, argv0);
+}
+
+static void latency_help_command(const char *argv0, const char *cmd) {
+    if (g_strcmp0(cmd, "latency-top") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s latency-top [--path PATH] [--interval MS]\n"
+            "\n"
+            "Description:\n"
+            "  Repeatedly prints the live latency diagnostics file.\n"
+            "  Start midi-ble-rtd with [stats] latency_diagnostics = yes first.\n"
+            "\n"
+            "Options:\n"
+            "  --path PATH\n"
+            "      Read a non-default latency.tsv file.\n"
+            "\n"
+            "  --interval MS\n"
+            "      Refresh interval. Values are clamped to the ctl stats limits.\n"
+            "\n",
+            argv0);
+        return;
+    }
+
+    g_print(
+        "Usage:\n"
+        "  %s latency [--path PATH]\n"
+        "\n"
+        "Description:\n"
+        "  Prints the live latency diagnostics file once.\n"
+        "  Start midi-ble-rtd with [stats] latency_diagnostics = yes first.\n"
+        "\n"
+        "Options:\n"
+        "  --path PATH\n"
+        "      Read a non-default latency.tsv file.\n"
+        "\n",
+        argv0);
 }
 
 static int latency_print_file(const char *path) {
@@ -41,7 +95,11 @@ static int latency_command(int argc, char **argv, bool watch) {
     unsigned interval_ms = MB_STATS_CTL_DEFAULT_INTERVAL_MS;
 
     for (int i = 2; i < argc; i++) {
-        if (g_strcmp0(argv[i], "--path") == 0 && i + 1 < argc) {
+        if (is_help_arg(argv[i])) {
+            latency_help_command(argv[0], watch ? "latency-top" : "latency");
+            g_free(path);
+            return 0;
+        } else if (g_strcmp0(argv[i], "--path") == 0 && i + 1 < argc) {
             g_free(path);
             path = g_strdup(argv[++i]);
         } else if (watch && g_strcmp0(argv[i], "--interval") == 0 && i + 1 < argc) {
@@ -71,11 +129,24 @@ static int latency_command(int argc, char **argv, bool watch) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && g_strcmp0(argv[1], "help") == 0 &&
+        (g_strcmp0(argv[2], "latency") == 0 || g_strcmp0(argv[2], "latency-top") == 0)) {
+        latency_help_command(argv[0], argv[2]);
+        return 0;
+    }
+
     if (argc >= 2 && g_strcmp0(argv[1], "latency") == 0)
         return latency_command(argc, argv, false);
 
     if (argc >= 2 && g_strcmp0(argv[1], "latency-top") == 0)
         return latency_command(argc, argv, true);
+
+    if ((argc == 2 && is_help_arg(argv[1])) ||
+        (argc == 2 && g_strcmp0(argv[1], "help") == 0)) {
+        int rc = midi_ble_rtctl_stats_main(argc, argv);
+        latency_help_global(argv[0]);
+        return rc;
+    }
 
     return midi_ble_rtctl_stats_main(argc, argv);
 }
