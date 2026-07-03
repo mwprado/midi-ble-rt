@@ -1,7 +1,7 @@
 # Generic BLE-MIDI device tutorial
 
-This tutorial shows how to use `midi-ble-rt` with a generic BLE-MIDI
-instrument, controller or MIDI adapter using the standard configuration.
+This tutorial shows how to use `midi-ble-rt` with a generic BLE-MIDI instrument,
+controller or MIDI adapter using the standard directory-based configuration.
 
 The device does not need to be a keyboard. It can be any standards-compliant
 BLE-MIDI device, for example:
@@ -44,16 +44,6 @@ On regular Fedora:
 sudo dnf install 'dnf-command(copr)'
 sudo dnf copr enable mwprado/cangaceiro
 sudo dnf install midi-ble-rt
-```
-
-On Fedora Atomic / rpm-ostree systems:
-
-```bash
-fedora_version=$(rpm -E %fedora)
-sudo curl -L -o /etc/yum.repos.d/_copr_mwprado-cangaceiro.repo \
-  "https://copr.fedorainfracloud.org/coprs/mwprado/cangaceiro/repo/fedora-${fedora_version}/mwprado-cangaceiro-fedora-${fedora_version}.repo"
-sudo rpm-ostree install midi-ble-rt
-systemctl reboot
 ```
 
 Installed commands:
@@ -126,39 +116,47 @@ device to BlueZ. If the characteristic exists but does not support notification,
 receive will not work. If write support is missing or unstable, transmit may need
 to be disabled.
 
-## 5. Copy the standard configuration
+## 5. Copy the standard directory configuration
 
 For an installed package:
 
 ```bash
-mkdir -p ~/.config/midi-ble-rt
-cp /usr/share/midi-ble-rt/config/standard-ble-midi.ini.example \
-   ~/.config/midi-ble-rt/standard-ble-midi.ini
+mkdir -p ~/.config/midi-ble-rt/devices.d
+cp /usr/share/midi-ble-rt/config/daemon.ini.example \
+   ~/.config/midi-ble-rt/daemon.ini
+cp /usr/share/midi-ble-rt/config/devices.d/standard-ble-midi.ini.example \
+   ~/.config/midi-ble-rt/devices.d/standard-ble-midi.ini
 ```
 
 For a local build tree:
 
 ```bash
-mkdir -p ~/.config/midi-ble-rt
-cp config/standard-ble-midi.ini.example \
-   ~/.config/midi-ble-rt/standard-ble-midi.ini
+mkdir -p ~/.config/midi-ble-rt/devices.d
+cp config/daemon.ini.example ~/.config/midi-ble-rt/daemon.ini
+cp config/devices.d/standard-ble-midi.ini.example \
+   ~/.config/midi-ble-rt/devices.d/standard-ble-midi.ini
 ```
 
-Edit the file:
+Edit the device file:
 
 ```bash
-$EDITOR ~/.config/midi-ble-rt/standard-ble-midi.ini
+$EDITOR ~/.config/midi-ble-rt/devices.d/standard-ble-midi.ini
 ```
 
-Replace only the address first:
+Replace the address and enable startup connection:
 
 ```ini
 [device]
+id = generic-example
+enabled = yes
 address = AA:BB:CC:DD:EE:FF
 name = BLE-MIDI
+profile = standard_ble_midi
+connect_on_start = yes
+alsa_port_name = BLE-MIDI
 ```
 
-Keep the standard GATT section unchanged for the first test:
+Keep the standard GATT section in `daemon.ini` unchanged for the first test:
 
 ```ini
 [gatt]
@@ -174,12 +172,13 @@ aliases belong in device-specific configs or profiles, not in the generic path.
 
 ## 6. Pair or trust only if the device requires it
 
-The standard config starts conservative:
+The standard policy starts conservative:
 
 ```ini
+[policy]
 pair = no
 trust = yes
-auto_reconnect = yes
+reconnect_on_link_loss = yes
 ```
 
 If the device works without explicit pairing, leave pairing disabled.
@@ -197,17 +196,17 @@ Then probe again:
 midi-ble-rtctl probe AA:BB:CC:DD:EE:FF
 ```
 
-## 7. Start the daemon with the standard config
+## 7. Start the daemon with the config directory
 
 ```bash
-midi-ble-rtd --config ~/.config/midi-ble-rt/standard-ble-midi.ini
+midi-ble-rtd --config ~/.config/midi-ble-rt
 ```
 
 Expected startup marker:
 
 ```text
 midi-ble-rtd
-Runtime: orchestrator
+Runtime: config-directory multi-session
 ```
 
 The daemon should connect through BlueZ/GATT, subscribe to BLE-MIDI
@@ -224,9 +223,8 @@ aconnect -l
 Look for the `midi-ble-rt` client and the configured port name:
 
 ```ini
-[alsa]
-client_name = midi-ble-rt
-port_name = BLE-MIDI
+[device]
+alsa_port_name = BLE-MIDI
 ```
 
 Use the numeric `CLIENT:PORT` shown by `aconnect -l`, for example:
@@ -256,8 +254,7 @@ Stop recording with `Ctrl+C`.
 
 ## 10. Send MIDI to the device
 
-If the device receives MIDI over BLE-MIDI, send a MIDI file to the same ALSA
-port:
+If the device receives MIDI over BLE-MIDI, send a MIDI file to the same ALSA port:
 
 ```bash
 aplaymidi -p 128:0 test.mid
@@ -281,11 +278,11 @@ Then restart the daemon.
 
 ## 11. Check reconnect behavior
 
-The standard config enables reconnect:
+The standard policy enables reconnect:
 
 ```ini
-[device]
-auto_reconnect = yes
+[policy]
+reconnect_on_link_loss = yes
 ```
 
 On recoverable BlueZ/GATT failures, the session should move to `RECONNECTING`
@@ -312,7 +309,25 @@ Expected recovery states:
 CONNECTING -> RECONNECTING -> STREAMING
 ```
 
-## 12. Troubleshooting checklist
+## 12. Optional latency diagnostics
+
+Enable diagnostics in `daemon.ini`:
+
+```ini
+[stats]
+enabled = yes
+interval_ms = 1000
+latency_diagnostics = yes
+```
+
+Then inspect:
+
+```bash
+midi-ble-rtctl latency
+midi-ble-rtctl latency-top --interval 1000
+```
+
+## 13. Troubleshooting checklist
 
 ### Device does not appear in scan
 
@@ -345,13 +360,13 @@ The generic path requires the BLE-MIDI GATT service.
 - run `aconnect -l`;
 - see `docs/SELINUX.md` if SELinux blocks the ALSA Sequencer side.
 
-## 13. When to create a device-specific profile
+## 14. When to create a device-specific profile
 
-Keep using `standard-ble-midi.ini` when the device follows the official BLE-MIDI
-UUIDs and behaves normally.
+Keep using `standard_ble_midi` when the device follows the official BLE-MIDI UUIDs
+and behaves normally.
 
-Create a device-specific config/profile only when the device requires a quirk,
-for example:
+Create a device-specific config/profile only when the device requires a quirk, for
+example:
 
 - alternative I/O characteristic UUID;
 - mandatory pairing before notification;
