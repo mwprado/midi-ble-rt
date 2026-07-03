@@ -1,0 +1,17 @@
+scenario	dir	metric	samples	events_sum	lat_avg_max_ms	lat_p95_max_ms	lat_p99_max_ms	lat_max_ms	jitter_events_sum	jitter_avg_max_ms	jitter_p95_max_ms	jitter_p99_max_ms	jitter_max_ms
+aplaymidi	RX	queue	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+aplaymidi	RX	total	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+aplaymidi	TX	queue	30	169	0.928	2.000	2.000	2.260	139	1.701	2.000	2.000	2.190
+aplaymidi	TX	total	30	169	2.174	3.000	3.000	3.305	139	1.603	1.000	1.000	1.952
+chords	RX	queue	30	345	0.545	0.000	0.000	0.973	319	0.189	0.000	0.000	0.692
+chords	RX	total	30	345	0.589	0.000	0.000	0.983	319	0.186	0.000	0.000	0.673
+chords	TX	queue	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+chords	TX	total	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+idle-connected	RX	queue	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+idle-connected	RX	total	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+idle-connected	TX	queue	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+idle-connected	TX	total	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+short-notes	RX	queue	30	258	0.107	0.000	0.000	0.387	228	0.075	0.000	0.000	0.300
+short-notes	RX	total	30	258	0.123	0.000	0.000	0.403	228	0.077	0.000	0.000	0.294
+short-notes	TX	queue	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
+short-notes	TX	total	30	0	0.000	0.000	0.000	0.000	0	0.000	0.000	0.000	0.000
