@@ -13,6 +13,10 @@ static bool is_help_arg(const char *s) {
     return g_strcmp0(s, "--help") == 0 || g_strcmp0(s, "-h") == 0;
 }
 
+static const char *ctl_argv0(void) {
+    return "midi-ble-rtctl";
+}
+
 static void latency_usage(const char *argv0, const char *cmd) {
     g_printerr(
         "Usage:\n"
@@ -93,10 +97,11 @@ static int latency_print_file(const char *path) {
 static int latency_command(int argc, char **argv, bool watch) {
     char *path = mb_latency_diagnostics_default_path();
     unsigned interval_ms = MB_STATS_CTL_DEFAULT_INTERVAL_MS;
+    const char *argv0 = ctl_argv0();
 
     for (int i = 2; i < argc; i++) {
         if (is_help_arg(argv[i])) {
-            latency_help_command(argv[0], watch ? "latency-top" : "latency");
+            latency_help_command(argv0, watch ? "latency-top" : "latency");
             g_free(path);
             return 0;
         } else if (g_strcmp0(argv[i], "--path") == 0 && i + 1 < argc) {
@@ -109,7 +114,7 @@ static int latency_command(int argc, char **argv, bool watch) {
             if (interval_ms > MB_STATS_CTL_MAX_INTERVAL_MS)
                 interval_ms = MB_STATS_CTL_MAX_INTERVAL_MS;
         } else {
-            latency_usage(argv[0], watch ? "latency-top" : "latency");
+            latency_usage(argv0, watch ? "latency-top" : "latency");
             g_free(path);
             return 2;
         }
@@ -129,24 +134,38 @@ static int latency_command(int argc, char **argv, bool watch) {
 }
 
 int main(int argc, char **argv) {
+    char **display_argv = g_new0(char *, (gsize)argc + 1);
+    for (int i = 0; i < argc; i++)
+        display_argv[i] = argv[i];
+    if (argc > 0)
+        display_argv[0] = (char *)ctl_argv0();
+
     if (argc == 3 && g_strcmp0(argv[1], "help") == 0 &&
         (g_strcmp0(argv[2], "latency") == 0 || g_strcmp0(argv[2], "latency-top") == 0)) {
-        latency_help_command(argv[0], argv[2]);
+        latency_help_command(ctl_argv0(), argv[2]);
+        g_free(display_argv);
         return 0;
     }
 
-    if (argc >= 2 && g_strcmp0(argv[1], "latency") == 0)
+    if (argc >= 2 && g_strcmp0(argv[1], "latency") == 0) {
+        g_free(display_argv);
         return latency_command(argc, argv, false);
+    }
 
-    if (argc >= 2 && g_strcmp0(argv[1], "latency-top") == 0)
+    if (argc >= 2 && g_strcmp0(argv[1], "latency-top") == 0) {
+        g_free(display_argv);
         return latency_command(argc, argv, true);
+    }
 
     if ((argc == 2 && is_help_arg(argv[1])) ||
         (argc == 2 && g_strcmp0(argv[1], "help") == 0)) {
-        int rc = midi_ble_rtctl_stats_main(argc, argv);
-        latency_help_global(argv[0]);
+        int rc = midi_ble_rtctl_stats_main(argc, display_argv);
+        latency_help_global(ctl_argv0());
+        g_free(display_argv);
         return rc;
     }
 
-    return midi_ble_rtctl_stats_main(argc, argv);
+    int rc = midi_ble_rtctl_stats_main(argc, display_argv);
+    g_free(display_argv);
+    return rc;
 }
