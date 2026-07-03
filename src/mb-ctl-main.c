@@ -1,5 +1,6 @@
 #include "mb-latency-diagnostics.h"
 #include "mb-timeouts.h"
+#include "mb-version.h"
 
 #include <errno.h>
 #include <glib.h>
@@ -13,8 +14,26 @@ static bool is_help_arg(const char *s) {
     return g_strcmp0(s, "--help") == 0 || g_strcmp0(s, "-h") == 0;
 }
 
+static bool is_version_arg(const char *s) {
+    return g_strcmp0(s, "-v") == 0 || g_strcmp0(s, "--version") == 0;
+}
+
+static bool is_verbose_version_arg(const char *s) {
+    return g_strcmp0(s, "-vv") == 0 || g_strcmp0(s, "--version-verbose") == 0;
+}
+
 static const char *ctl_argv0(void) {
     return "midi-ble-rtctl";
+}
+
+static void ctl_print_version(bool verbose) {
+    g_print("midi-ble-rtctl %s\n", MB_VERSION);
+    if (!verbose)
+        return;
+
+    g_print("project: midi-ble-rt\n");
+    g_print("role: ctl\n");
+    g_print("features: bluez-control daemon-control stats latency\n");
 }
 
 static void ctl_help_global(void) {
@@ -25,6 +44,8 @@ static void ctl_help_global(void) {
         "Usage:\n"
         "  %s COMMAND [ARGS...]\n"
         "  %s --help\n"
+        "  %s -v\n"
+        "  %s -vv\n"
         "  %s help [COMMAND]\n"
         "\n"
         "BlueZ/device commands:\n"
@@ -54,6 +75,10 @@ static void ctl_help_global(void) {
         "  latency              Print latency.tsv diagnostics snapshot\n"
         "  latency-top          Watch latency.tsv diagnostics continuously\n"
         "\n"
+        "Version:\n"
+        "  -v, --version        Print version\n"
+        "  -vv                  Print version and compiled feature summary\n"
+        "\n"
         "Help:\n"
         "  %s help configure\n"
         "  %s connect --help\n"
@@ -66,7 +91,7 @@ static void ctl_help_global(void) {
         "  %s probe CB:81:F4:62:FF:07\n"
         "  midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
         "\n",
-        argv0, argv0, argv0,
+        argv0, argv0, argv0, argv0, argv0,
         argv0, argv0, argv0, argv0,
         argv0, argv0, argv0);
 }
@@ -179,6 +204,18 @@ int main(int argc, char **argv) {
         display_argv[i] = argv[i];
     if (argc > 0)
         display_argv[0] = (char *)ctl_argv0();
+
+    if (argc == 2 && is_version_arg(argv[1])) {
+        ctl_print_version(false);
+        g_free(display_argv);
+        return 0;
+    }
+
+    if (argc == 2 && is_verbose_version_arg(argv[1])) {
+        ctl_print_version(true);
+        g_free(display_argv);
+        return 0;
+    }
 
     if (argc == 3 && g_strcmp0(argv[1], "help") == 0 &&
         (g_strcmp0(argv[2], "latency") == 0 || g_strcmp0(argv[2], "latency-top") == 0)) {
