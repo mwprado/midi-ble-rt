@@ -103,8 +103,6 @@ typedef struct {
 
     bool auto_reconnect;
     unsigned reconnect_attempts;
-
-    uint8_t running_status;
 } MbSession;
 
 typedef struct {
