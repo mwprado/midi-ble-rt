@@ -19,6 +19,13 @@ static MbLatencyDirection mb_runtime_flow_latency_direction(const MbRuntimeFlow 
     return MB_LATENCY_RX;
 }
 
+static bool mb_runtime_flow_realtime_enabled(const MbRuntimeFlow *flow) {
+    if (mb_runtime_flow_latency_direction(flow) == MB_LATENCY_TX)
+        return mb_rtkit_realtime_tx_enabled();
+
+    return mb_rtkit_realtime_rx_enabled();
+}
+
 static void mb_runtime_flow_notify_depth(MbRuntimeFlow *flow) {
     if (!flow || !flow->observe_depth)
         return;
@@ -31,7 +38,8 @@ static void mb_runtime_flow_notify_depth(MbRuntimeFlow *flow) {
 static gpointer runtime_flow_thread(gpointer data) {
     MbRuntimeFlow *flow = data;
 
-    mb_rtkit_make_current_thread_realtime(flow ? flow->name : "runtime-flow");
+    if (mb_runtime_flow_realtime_enabled(flow))
+        mb_rtkit_make_current_thread_realtime(flow ? flow->name : "runtime-flow");
 
     for (;;) {
         g_mutex_lock(&flow->wake_lock);
@@ -218,7 +226,7 @@ MbRuntimeFlowStats mb_runtime_flow_stats(const MbRuntimeFlow *flow) {
     stats.consumed = flow->consumed;
     stats.dropped = flow->dropped;
     stats.push_failures = flow->push_failures;
-    stats.overflows = mb_runtime_flow_overflows(flow);
+    stats.overflow_count = flow->ring.overflow_count;
     stats.depth = mb_runtime_flow_depth(flow);
     return stats;
 }
