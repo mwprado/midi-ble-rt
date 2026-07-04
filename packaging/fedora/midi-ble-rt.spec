@@ -10,6 +10,7 @@ Source0:        %{url}/archive/refs/tags/v%{version}.tar.gz#/%{name}-%{version}.
 BuildRequires:  gcc
 BuildRequires:  cmake
 BuildRequires:  binutils
+BuildRequires:  texinfo
 BuildRequires:  pkgconfig(glib-2.0)
 BuildRequires:  pkgconfig(gio-2.0)
 BuildRequires:  pkgconfig(alsa)
@@ -56,9 +57,13 @@ for bin in \
 %license LICENSE
 %doc README.md DEVELOPERS.md RELEASE_NOTES_v*.md docs/*.md
 %{_docdir}/midi_ble_rt/MULTI_DEVICE_CONFIG.md
+%{_docdir}/midi_ble_rt/midi-ble-rt.texi
 %{_bindir}/midi-ble-rtd
 %{_bindir}/midi-ble-rtctl
 %{_datadir}/%{name}/
+%{_mandir}/man1/midi-ble-rtd.1*
+%{_mandir}/man1/midi-ble-rtctl.1*
+%{_infodir}/midi-ble-rt.info*
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
