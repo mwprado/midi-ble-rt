@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(MIDI_BLE_RT_VERSION "0.9.2" CACHE STRING "midi-ble-rt project version")
+set(MIDI_BLE_RT_VERSION "0.9.4" CACHE STRING "midi-ble-rt project version")
 project(midi_ble_rt VERSION ${MIDI_BLE_RT_VERSION} LANGUAGES C)
 
 include(GNUInstallDirs)
