@@ -31,6 +31,7 @@
 #include "mb-gatt-midi.h"
 #include "mb-session.h"
 #include "mb-stats.h"
+#include "mb-rtkit.h"
 #include "mb-timeouts.h"
 
 static const char *printable_string(const char *value, const char *fallback) {
@@ -1879,12 +1880,16 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
         }
 
         char *reply = g_strdup_printf(
-            "OK STATUS devices=%u streaming=%u alsa_tx_thread=%s rx_workers=%u tx_workers=%u lifecycle_busy=%s lifecycle_queue=%u\n",
+            "OK STATUS devices=%u streaming=%u alsa_tx_thread=%s rx_workers=%u tx_workers=%u rtkit=%s rtkit_priority=%u rtkit_rx=%s rtkit_tx=%s lifecycle_busy=%s lifecycle_queue=%u\n",
             devices,
             streaming,
             rt->alsa_tx_thread ? "running" : "stopped",
             rx_workers,
             tx_workers,
+            mb_rtkit_enabled() ? "on" : "off",
+            mb_rtkit_priority(),
+            mb_rtkit_realtime_rx_enabled() ? "on" : "off",
+            mb_rtkit_realtime_tx_enabled() ? "on" : "off",
             rt->lifecycle_busy ? "yes" : "no",
             runtime_lifecycle_queue_depth(rt));
 
