@@ -61,6 +61,19 @@ static gpointer runtime_flow_thread(gpointer data) {
             size_t len = 0;
             const uint8_t *bytes = mb_frame_model_get(&flow->pool, item.slice, &len);
             uint64_t consume_started_ns = mb_runtime_now_ns();
+
+            /*
+             * Count the item as consumed once the runtime has taken it from the
+             * queue and is about to dispatch it to the consumer callback.
+             *
+             * Consumers are allowed to signal condition variables or otherwise
+             * publish progress from inside the callback.  If this counter is
+             * incremented only after the callback returns, an observer woken by
+             * the callback can legitimately see the consumer-side progress but
+             * still see this internal runtime counter lagging by one item.
+             */
+            flow->consumed++;
+
             if (bytes && flow->consume)
                 flow->consume(flow, &item, bytes, len, flow->user_data);
             uint64_t consume_finished_ns = mb_runtime_now_ns();
@@ -70,7 +83,6 @@ static gpointer runtime_flow_thread(gpointer data) {
                                           consume_started_ns,
                                           consume_finished_ns);
 
-            flow->consumed++;
             mb_slice_ring_item_done(&flow->ring, &item);
         }
     }
