@@ -168,7 +168,34 @@ if(BUILD_TESTING)
     add_test(NAME mb-control-protocol COMMAND $<TARGET_FILE:test-mb-control-protocol>)
 endif()
 
+set(MIDI_BLE_RT_MAN_PAGES
+    docs/man/midi-ble-rtd.1
+    docs/man/midi-ble-rtctl.1
+)
+
+find_program(MAKEINFO_EXECUTABLE makeinfo)
+if(MAKEINFO_EXECUTABLE)
+    set(MIDI_BLE_RT_INFO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/docs/info/midi-ble-rt.texi")
+    set(MIDI_BLE_RT_INFO_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/docs/info/midi-ble-rt.info")
+
+    add_custom_command(
+        OUTPUT "${MIDI_BLE_RT_INFO_OUTPUT}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/docs/info"
+        COMMAND "${MAKEINFO_EXECUTABLE}" --no-split -o "${MIDI_BLE_RT_INFO_OUTPUT}" "${MIDI_BLE_RT_INFO_SOURCE}"
+        DEPENDS "${MIDI_BLE_RT_INFO_SOURCE}"
+        VERBATIM
+    )
+    add_custom_target(midi-ble-rt-info ALL DEPENDS "${MIDI_BLE_RT_INFO_OUTPUT}")
+else()
+    message(STATUS "makeinfo not found; GNU Info manual will not be built")
+endif()
+
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.example")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/systemd/user/midi-ble-rtd.service" DESTINATION ${SYSTEMD_USER_UNIT_DIR})
 install(FILES docs/MULTI_DEVICE_CONFIG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES ${MIDI_BLE_RT_MAN_PAGES} DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+install(FILES docs/info/midi-ble-rt.texi DESTINATION ${CMAKE_INSTALL_DOCDIR})
+if(MAKEINFO_EXECUTABLE)
+    install(FILES "${MIDI_BLE_RT_INFO_OUTPUT}" DESTINATION ${CMAKE_INSTALL_INFODIR})
+endif()
