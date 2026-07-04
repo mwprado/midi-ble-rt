@@ -15,6 +15,11 @@ set(SYSTEMD_USER_UNIT_DIR "lib/systemd/user"
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glib-2.0 gio-2.0 alsa)
 
+option(MIDI_BLE_RT_BUILD_GUI "Build GTK4/libadwaita GUI" OFF)
+if(MIDI_BLE_RT_BUILD_GUI)
+    pkg_check_modules(GUI_DEPS REQUIRED gtk4 libadwaita-1)
+endif()
+
 configure_file(
     src/mb-version.h.in
     "${CMAKE_CURRENT_BINARY_DIR}/generated/mb-version.h"
@@ -88,6 +93,34 @@ target_compile_options(midi-ble-rtd PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -
 target_include_directories(midi-ble-rtctl PRIVATE ${DEPS_INCLUDE_DIRS})
 target_link_libraries(midi-ble-rtctl PRIVATE midi-ble-rt-core ${DEPS_LIBRARIES})
 target_compile_options(midi-ble-rtctl PRIVATE ${DEPS_CFLAGS_OTHER} -Wall -Wextra -Wpedantic)
+
+if(MIDI_BLE_RT_BUILD_GUI)
+    add_executable(midi-ble-rt-gui
+        src/gui/mb-gui-main.c
+        src/gui/mb-gui-window.c
+        src/gui/mb-gui-ctl-client.c
+        src/gui/mb-gui-model.c
+    )
+
+    target_include_directories(midi-ble-rt-gui PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
+        ${GUI_DEPS_INCLUDE_DIRS}
+
+    )
+
+    target_link_libraries(midi-ble-rt-gui PRIVATE
+        ${GUI_DEPS_LIBRARIES}
+    )
+
+    target_compile_options(midi-ble-rt-gui PRIVATE
+        ${GUI_DEPS_CFLAGS_OTHER}
+        -Wall -Wextra
+    )
+endif()
+
+
 
 if(BUILD_TESTING)
     add_executable(test-mb-session
@@ -191,6 +224,11 @@ else()
 endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(MIDI_BLE_RT_BUILD_GUI)
+    install(TARGETS midi-ble-rt-gui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.example")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/systemd/user/midi-ble-rtd.service" DESTINATION ${SYSTEMD_USER_UNIT_DIR})
 install(FILES docs/MULTI_DEVICE_CONFIG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
