@@ -8,9 +8,11 @@ The first validated hardware target is the Roland GO:KEYS family. The project ta
 
 ## GUI status
 
-A musician-facing GTK/libadwaita GUI is under active development. The GUI is intended to make daemon status, BLE-MIDI scanning, device binding and ALSA port state visible without replacing the CLI/daemon validation path.
+A musician-facing GTK/libadwaita GUI is under active development and is planned for version 1.0. The GUI is intended to provide a simple musician workflow: scan for BLE-MIDI devices, select the target instrument or controller, connect it, and keep advanced telemetry behind the settings/details controls.
 
-The CLI and daemon remain the primary validated interface while the GUI is developed.
+![midi-ble-rt GUI in development](docs/images/gui-main.svg)
+
+The GUI is not required to use the project today. The daemon and CLI are already usable and remain the primary validated interface while the GUI is developed.
 
 ## Installed commands
 
