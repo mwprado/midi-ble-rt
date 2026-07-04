@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.9.2
+Version:        0.9.4
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -67,6 +67,15 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.4-1
+- Remove legacy buffer/session cleanup code in preparation for v1.0.0.
+- Expose RTKit state, priority and RX/TX flags in daemon-status.
+- Document daemon-status output fields in CLI help.
+- Add Linux man pages for midi-ble-rtd and midi-ble-rtctl.
+- Add GNU Info manual source and optional makeinfo build/install support.
+- Package man and Info documentation in the Fedora RPM.
+- Fix runtime consumed-counter ordering race in mb-runtime.
+
 * Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.2-1
 - Add compiled version reporting with -v and -vv.
 - Add optional RtKit scheduling through RealtimeKit.
