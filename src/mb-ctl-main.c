@@ -63,7 +63,7 @@ static void ctl_help_global(void) {
         "\n"
         "Daemon control commands:\n"
         "  daemon-ping          Ping a running midi-ble-rtd instance\n"
-        "  daemon-status        Print daemon runtime status\n"
+        "  daemon-status        Print daemon runtime status, including RTKit flags\n"
         "  daemon-list          List configured daemon sessions\n"
         "  daemon-connect       Ask daemon to connect a configured device\n"
         "  daemon-disconnect    Ask daemon to disconnect a configured device\n"
@@ -82,6 +82,8 @@ static void ctl_help_global(void) {
         "Help:\n"
         "  %s help configure\n"
         "  %s connect --help\n"
+        "  %s help daemon-status\n"
+        "  %s daemon-status --help\n"
         "  %s help latency\n"
         "  %s latency-top --help\n"
         "\n"
@@ -92,8 +94,51 @@ static void ctl_help_global(void) {
         "  midi-ble-rtd --config ~/.config/midi-ble-rt/roland-gokeys.ini\n"
         "\n",
         argv0, argv0, argv0, argv0, argv0,
-        argv0, argv0, argv0, argv0,
+        argv0, argv0, argv0, argv0, argv0, argv0,
         argv0, argv0, argv0);
+}
+
+static void daemon_status_help_command(const char *argv0) {
+    g_print(
+        "Usage:\n"
+        "  %s daemon-status\n"
+        "\n"
+        "Description:\n"
+        "  Prints one runtime status line from the running midi-ble-rtd instance.\n"
+        "  The command uses the daemon control socket and does not change daemon state.\n"
+        "\n"
+        "Output fields:\n"
+        "  devices\n"
+        "      Number of configured device sessions known to the daemon.\n"
+        "\n"
+        "  streaming\n"
+        "      Number of configured device sessions currently in STREAMING state.\n"
+        "\n"
+        "  alsa_tx_thread\n"
+        "      Shared ALSA Sequencer TX thread state: running or stopped.\n"
+        "\n"
+        "  rx_workers, tx_workers\n"
+        "      Number of per-device runtime worker threads currently allocated.\n"
+        "\n"
+        "  rtkit\n"
+        "      RTKit scheduling requested by daemon configuration: on or off.\n"
+        "\n"
+        "  rtkit_priority\n"
+        "      Configured RTKit realtime priority after daemon-side clamping.\n"
+        "\n"
+        "  rtkit_rx, rtkit_tx\n"
+        "      Whether RTKit is enabled for RX and TX runtime worker classes: on or off.\n"
+        "\n"
+        "  lifecycle_busy\n"
+        "      Whether the daemon lifecycle/control-plane queue is currently executing a command.\n"
+        "\n"
+        "  lifecycle_queue\n"
+        "      Number of pending lifecycle/control-plane commands.\n"
+        "\n"
+        "Example:\n"
+        "  OK STATUS devices=1 streaming=1 alsa_tx_thread=running rx_workers=1 tx_workers=1 rtkit=on rtkit_priority=1 rtkit_rx=on rtkit_tx=off lifecycle_busy=no lifecycle_queue=0\n"
+        "\n",
+        argv0);
 }
 
 static void latency_usage(const char *argv0, const char *cmd) {
@@ -213,6 +258,19 @@ int main(int argc, char **argv) {
 
     if (argc == 2 && is_verbose_version_arg(argv[1])) {
         ctl_print_version(true);
+        g_free(display_argv);
+        return 0;
+    }
+
+    if (argc == 3 && g_strcmp0(argv[1], "help") == 0 &&
+        g_strcmp0(argv[2], "daemon-status") == 0) {
+        daemon_status_help_command(ctl_argv0());
+        g_free(display_argv);
+        return 0;
+    }
+
+    if (argc == 3 && g_strcmp0(argv[1], "daemon-status") == 0 && is_help_arg(argv[2])) {
+        daemon_status_help_command(ctl_argv0());
         g_free(display_argv);
         return 0;
     }
