@@ -1,0 +1,305 @@
+\input texinfo
+@setfilename midi-ble-rt.info
+@settitle midi-ble-rt Manual
+@documentencoding UTF-8
+@dircategory Sound
+@direntry
+* midi-ble-rt: (midi-ble-rt).  ALSA Sequencer to BLE-MIDI daemon.
+@end direntry
+
+@copying
+This manual documents midi-ble-rt.
+@end copying
+
+@titlepage
+@title midi-ble-rt Manual
+@subtitle ALSA Sequencer to BLE-MIDI runtime
+@end titlepage
+
+@node Top
+@top midi-ble-rt
+
+midi-ble-rt bridges ALSA Sequencer MIDI ports to configured BLE-MIDI devices
+through BlueZ GATT.  The public programs are @command{midi-ble-rtd}, the daemon,
+and @command{midi-ble-rtctl}, the control and diagnostics CLI.
+
+@menu
+* Overview::
+* Daemon::
+* Control CLI::
+* Configuration::
+* Realtime::
+* Diagnostics::
+* Files::
+* Examples::
+@end menu
+
+@node Overview
+@chapter Overview
+
+The daemon uses configuration-directory mode.  One daemon process owns one BlueZ
+system-bus connection, one ALSA Sequencer client, and one runtime session per
+configured BLE-MIDI device.  Each configured device gets a stable ALSA port
+inside the daemon's ALSA client.  BLE link drops and reconnect cycles change the
+session state, but they do not recreate the local ALSA port.
+
+The project treats BLE-MIDI devices generically.  A specific instrument such as
+Roland GO:KEYS is a profile or quirk case, not the conceptual model of the
+runtime.
+
+@node Daemon
+@chapter Daemon
+
+Run the daemon with a configuration directory:
+
+@example
+midi-ble-rtd --config ~/.config/midi-ble-rt
+@end example
+
+The alias @option{--config-dir} is also accepted.  Version commands are:
+
+@example
+midi-ble-rtd -v
+midi-ble-rtd -vv
+@end example
+
+The verbose form prints the daemon role, runtime mode, compiled feature summary,
+and realtime defaults.
+
+@node Control CLI
+@chapter Control CLI
+
+@command{midi-ble-rtctl} provides BlueZ preparation commands, daemon control
+commands, and diagnostics commands.
+
+Common BlueZ/device commands:
+
+@example
+midi-ble-rtctl list
+midi-ble-rtctl scan
+midi-ble-rtctl info DEVICE
+midi-ble-rtctl probe DEVICE
+midi-ble-rtctl pair DEVICE
+midi-ble-rtctl trust DEVICE
+midi-ble-rtctl untrust DEVICE
+midi-ble-rtctl connect DEVICE
+midi-ble-rtctl configure DEVICE
+midi-ble-rtctl disconnect DEVICE
+midi-ble-rtctl forget DEVICE
+@end example
+
+Daemon control commands require a running @command{midi-ble-rtd} instance:
+
+@example
+midi-ble-rtctl daemon-ping
+midi-ble-rtctl daemon-status
+midi-ble-rtctl daemon-list
+midi-ble-rtctl daemon-connect DEVICE
+midi-ble-rtctl daemon-disconnect DEVICE
+midi-ble-rtctl daemon-recheck DEVICE
+@end example
+
+@command{daemon-status} prints one @samp{OK STATUS} line.  Fields include:
+
+@table @code
+@item devices
+Number of configured device sessions known to the daemon.
+@item streaming
+Number of configured device sessions currently in STREAMING state.
+@item alsa_tx_thread
+Shared ALSA Sequencer TX thread state: @samp{running} or @samp{stopped}.
+@item rx_workers, tx_workers
+Number of per-device runtime worker threads currently allocated.
+@item rtkit
+Whether RTKit scheduling was requested by daemon configuration.
+@item rtkit_priority
+Configured RTKit realtime priority after daemon-side clamping.
+@item rtkit_rx, rtkit_tx
+Whether RTKit is enabled for RX and TX runtime worker classes.
+@item lifecycle_busy
+Whether the lifecycle/control-plane queue is currently executing a command.
+@item lifecycle_queue
+Number of pending lifecycle/control-plane commands.
+@end table
+
+Example:
+
+@example
+OK STATUS devices=1 streaming=1 alsa_tx_thread=running rx_workers=1 tx_workers=1 rtkit=on rtkit_priority=1 rtkit_rx=on rtkit_tx=off lifecycle_busy=no lifecycle_queue=0
+@end example
+
+@node Configuration
+@chapter Configuration
+
+A typical configuration directory has this layout:
+
+@example
+~/.config/midi-ble-rt/
+  daemon.ini
+  devices.d/
+    controller.ini
+@end example
+
+Common @file{daemon.ini} keys:
+
+@table @code
+@item [defaults].pair
+Pair configured devices by default.
+@item [defaults].trust
+Set BlueZ @samp{Trusted=true} by default.
+@item [defaults].reconnect_on_link_loss
+Reconnect sessions after BLE link loss.
+@item [defaults].enable_tx
+Enable ALSA-to-BLE MIDI transmit path by default.
+@item [gatt].service_uuid
+BLE-MIDI service UUID.
+@item [gatt].io_uuid
+BLE-MIDI I/O characteristic UUID.
+@item [gatt].io_uuid_alias
+Optional alternate characteristic UUID for device-specific aliases.
+@item [gatt].require_notify
+Require notification support on the selected BLE-MIDI characteristic.
+@item [gatt].require_write_without_response
+Require Write Without Response support for TX.
+@item [daemon].client_name
+ALSA Sequencer client name.  Default: @samp{midi-ble-rt}.
+@item [alsa].port_name
+Default ALSA port name for configured devices.
+@item [stats].enabled
+Enable runtime @file{stats.tsv} export.
+@item [stats].interval_ms
+Stats export interval in milliseconds.
+@item [stats].latency_diagnostics
+Enable runtime @file{latency.tsv} diagnostics export.
+@end table
+
+Common @file{devices.d/*.ini} keys:
+
+@table @code
+@item [device].id
+Stable local device identifier.
+@item [device].address
+Bluetooth device address.
+@item [device].name
+Human-readable device name.
+@item [device].profile
+Device profile name.  Use @samp{standard_ble_midi} for generic BLE-MIDI devices
+or a specific profile such as @samp{roland_gokeys} when a quirk is required.
+@item [device].alsa_port_name
+ALSA port name for this configured device.
+@item [device].enabled
+Whether this device config is active.
+@item [device].connect_on_start
+Connect this configured device during daemon startup.
+@item [policy].pair
+Override default pairing policy for this device.
+@item [policy].trust
+Override default BlueZ trust policy for this device.
+@item [policy].reconnect_on_link_loss
+Override default reconnect policy for this device.
+@item [midi].enable_tx
+Override default ALSA-to-BLE transmit policy for this device.
+@end table
+
+@node Realtime
+@chapter Realtime
+
+RTKit support is configured in @file{daemon.ini}:
+
+@table @code
+@item [realtime].rtkit
+Request RTKit realtime scheduling.
+@item [realtime].realtime_rx
+Apply RTKit to RX worker threads when RTKit is enabled.  Default: yes.
+@item [realtime].realtime_tx
+Apply RTKit to TX worker threads when RTKit is enabled.  Default: no.
+@item [realtime].rt_priority
+RTKit realtime priority.  The daemon clamps the value to its supported range.
+@end table
+
+RTKit status is visible through:
+
+@example
+midi-ble-rtctl daemon-status
+@end example
+
+The status output reports @code{rtkit}, @code{rtkit_priority}, @code{rtkit_rx},
+and @code{rtkit_tx}.
+
+@node Diagnostics
+@chapter Diagnostics
+
+The diagnostics commands are:
+
+@example
+midi-ble-rtctl stats [--path PATH]
+midi-ble-rtctl top [--path PATH] [--interval MS]
+midi-ble-rtctl latency [--path PATH]
+midi-ble-rtctl latency-top [--path PATH] [--interval MS]
+@end example
+
+@command{stats} and @command{top} read @file{stats.tsv}.  @command{latency} and
+@command{latency-top} read @file{latency.tsv}, which is exported only when
+latency diagnostics are enabled in configuration.
+
+@node Files
+@chapter Files
+
+Runtime files are written below @file{$XDG_RUNTIME_DIR/midi-ble-rt}, or below the
+system temporary directory if @env{XDG_RUNTIME_DIR} is not set.
+
+@table @file
+@item control.sock
+Local daemon control socket used by @command{midi-ble-rtctl}.
+@item stats.tsv
+Runtime packet, byte, drop, queue, and session statistics.
+@item latency.tsv
+Optional latency diagnostics file.
+@end table
+
+Installed documentation normally includes:
+
+@table @file
+@item midi-ble-rtd(1)
+Daemon manual page.
+@item midi-ble-rtctl(1)
+Control CLI manual page.
+@item midi-ble-rt.info
+GNU Info manual, when built with @command{makeinfo}.
+@end table
+
+@node Examples
+@chapter Examples
+
+Scan for BLE-MIDI devices:
+
+@example
+midi-ble-rtctl scan --timeout 10 --midi-only
+@end example
+
+Prepare a Roland GO:KEYS profile and write configuration:
+
+@example
+midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config
+@end example
+
+Start the daemon:
+
+@example
+midi-ble-rtd --config ~/.config/midi-ble-rt
+@end example
+
+Check daemon state:
+
+@example
+midi-ble-rtctl daemon-status
+@end example
+
+View detailed help for daemon status fields:
+
+@example
+midi-ble-rtctl help daemon-status
+midi-ble-rtctl daemon-status --help
+@end example
+
+@bye
