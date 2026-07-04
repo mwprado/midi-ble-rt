@@ -6,6 +6,16 @@ The runtime uses BlueZ for BLE/GATT transport and ALSA Sequencer as the public M
 
 The first validated hardware target is the Roland GO:KEYS family. The project target remains generic: any usable BLE-MIDI instrument, controller, module or adapter.
 
+## GUI status
+
+A musician-facing GTK/libadwaita GUI is under active development. The GUI is intended to make daemon status, BLE-MIDI scanning, device binding and ALSA port state visible without replacing the CLI/daemon validation path.
+
+The current design target is a clean GNOME-style window with a single header bar, explicit daemon state, a BLE-MIDI scan action, device cards and session status for the ALSA bridge.
+
+![midi-ble-rt GUI reference model](docs/images/gui-model.svg)
+
+The CLI and daemon remain the primary validated interface while the GUI is developed.
+
 ## Installed commands
 
 - `midi-ble-rtd`
