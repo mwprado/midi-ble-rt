@@ -1,0 +1,200 @@
+.TH MIDI-BLE-RTD 1 "July 2026" "midi-ble-rt" "User Commands"
+.SH NAME
+midi-ble-rtd \- ALSA Sequencer to BLE-MIDI daemon
+.SH SYNOPSIS
+.B midi-ble-rtd
+.BR \-\-config " " DIR
+.br
+.B midi-ble-rtd
+.BR \-\-config-dir " " DIR
+.br
+.B midi-ble-rtd
+.BR \-v | \-\-version
+.br
+.B midi-ble-rtd
+.BR \-vv | \-\-version-verbose
+.SH DESCRIPTION
+.B midi-ble-rtd
+runs the midi-ble-rt daemon.  It bridges ALSA Sequencer MIDI ports to
+configured BLE-MIDI devices through BlueZ GATT.
+.PP
+The daemon uses configuration-directory mode only.  One daemon process owns one
+BlueZ system-bus connection, one ALSA Sequencer client, and one runtime session
+per configured BLE-MIDI device.  Each configured device gets a stable ALSA port
+inside the daemon's ALSA client.  Normal BLE disconnect/reconnect cycles change
+session state but do not recreate the local ALSA port.
+.SH OPTIONS
+.TP
+.BI \-\-config " DIR"
+Load daemon configuration from
+.IR DIR .
+The directory must contain
+.I daemon.ini
+and a
+.I devices.d
+subdirectory with one or more
+.I *.ini
+device files.
+.TP
+.BI \-\-config-dir " DIR"
+Alias for
+.BR \-\-config .
+.TP
+.BR \-v , " " \-\-version
+Print daemon version and exit.
+.TP
+.BR \-vv , " " \-\-version-verbose
+Print version plus compiled feature summary and exit.
+.SH CONFIGURATION
+The daemon expects a directory layout similar to:
+.PP
+.nf
+~/.config/midi-ble-rt/
+  daemon.ini
+  devices.d/
+    controller.ini
+.fi
+.PP
+Common
+.I daemon.ini
+keys:
+.TP
+.BR [defaults].pair
+Pair configured devices by default.
+.TP
+.BR [defaults].trust
+Set BlueZ
+.I Trusted=true
+by default.
+.TP
+.BR [defaults].reconnect_on_link_loss
+Reconnect sessions after BLE link loss.
+.TP
+.BR [defaults].enable_tx
+Enable ALSA-to-BLE MIDI transmit path by default.
+.TP
+.BR [gatt].service_uuid
+BLE-MIDI service UUID.  The default is the standard BLE-MIDI service UUID.
+.TP
+.BR [gatt].io_uuid
+BLE-MIDI I/O characteristic UUID.  The default is the standard BLE-MIDI I/O UUID.
+.TP
+.BR [gatt].io_uuid_alias
+Optional alternate characteristic UUID, used for device-specific aliases.
+.TP
+.BR [gatt].require_notify
+Require notification support on the selected BLE-MIDI characteristic.
+.TP
+.BR [gatt].require_write_without_response
+Require Write Without Response support for TX.
+.TP
+.BR [daemon].client_name
+ALSA Sequencer client name.  Default:
+.IR midi-ble-rt .
+.TP
+.BR [alsa].port_name
+Default ALSA port name for configured devices.
+.TP
+.BR [stats].enabled
+Enable runtime
+.I stats.tsv
+export.
+.TP
+.BR [stats].interval_ms
+Stats export interval in milliseconds.
+.TP
+.BR [stats].latency_diagnostics
+Enable runtime
+.I latency.tsv
+diagnostics export.
+.TP
+.BR [realtime].rtkit
+Request RTKit realtime scheduling.
+.TP
+.BR [realtime].realtime_rx
+Apply RTKit to RX worker threads when RTKit is enabled.  Default: yes.
+.TP
+.BR [realtime].realtime_tx
+Apply RTKit to TX worker threads when RTKit is enabled.  Default: no.
+.TP
+.BR [realtime].rt_priority
+RTKit realtime priority.  The daemon clamps the value to its supported range.
+.PP
+Common
+.I devices.d/*.ini
+keys:
+.TP
+.BR [device].id
+Stable local device identifier used by
+.B midi-ble-rtctl daemon-connect
+and related commands.
+.TP
+.BR [device].address
+Bluetooth device address.
+.TP
+.BR [device].name
+Human-readable device name.
+.TP
+.BR [device].profile
+Device profile name.  Use
+.I standard_ble_midi
+for generic BLE-MIDI devices or a specific profile such as
+.I roland_gokeys
+when a quirk is required.
+.TP
+.BR [device].alsa_port_name
+ALSA port name for this configured device.
+.TP
+.BR [device].enabled
+Whether this device config is active.
+.TP
+.BR [device].connect_on_start
+Connect this configured device during daemon startup.
+.TP
+.BR [policy].pair
+Override default pairing policy for this device.
+.TP
+.BR [policy].trust
+Override default BlueZ trust policy for this device.
+.TP
+.BR [policy].reconnect_on_link_loss
+Override default reconnect policy for this device.
+.TP
+.BR [midi].enable_tx
+Override default ALSA-to-BLE transmit policy for this device.
+.SH RUNTIME FILES
+By default the daemon writes runtime files below
+.IR $XDG_RUNTIME_DIR/midi-ble-rt ,
+or below the system temporary directory if
+.I XDG_RUNTIME_DIR
+is not set.
+.TP
+.I control.sock
+Local control socket used by
+.BR midi-ble-rtctl .
+.TP
+.I stats.tsv
+Runtime packet, byte, drop, queue, and session statistics.
+.TP
+.I latency.tsv
+Optional latency diagnostics file when enabled in configuration.
+.SH EXAMPLES
+Start the daemon with the user's configuration directory:
+.PP
+.nf
+midi-ble-rtd --config ~/.config/midi-ble-rt
+.fi
+.PP
+Show verbose daemon version and feature defaults:
+.PP
+.nf
+midi-ble-rtd -vv
+.fi
+.SH SEE ALSO
+.BR midi-ble-rtctl (1),
+.BR aconnect (1),
+.BR aplaymidi (1),
+.BR aseqdump (1)
+.SH BUGS
+Report bugs at the project repository:
+.IR https://github.com/mwprado/midi-ble-rt .
