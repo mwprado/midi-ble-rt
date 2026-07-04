@@ -1,0 +1,198 @@
+.TH MIDI-BLE-RTCTL 1 "July 2026" "midi-ble-rt" "User Commands"
+.SH NAME
+midi-ble-rtctl \- control and diagnostics CLI for midi-ble-rt
+.SH SYNOPSIS
+.B midi-ble-rtctl
+.I COMMAND
+.RI [ ARGS... ]
+.br
+.B midi-ble-rtctl
+.BR \-v | \-\-version
+.br
+.B midi-ble-rtctl
+.BR \-vv | \-\-version-verbose
+.br
+.B midi-ble-rtctl
+.B help
+.RI [ COMMAND ]
+.SH DESCRIPTION
+.B midi-ble-rtctl
+is the command-line control and diagnostics tool for midi-ble-rt.  It can inspect
+BlueZ devices, prepare BLE-MIDI devices, write local configuration, talk to a
+running
+.BR midi-ble-rtd (1)
+instance through its local control socket, and print runtime diagnostics.
+.SH GLOBAL OPTIONS
+.TP
+.BR \-h , " " \-\-help
+Print global help.
+.TP
+.BR \-v , " " \-\-version
+Print CLI version and exit.
+.TP
+.BR \-vv , " " \-\-version-verbose
+Print version plus compiled feature summary and exit.
+.SH BLUEZ AND DEVICE COMMANDS
+.TP
+.B list
+List known BlueZ devices.
+.TP
+.B scan
+Run BlueZ discovery, then list devices.
+.TP
+.B info
+Show one device's BlueZ properties.
+.TP
+.B probe
+Connect if needed and inspect BLE-MIDI GATT objects.
+.TP
+.B pair
+Pair a device through BlueZ
+.IR Device1.Pair .
+.TP
+.B trust
+Set BlueZ
+.IR Device1.Trusted=true .
+.TP
+.B untrust
+Set BlueZ
+.IR Device1.Trusted=false .
+.TP
+.B connect
+Prepare a BLE-MIDI device using BlueZ.  This may pair, trust, connect, probe,
+and optionally write local configuration depending on command options.
+.TP
+.B configure
+Write a local
+.BR midi-ble-rtd (1)
+configuration file.
+.TP
+.B disconnect
+Disconnect a BlueZ device.
+.TP
+.B forget
+Remove a device from the BlueZ cache or pairing records.
+.SH DAEMON CONTROL COMMANDS
+These commands require a running
+.BR midi-ble-rtd (1)
+instance.  They use the daemon control socket below
+.IR $XDG_RUNTIME_DIR/midi-ble-rt/control.sock .
+.TP
+.B daemon-ping
+Ping the running daemon.  Expected reply:
+.IR "OK PONG" .
+.TP
+.B daemon-status
+Print one daemon runtime status line.
+.TP
+.B daemon-list
+List configured daemon sessions.
+.TP
+.BI daemon-connect " DEVICE"
+Ask the daemon to connect a configured device.  DEVICE must match a configured
+id or Bluetooth address.
+.TP
+.BI daemon-disconnect " DEVICE"
+Ask the daemon to disconnect a configured device.
+.TP
+.BI daemon-recheck " DEVICE"
+Ask the daemon to recheck a configured device.
+.SH DAEMON STATUS FIELDS
+.B daemon-status
+prints an
+.I OK STATUS
+line with key-value fields.
+.TP
+.B devices
+Number of configured device sessions known to the daemon.
+.TP
+.B streaming
+Number of configured device sessions currently in STREAMING state.
+.TP
+.B alsa_tx_thread
+Shared ALSA Sequencer TX thread state:
+.I running
+or
+.IR stopped .
+.TP
+.B rx_workers, tx_workers
+Number of per-device runtime worker threads currently allocated.
+.TP
+.B rtkit
+Whether RTKit scheduling was requested by daemon configuration:
+.I on
+or
+.IR off .
+.TP
+.B rtkit_priority
+Configured RTKit realtime priority after daemon-side clamping.
+.TP
+.B rtkit_rx, rtkit_tx
+Whether RTKit is enabled for RX and TX runtime worker classes:
+.I on
+or
+.IR off .
+.TP
+.B lifecycle_busy
+Whether the daemon lifecycle/control-plane queue is currently executing a
+command:
+.I yes
+or
+.IR no .
+.TP
+.B lifecycle_queue
+Number of pending lifecycle/control-plane commands.
+.PP
+Example:
+.PP
+.nf
+OK STATUS devices=1 streaming=1 alsa_tx_thread=running rx_workers=1 tx_workers=1 rtkit=on rtkit_priority=1 rtkit_rx=on rtkit_tx=off lifecycle_busy=no lifecycle_queue=0
+.fi
+.SH DIAGNOSTICS COMMANDS
+.TP
+.BR stats " [--path PATH]"
+Print one formatted stats snapshot.  The default path is
+.IR $XDG_RUNTIME_DIR/midi-ble-rt/stats.tsv .
+.TP
+.BR top " [--path PATH] [--interval MS]"
+Repeatedly print stats snapshots.
+.TP
+.BR latency " [--path PATH]"
+Print one latency diagnostics snapshot.  The default path is
+.IR $XDG_RUNTIME_DIR/midi-ble-rt/latency.tsv .
+.TP
+.BR latency-top " [--path PATH] [--interval MS]"
+Repeatedly print latency diagnostics snapshots.
+.SH EXAMPLES
+Scan for BLE-MIDI devices:
+.PP
+.nf
+midi-ble-rtctl scan --timeout 10 --midi-only
+.fi
+.PP
+Prepare a Roland GO:KEYS profile and write configuration:
+.PP
+.nf
+midi-ble-rtctl connect CB:81:F4:62:FF:07 --profile roland_gokeys --write-config
+.fi
+.PP
+Check daemon state:
+.PP
+.nf
+midi-ble-rtctl daemon-status
+.fi
+.PP
+Show detailed help for daemon status fields:
+.PP
+.nf
+midi-ble-rtctl help daemon-status
+midi-ble-rtctl daemon-status --help
+.fi
+.SH SEE ALSO
+.BR midi-ble-rtd (1),
+.BR aconnect (1),
+.BR aplaymidi (1),
+.BR aseqdump (1)
+.SH BUGS
+Report bugs at the project repository:
+.IR https://github.com/mwprado/midi-ble-rt .
