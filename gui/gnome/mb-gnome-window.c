@@ -22,6 +22,7 @@ typedef struct {
     GtkWidget *daemon_switch_label;
     bool daemon_transition_in_flight;
     bool daemon_requested_active;
+    bool daemon_functional;
     guint daemon_transition_source_id;
     GtkWidget *footer_devices_label;
     GtkWidget *footer_connection_label;
@@ -1721,7 +1722,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     state->scan_button = icon_button_new("edit-find-symbolic", "Adicionar instrumento");
     gtk_widget_add_css_class(state->scan_button, "suggested-action");
     gtk_widget_add_css_class(state->scan_button, "scan-button");
-    gtk_widget_set_sensitive(state->scan_button, TRUE);
+    gtk_widget_set_sensitive(state->scan_button, FALSE);
     gtk_widget_set_can_target(state->scan_button, TRUE);
     gtk_box_append(GTK_BOX(sidebar), state->scan_button);
 
@@ -1933,18 +1934,18 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     g_signal_connect(state->forget_button, "clicked", G_CALLBACK(forget_clicked_cb), state);
 
     gtk_widget_set_visible(state->device_box, FALSE);
+    gtk_widget_set_sensitive(state->sidebar_list, FALSE);
 
     /*
-     * Initial visual state before the first asynchronous daemon-status query.
-     * mb_gnome_window_refresh() below is authoritative and will update the
-     * switch once daemon-status returns.
+     * Initial visual state. The daemon observer will become the root state for
+     * scan/list enablement in the next step.
      */
+    state->daemon_functional = false;
     gtk_switch_set_active(GTK_SWITCH(state->daemon_switch), FALSE);
     set_label(state->daemon_switch_label, "Verificando Serviço MIDI-BLE");
     update_action_sensitivity(state, NULL);
 
     mb_gnome_window_refresh(state);
-    /* Passive polling disabled for now: avoid full-window flicker during manual operations. */
 
     return GTK_WINDOW(state->window);
 }
