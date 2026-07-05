@@ -125,6 +125,8 @@ static const char *friendly_state(const char *state) {
         return "Erro";
     if (g_ascii_strcasecmp(state, "DISCONNECTED") == 0)
         return "Desconectado";
+    if (g_ascii_strcasecmp(state, "UNAVAILABLE") == 0)
+        return "Indisponível · pareie novamente";
     return state;
 }
 
@@ -133,6 +135,8 @@ static const char *hero_status_text(const char *state) {
         return "Conectado";
     if (state_is_error(state))
         return "Erro de conexão";
+    if (g_ascii_strcasecmp(safe(state, ""), "UNAVAILABLE") == 0)
+        return "Indisponível · pareie novamente";
     return "Pronto para conectar";
 }
 
@@ -525,7 +529,11 @@ static void update_main_panel(MbGnomeWindowState *state) {
     gtk_widget_remove_css_class(state->device_state, "ok-text");
     gtk_widget_remove_css_class(state->device_state, "err-text");
     gtk_widget_remove_css_class(state->device_state, "muted-text");
-    gtk_widget_add_css_class(state->device_state, state_is_error(device->state) ? "err-text" : "ok-text");
+    gtk_widget_add_css_class(state->device_state,
+                             (state_is_error(device->state) ||
+                              g_ascii_strcasecmp(safe(device->state, ""), "UNAVAILABLE") == 0)
+                                 ? "err-text"
+                                 : "ok-text");
 
     set_label(state->footer_connection_label, state_is_streaming(device->state) ? "Conectado" : "Nenhum conectado");
     update_action_sensitivity(state, device);
@@ -553,7 +561,11 @@ static GtkWidget *device_row_new(const MbUiDevice *device) {
 
     GtkWidget *status_line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     GtkWidget *dot = gtk_label_new("●");
-    gtk_widget_add_css_class(dot, state_is_error(device->state) ? "err-text" : "ok-text");
+    gtk_widget_add_css_class(dot,
+                             (state_is_error(device->state) ||
+                              g_ascii_strcasecmp(safe(device->state, ""), "UNAVAILABLE") == 0)
+                                 ? "err-text"
+                                 : "ok-text");
     GtkWidget *state_label = gtk_label_new(friendly_state(device->state));
     gtk_widget_add_css_class(state_label, "device-row-status");
     gtk_box_append(GTK_BOX(status_line), dot);

@@ -551,6 +551,93 @@ static char *sanitize_device_id(const char *device_id) {
 }
 
 
+
+static void overlay_bluez_pairing_from_scan_output(MbUiSnapshot *catalog, const char *text) {
+    if (!catalog || !catalog->devices || !text || !*text)
+        return;
+
+    char **lines = g_strsplit(text, "\n", -1);
+
+    size_t paired_start = 0;
+    size_t trusted_start = 0;
+    bool have_header = false;
+
+    for (guint i = 0; lines && lines[i]; i++) {
+        const char *line = lines[i];
+
+        if (g_str_has_prefix(line, "ADDRESS")) {
+            const char *p_paired = strstr(line, "PAIRED");
+            const char *p_trusted = strstr(line, "TRUSTED");
+
+            if (p_paired && p_trusted) {
+                paired_start = (size_t)(p_paired - line);
+                trusted_start = (size_t)(p_trusted - line);
+                have_header = true;
+            }
+
+            continue;
+        }
+
+        if (!have_header)
+            continue;
+
+        if (!looks_like_bt_address(line))
+            continue;
+
+        char *address = g_strndup(line, 17);
+        char *paired = scan_field_dup(line, paired_start, trusted_start);
+        bool is_paired = scan_bool_value(paired);
+
+        for (guint j = 0; j < catalog->devices->len; j++) {
+            MbUiDevice *device = g_ptr_array_index(catalog->devices, j);
+            if (!device || !device->address)
+                continue;
+
+            if (g_ascii_strcasecmp(device->address, address) != 0)
+                continue;
+
+            device->paired = is_paired;
+
+            if (!is_paired) {
+                g_free(device->state);
+                device->state = g_strdup("UNAVAILABLE");
+                device->alsa_port = -1;
+            }
+
+            break;
+        }
+
+        g_free(paired);
+        g_free(address);
+    }
+
+    g_strfreev(lines);
+}
+
+static void overlay_bluez_pairing_state(MbUiFacade *facade, MbUiSnapshot *catalog) {
+    if (!facade || !catalog || !catalog->devices || catalog->devices->len == 0)
+        return;
+
+    GError *error = NULL;
+
+    /*
+     * Best-effort check. If BlueZ scan fails, keep catalog state based on
+     * local config and daemon overlay. The GUI must not hide imported devices.
+     */
+    char *out = run_ctl(facade, "scan", "--timeout", "1", &error);
+    if (!out) {
+        if (error) {
+            g_printerr("[midi-ble-rt-gui] BlueZ pairing overlay skipped: %s\n",
+                       error->message ? error->message : "unknown error");
+            g_clear_error(&error);
+        }
+        return;
+    }
+
+    overlay_bluez_pairing_from_scan_output(catalog, out);
+    g_free(out);
+}
+
 static void overlay_daemon_state_by_address(MbUiSnapshot *catalog, const MbUiSnapshot *daemon) {
     if (!catalog || !catalog->devices || !daemon || !daemon->devices)
         return;
@@ -819,6 +906,7 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
     MbUiSnapshot *daemon_snapshot = mb_ui_snapshot_new();
     parse_list_output(daemon_snapshot, list);
     overlay_daemon_state_by_address(snapshot, daemon_snapshot);
+    overlay_bluez_pairing_state(facade, snapshot);
 
     mb_ui_snapshot_free(daemon_snapshot);
     g_free(list);
