@@ -505,8 +505,9 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
     if (state->disconnect_button)
         gtk_widget_set_visible(state->disconnect_button, FALSE);
 
-    gtk_widget_set_sensitive(state->refresh_button,
-                             has_device && !busy);
+    if (state->refresh_button)
+        gtk_widget_set_sensitive(state->refresh_button,
+                                 has_device && !busy);
 
     gtk_widget_set_sensitive(state->forget_button,
                              has_device && !busy);
@@ -1413,10 +1414,8 @@ static void connect_clicked_cb(GtkButton *button, gpointer user_data) {
 
 
 
-static void refresh_device_clicked_cb(GtkButton *button, gpointer user_data) {
-    (void)button;
-    device_command(user_data, "refresh");
-}
+
+
 
 static void forget_confirm_response_cb(AdwAlertDialog *dialog,
                                        const char *response,
@@ -1683,15 +1682,13 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     state->disconnect_button = NULL;
 
-    state->refresh_button = icon_button_new("view-refresh-symbolic", "Atualizar");
-    gtk_widget_set_hexpand(state->refresh_button, TRUE);
+    state->refresh_button = NULL;
 
     state->forget_button = icon_button_new("edit-delete-symbolic", "Excluir");
     gtk_widget_add_css_class(state->forget_button, "destructive-action");
     gtk_widget_set_hexpand(state->forget_button, TRUE);
 
     gtk_box_append(GTK_BOX(actions), state->connect_button);
-    gtk_box_append(GTK_BOX(actions), state->refresh_button);
     gtk_box_append(GTK_BOX(actions), state->forget_button);
     gtk_box_append(GTK_BOX(hero), actions);
 
@@ -1804,7 +1801,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     g_signal_connect(settings, "clicked", G_CALLBACK(diagnostics_clicked_cb), state);
     g_signal_connect(state->sidebar_list, "row-selected", G_CALLBACK(row_selected_cb), state);
     g_signal_connect(state->connect_button, "clicked", G_CALLBACK(connect_clicked_cb), state);
-    g_signal_connect(state->refresh_button, "clicked", G_CALLBACK(refresh_device_clicked_cb), state);
     g_signal_connect(state->forget_button, "clicked", G_CALLBACK(forget_clicked_cb), state);
 
     gtk_widget_set_visible(state->device_box, FALSE);
