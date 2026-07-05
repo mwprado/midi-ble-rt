@@ -57,6 +57,14 @@ static char *scan_field_dup(const char *line, size_t start, size_t end) {
     return g_strndup(line + start, end - start);
 }
 
+
+static bool scan_bool_value(const char *value) {
+    return value &&
+           (g_ascii_strcasecmp(value, "yes") == 0 ||
+            g_ascii_strcasecmp(value, "true") == 0 ||
+            g_ascii_strcasecmp(value, "1") == 0);
+}
+
 static bool looks_like_bt_address(const char *s) {
     if (!s || strlen(s) < 17)
         return false;
@@ -137,6 +145,10 @@ static void parse_scan_output_into_cache(MbUiFacade *facade, const char *text) {
 
     size_t name_start = 0;
     size_t alias_start = 0;
+    size_t paired_start = 0;
+    size_t trusted_start = 0;
+    size_t connected_start = 0;
+    size_t gatt_start = 0;
     size_t uuid_start = 0;
     size_t profile_start = 0;
     bool have_header = false;
@@ -147,12 +159,21 @@ static void parse_scan_output_into_cache(MbUiFacade *facade, const char *text) {
         if (g_str_has_prefix(line, "ADDRESS")) {
             const char *p_name = strstr(line, "NAME");
             const char *p_alias = strstr(line, "ALIAS");
+            const char *p_paired = strstr(line, "PAIRED");
+            const char *p_trusted = strstr(line, "TRUSTED");
+            const char *p_connected = strstr(line, "CONNECTED");
+            const char *p_gatt = strstr(line, "GATT");
             const char *p_uuid = strstr(line, "UUID-HINT");
             const char *p_profile = strstr(line, "PROFILE");
 
-            if (p_name && p_alias && p_uuid && p_profile) {
+            if (p_name && p_alias && p_paired && p_trusted &&
+                p_connected && p_gatt && p_uuid && p_profile) {
                 name_start = (size_t)(p_name - line);
                 alias_start = (size_t)(p_alias - line);
+                paired_start = (size_t)(p_paired - line);
+                trusted_start = (size_t)(p_trusted - line);
+                connected_start = (size_t)(p_connected - line);
+                gatt_start = (size_t)(p_gatt - line);
                 uuid_start = (size_t)(p_uuid - line);
                 profile_start = (size_t)(p_profile - line);
                 have_header = true;
@@ -169,6 +190,10 @@ static void parse_scan_output_into_cache(MbUiFacade *facade, const char *text) {
 
         char *address = g_strndup(line, 17);
         char *name = scan_field_dup(line, name_start, alias_start);
+        char *paired = scan_field_dup(line, paired_start, trusted_start);
+        char *trusted = scan_field_dup(line, trusted_start, connected_start);
+        char *connected = scan_field_dup(line, connected_start, gatt_start);
+        char *gatt = scan_field_dup(line, gatt_start, uuid_start);
         char *uuid_hint = scan_field_dup(line, uuid_start, profile_start);
         char *profile = scan_field_dup(line, profile_start, strlen(line));
 
@@ -186,16 +211,27 @@ static void parse_scan_output_into_cache(MbUiFacade *facade, const char *text) {
         if (is_midi) {
             char *id = scan_device_id_from_name_address(name, address);
             MbUiDevice *device = mb_ui_device_new(id,
-                                                  name,
                                                   address,
+                                                  name,
                                                   "IDLE",
                                                   -1);
+            device->paired = scan_bool_value(paired);
+            device->trusted = scan_bool_value(trusted);
+            device->connected = scan_bool_value(connected);
+            device->gatt_resolved = scan_bool_value(gatt);
+            device->profile = g_strdup(profile && g_strcmp0(profile, "-") != 0
+                                       ? profile
+                                       : "standard_ble_midi");
             g_ptr_array_add(facade->scan_devices, device);
             g_free(id);
         }
 
         g_free(profile);
         g_free(uuid_hint);
+        g_free(gatt);
+        g_free(connected);
+        g_free(trusted);
+        g_free(paired);
         g_free(name);
         g_free(address);
     }
@@ -214,10 +250,15 @@ static void merge_scan_cache_into_snapshot(MbUiFacade *facade, MbUiSnapshot *sna
             continue;
 
         MbUiDevice *copy = mb_ui_device_new(safe_str(scan_device->id, "-"),
-                                            safe_str(scan_device->name, "Dispositivo BLE-MIDI"),
                                             safe_str(scan_device->address, "-"),
+                                            safe_str(scan_device->name, "Dispositivo BLE-MIDI"),
                                             "IDLE",
                                             -1);
+        copy->paired = scan_device->paired;
+        copy->trusted = scan_device->trusted;
+        copy->connected = scan_device->connected;
+        copy->gatt_resolved = scan_device->gatt_resolved;
+        copy->profile = g_strdup(scan_device->profile);
         g_ptr_array_add(snapshot->devices, copy);
     }
 }
@@ -509,6 +550,98 @@ static char *sanitize_device_id(const char *device_id) {
     return g_string_free(out, FALSE);
 }
 
+
+static void overlay_daemon_state_by_address(MbUiSnapshot *catalog, const MbUiSnapshot *daemon) {
+    if (!catalog || !catalog->devices || !daemon || !daemon->devices)
+        return;
+
+    for (guint i = 0; i < catalog->devices->len; i++) {
+        MbUiDevice *cat = g_ptr_array_index(catalog->devices, i);
+        if (!cat)
+            continue;
+
+        for (guint j = 0; j < daemon->devices->len; j++) {
+            const MbUiDevice *live = g_ptr_array_index(daemon->devices, j);
+            if (!live)
+                continue;
+
+            bool same_id = cat->id && live->id &&
+                           g_ascii_strcasecmp(cat->id, live->id) == 0;
+            bool same_addr = cat->address && live->address &&
+                             g_ascii_strcasecmp(cat->address, live->address) == 0;
+
+            if (!same_id && !same_addr)
+                continue;
+
+            g_free(cat->state);
+            cat->state = g_strdup(live->state ? live->state : "UNKNOWN");
+            cat->alsa_port = live->alsa_port;
+            break;
+        }
+    }
+}
+
+static void load_imported_device_configs(MbUiSnapshot *snapshot) {
+    if (!snapshot || !snapshot->devices)
+        return;
+
+    char *dir = devices_config_dir();
+    if (!g_file_test(dir, G_FILE_TEST_IS_DIR)) {
+        g_free(dir);
+        return;
+    }
+
+    GError *error = NULL;
+    GDir *gdir = g_dir_open(dir, 0, &error);
+    if (!gdir) {
+        g_clear_error(&error);
+        g_free(dir);
+        return;
+    }
+
+    const char *filename = NULL;
+    while ((filename = g_dir_read_name(gdir)) != NULL) {
+        if (!g_str_has_suffix(filename, ".ini"))
+            continue;
+
+        char *path = g_build_filename(dir, filename, NULL);
+        GKeyFile *key = g_key_file_new();
+
+        if (!g_key_file_load_from_file(key, path, G_KEY_FILE_NONE, NULL)) {
+            g_key_file_unref(key);
+            g_free(path);
+            continue;
+        }
+
+        char *id = g_key_file_get_string(key, "device", "id", NULL);
+        char *address = g_key_file_get_string(key, "device", "address", NULL);
+        char *name = g_key_file_get_string(key, "device", "name", NULL);
+        char *profile = g_key_file_get_string(key, "device", "profile", NULL);
+
+        if (id && *id && address && *address) {
+            if (!snapshot_has_device_address_or_id(snapshot, id, address)) {
+                MbUiDevice *device = mb_ui_device_new(id,
+                                                      address,
+                                                      name && *name ? name : id,
+                                                      "DISCONNECTED",
+                                                      -1);
+                device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
+                g_ptr_array_add(snapshot->devices, device);
+            }
+        }
+
+        g_free(profile);
+        g_free(name);
+        g_free(address);
+        g_free(id);
+        g_key_file_unref(key);
+        g_free(path);
+    }
+
+    g_dir_close(gdir);
+    g_free(dir);
+}
+
 static char *device_config_path(const MbUiDevice *device, GError **error) {
     char *safe_id = sanitize_device_id(device ? device->id : NULL);
     char *dir = devices_config_dir();
@@ -644,6 +777,15 @@ bool mb_ui_facade_scan_devices(MbUiFacade *facade,
 MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
     MbUiSnapshot *snapshot = mb_ui_snapshot_new();
 
+    /*
+     * Main window semantics:
+     *   show only instruments imported/cataloged in devices.d .ini files.
+     *
+     * daemon-status and daemon-list are runtime overlays, not the source
+     * of the catalog.
+     */
+    load_imported_device_configs(snapshot);
+
     GError *error = NULL;
     char *status = run_ctl(facade, "daemon-status", NULL, NULL, &error);
     if (!status) {
@@ -674,11 +816,16 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
         return snapshot;
     }
 
-    parse_list_output(snapshot, list);
+    MbUiSnapshot *daemon_snapshot = mb_ui_snapshot_new();
+    parse_list_output(daemon_snapshot, list);
+    overlay_daemon_state_by_address(snapshot, daemon_snapshot);
+
+    mb_ui_snapshot_free(daemon_snapshot);
     g_free(list);
 
     return snapshot;
 }
+
 
 MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
     /*
@@ -968,11 +1115,11 @@ static bool capture_pair_enroll_device(MbUiFacade *facade,
         g_set_error(error,
                     G_IO_ERROR,
                     G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid pair request");
+                    "invalid discovery enrollment request");
         return false;
     }
 
-    MbUiSnapshot *snapshot = mb_ui_facade_get_snapshot(facade);
+    MbUiSnapshot *snapshot = mb_ui_facade_get_scan_snapshot(facade);
     const MbUiDevice *device = mb_ui_snapshot_find_device(snapshot, device_id);
 
     if (!device) {
@@ -980,18 +1127,21 @@ static bool capture_pair_enroll_device(MbUiFacade *facade,
         g_set_error(error,
                     G_IO_ERROR,
                     G_IO_ERROR_NOT_FOUND,
-                    "device is not visible in current scan result");
+                    "device is not visible in current discovery result");
         return false;
     }
 
     out->id = g_strdup(device->id);
     out->address = g_strdup(device->address && *device->address ? device->address : device->id);
     out->name = g_strdup(device->name ? device->name : "");
-    out->profile = g_strdup(pair_profile_for_device_name(device->name));
+    out->profile = g_strdup(device->profile && *device->profile
+                            ? device->profile
+                            : pair_profile_for_device_name(device->name));
 
     mb_ui_snapshot_free(snapshot);
     return true;
 }
+
 
 bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
                                       const char *device_id,
@@ -1347,6 +1497,65 @@ bool mb_ui_facade_forget_device(MbUiFacade *facade,
 
 
 
+
+
+bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
+                                        const char *device_id,
+                                        GError **error) {
+    PairEnrollDevice device = {0};
+
+    if (!capture_pair_enroll_device(facade, device_id, &device, error))
+        return false;
+
+    /*
+     * Import means: BlueZ already knows/pairs the device.
+     * Do not Pair() here. Only trust + configure + daemon recheck.
+     */
+    char *trust_argv[] = {
+        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
+        "trust",
+        device.address,
+        NULL,
+    };
+
+    if (!run_ctl_argv_checked(facade, "trust imported device", trust_argv, error)) {
+        pair_enroll_device_clear(&device);
+        return false;
+    }
+
+    char *configure_argv[] = {
+        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
+        "configure",
+        device.address,
+        "--profile",
+        device.profile,
+        "--force",
+        NULL,
+    };
+
+    if (!run_ctl_argv_checked(facade, "configure imported device", configure_argv, error)) {
+        pair_enroll_device_clear(&device);
+        return false;
+    }
+
+    GError *recheck_error = NULL;
+    char *ignored = run_ctl(facade, "daemon-recheck", NULL, NULL, &recheck_error);
+    g_free(ignored);
+
+    if (recheck_error) {
+        g_printerr("[midi-ble-rt-gui] import: daemon-recheck skipped/failed: %s\n",
+                   recheck_error->message ? recheck_error->message : "unknown error");
+        g_clear_error(&recheck_error);
+    }
+
+    g_printerr("[midi-ble-rt-gui] import: enrolled %s address=%s profile=%s\n",
+               device.name ? device.name : "-",
+               device.address ? device.address : "-",
+               device.profile ? device.profile : "-");
+
+    pair_enroll_device_clear(&device);
+    return true;
+}
 
 bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,

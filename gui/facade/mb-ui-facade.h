@@ -42,6 +42,10 @@ bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,
                                       GError **error);
 
+bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
+                                         const char *device_id,
+                                         GError **error);
+
 bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
                                       const char *device_id,
                                       const MbUiDeviceConfig *config,

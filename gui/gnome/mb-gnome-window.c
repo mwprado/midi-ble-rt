@@ -56,7 +56,6 @@ typedef struct {
     MbGnomeWindowState *state;
     GtkWidget *window;
     GtkWidget *list;
-    GtkWidget *pair_button;
     GtkWidget *status_label;
     MbUiSnapshot *snapshot;
     char *selected_device_id;
@@ -739,13 +738,10 @@ static void scan_pair_dialog_set_busy(ScanPairDialog *dialog, bool busy) {
 
     dialog->busy = busy;
 
-    if (dialog->pair_button)
-        gtk_widget_set_sensitive(dialog->pair_button,
-                                 !busy && dialog->selected_device_id != NULL);
-
     if (dialog->list)
         gtk_widget_set_sensitive(dialog->list, !busy);
 }
+
 
 static void scan_pair_row_selected(GtkListBox *box,
                                    GtkListBoxRow *row,
@@ -768,26 +764,70 @@ static void scan_pair_row_selected(GtkListBox *box,
     scan_pair_dialog_set_busy(dialog, dialog->busy);
 }
 
-static GtkWidget *scan_pair_device_row_new(const MbUiDevice *device) {
+static void scan_pair_dialog_row_import_clicked(GtkButton *button,
+                                                gpointer user_data);
+static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
+                                              gpointer user_data);
+
+static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDevice *device) {
     GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
-    gtk_widget_set_margin_top(box, 8);
-    gtk_widget_set_margin_bottom(box, 8);
-    gtk_widget_set_margin_start(box, 10);
-    gtk_widget_set_margin_end(box, 10);
+
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_margin_top(outer, 8);
+    gtk_widget_set_margin_bottom(outer, 8);
+    gtk_widget_set_margin_start(outer, 10);
+    gtk_widget_set_margin_end(outer, 10);
+
+    GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_set_hexpand(text, TRUE);
 
     GtkWidget *name = label_new(device && device->name ? device->name : "Dispositivo BLE-MIDI", "device-name");
-    GtkWidget *meta = label_new(device && device->address ? device->address : "-", "muted-text");
 
-    gtk_box_append(GTK_BOX(box), name);
-    gtk_box_append(GTK_BOX(box), meta);
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    char *meta_text = g_strdup_printf("%s · %s · %s",
+                                      device && device->address ? device->address : "-",
+                                      device && device->paired ? "Pareado no BlueZ" : "Não pareado",
+                                      device && device->profile && *device->profile ? device->profile : "BLE-MIDI");
 
-    if (device && device->id)
+    GtkWidget *meta = label_new(meta_text, "muted-text");
+    g_free(meta_text);
+
+    gtk_box_append(GTK_BOX(text), name);
+    gtk_box_append(GTK_BOX(text), meta);
+    gtk_box_append(GTK_BOX(outer), text);
+
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(actions, GTK_ALIGN_END);
+
+    GtkWidget *import_button = gtk_button_new_with_label("Importar");
+    GtkWidget *pair_button = gtk_button_new_with_label("Parear");
+
+    gtk_widget_set_sensitive(import_button, device && device->paired);
+    gtk_widget_set_sensitive(pair_button, device && !device->paired);
+
+    if (device && device->id) {
+        g_object_set_data_full(G_OBJECT(import_button), "device-id", g_strdup(device->id), g_free);
+        g_object_set_data_full(G_OBJECT(pair_button), "device-id", g_strdup(device->id), g_free);
         g_object_set_data_full(G_OBJECT(row), "device-id", g_strdup(device->id), g_free);
+    }
 
+    g_signal_connect(import_button,
+                     "clicked",
+                     G_CALLBACK(scan_pair_dialog_row_import_clicked),
+                     dialog);
+
+    g_signal_connect(pair_button,
+                     "clicked",
+                     G_CALLBACK(scan_pair_dialog_row_pair_clicked),
+                     dialog);
+
+    gtk_box_append(GTK_BOX(actions), import_button);
+    gtk_box_append(GTK_BOX(actions), pair_button);
+    gtk_box_append(GTK_BOX(outer), actions);
+
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), outer);
     return row;
 }
+
 
 static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
     if (!dialog || !dialog->list)
@@ -811,7 +851,7 @@ static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
             if (!device_is_scan_only_for_dialog(device))
                 continue;
 
-            gtk_list_box_append(GTK_LIST_BOX(dialog->list), scan_pair_device_row_new(device));
+            gtk_list_box_append(GTK_LIST_BOX(dialog->list), scan_pair_device_row_new(dialog, device));
             count++;
         }
     }
@@ -895,7 +935,7 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Escaneando dispositivos BLE-MIDI...");
+        set_label(dialog->status_label, "Descobrindo instrumentos BLE-MIDI...");
 
     ScanPairTask *scan = g_new0(ScanPairTask, 1);
     scan->dialog = dialog;
@@ -904,6 +944,99 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, scan_pair_task_done, dialog);
     g_task_set_task_data(task, scan, g_free);
     g_task_run_in_thread(task, scan_pair_task_thread);
+    g_object_unref(task);
+}
+
+
+typedef struct {
+    ScanPairDialog *dialog;
+    char *device_id;
+} ImportTask;
+
+static void import_task_free(ImportTask *task) {
+    if (!task)
+        return;
+
+    g_free(task->device_id);
+    g_free(task);
+}
+
+static void import_task_thread(GTask *task,
+                               gpointer source_object,
+                               gpointer task_data,
+                               GCancellable *cancellable) {
+    (void)source_object;
+    (void)cancellable;
+
+    ImportTask *import = task_data;
+    GError *error = NULL;
+
+    if (!mb_ui_facade_import_scanned_device(import->dialog->state->facade,
+                                            import->device_id,
+                                            &error)) {
+        g_task_return_error(task, error);
+        return;
+    }
+
+    g_task_return_boolean(task, TRUE);
+}
+
+static void import_task_done(GObject *source,
+                             GAsyncResult *result,
+                             gpointer user_data) {
+    (void)source;
+
+    ScanPairDialog *dialog = user_data;
+    GError *error = NULL;
+
+    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
+        g_printerr("[midi-ble-rt-gui] ERROR: import failed: %s\n",
+                   error && error->message ? error->message : "Erro desconhecido");
+
+        if (dialog && dialog->status_label)
+            set_label(dialog->status_label, error ? error->message : "Falha ao importar instrumento.");
+
+        show_error_dialog(dialog->state,
+                          "Falha ao importar instrumento",
+                          error ? error->message : "Erro desconhecido");
+
+        g_clear_error(&error);
+        scan_pair_dialog_set_busy(dialog, false);
+        return;
+    }
+
+    g_printerr("[midi-ble-rt-gui] import: device enrolled successfully\n");
+
+    if (dialog && dialog->status_label)
+        set_label(dialog->status_label, "Instrumento importado com sucesso.");
+
+    scan_pair_dialog_set_busy(dialog, false);
+    mb_gnome_window_refresh(dialog->state);
+}
+
+static void scan_pair_dialog_row_import_clicked(GtkButton *button,
+                                                gpointer user_data) {
+    ScanPairDialog *dialog = user_data;
+
+    if (!dialog || dialog->busy)
+        return;
+
+    const char *device_id = g_object_get_data(G_OBJECT(button), "device-id");
+    if (!device_id || !*device_id)
+        return;
+
+    scan_pair_dialog_set_busy(dialog, true);
+
+    if (dialog->status_label)
+        set_label(dialog->status_label, "Importando instrumento já pareado...");
+
+    ImportTask *import = g_new0(ImportTask, 1);
+    import->dialog = dialog;
+    import->device_id = g_strdup(device_id);
+
+    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, import_task_done, dialog);
+    g_task_set_task_data(task, import, (GDestroyNotify)import_task_free);
+    g_task_run_in_thread(task, import_task_thread);
     g_object_unref(task);
 }
 
@@ -953,10 +1086,10 @@ static void pair_task_done(GObject *source,
                    error && error->message ? error->message : "Erro desconhecido");
 
         if (dialog && dialog->status_label)
-            set_label(dialog->status_label, error ? error->message : "Falha ao parear dispositivo.");
+            set_label(dialog->status_label, error ? error->message : "Falha ao parear instrumento.");
 
         show_error_dialog(dialog->state,
-                          "Falha ao parear dispositivo",
+                          "Falha ao parear instrumento",
                           error ? error->message : "Erro desconhecido");
 
         g_clear_error(&error);
@@ -966,37 +1099,43 @@ static void pair_task_done(GObject *source,
 
     g_printerr("[midi-ble-rt-gui] pair: device enrolled successfully\n");
 
+    if (dialog && dialog->status_label)
+        set_label(dialog->status_label, "Instrumento pareado e importado com sucesso.");
+
     scan_pair_dialog_set_busy(dialog, false);
-
-    if (dialog->window)
-        gtk_window_destroy(GTK_WINDOW(dialog->window));
-
     mb_gnome_window_refresh(dialog->state);
 }
 
-static void scan_pair_dialog_pair_clicked(GtkButton *button,
-                                          gpointer user_data) {
-    (void)button;
 
+
+static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
+                                              gpointer user_data) {
     ScanPairDialog *dialog = user_data;
 
-    if (!dialog || !dialog->selected_device_id || dialog->busy)
+    if (!dialog || dialog->busy)
+        return;
+
+    const char *device_id = g_object_get_data(G_OBJECT(button), "device-id");
+    if (!device_id || !*device_id)
         return;
 
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Pareando dispositivo e marcando como confiável...");
+        set_label(dialog->status_label, "Pareando instrumento e importando configuração...");
 
     PairTask *pair = g_new0(PairTask, 1);
     pair->dialog = dialog;
-    pair->device_id = g_strdup(dialog->selected_device_id);
+    pair->device_id = g_strdup(device_id);
 
     GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, pair_task_done, dialog);
     g_task_set_task_data(task, pair, (GDestroyNotify)pair_task_free);
     g_task_run_in_thread(task, pair_task_thread);
     g_object_unref(task);
 }
+
+
+
 
 static void scan_pair_dialog_destroy_cb(GtkWidget *widget,
                                         gpointer user_data) {
@@ -1012,7 +1151,7 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     dialog->state = state;
 
     dialog->window = gtk_window_new();
-    gtk_window_set_title(GTK_WINDOW(dialog->window), "Parear BLE-MIDI");
+    gtk_window_set_title(GTK_WINDOW(dialog->window), "Adicionar instrumento");
     gtk_window_set_modal(GTK_WINDOW(dialog->window), TRUE);
     gtk_window_set_transient_for(GTK_WINDOW(dialog->window), GTK_WINDOW(state->window));
     gtk_window_set_default_size(GTK_WINDOW(dialog->window), 520, 420);
@@ -1024,10 +1163,10 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     gtk_widget_set_margin_end(root, 18);
     gtk_window_set_child(GTK_WINDOW(dialog->window), root);
 
-    GtkWidget *title = label_new("Parear instrumento BLE-MIDI", "page-title");
+    GtkWidget *title = label_new("Adicionar instrumento BLE-MIDI", "page-title");
     gtk_box_append(GTK_BOX(root), title);
 
-    dialog->status_label = label_new("Escaneando dispositivos BLE-MIDI...", "muted-text");
+    dialog->status_label = label_new("Descobrindo instrumentos BLE-MIDI...", "muted-text");
     gtk_box_append(GTK_BOX(root), dialog->status_label);
 
     GtkWidget *scroller = gtk_scrolled_window_new();
@@ -1056,15 +1195,10 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     gtk_box_append(GTK_BOX(actions), cancel);
     g_signal_connect_swapped(cancel, "clicked", G_CALLBACK(gtk_window_destroy), dialog->window);
 
-    dialog->pair_button = gtk_button_new_with_label("Parear");
-    gtk_widget_add_css_class(dialog->pair_button, "suggested-action");
-    gtk_widget_set_sensitive(dialog->pair_button, FALSE);
-    gtk_box_append(GTK_BOX(actions), dialog->pair_button);
-
-    g_signal_connect(dialog->pair_button,
-                     "clicked",
-                     G_CALLBACK(scan_pair_dialog_pair_clicked),
-                     dialog);
+    GtkWidget *ok = gtk_button_new_with_label("OK");
+    gtk_widget_add_css_class(ok, "suggested-action");
+    gtk_box_append(GTK_BOX(actions), ok);
+    g_signal_connect_swapped(ok, "clicked", G_CALLBACK(gtk_window_destroy), dialog->window);
 
     g_signal_connect(dialog->window,
                      "destroy",
