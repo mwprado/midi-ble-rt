@@ -16,6 +16,7 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,7 +31,7 @@
 #define DEVICE_IFACE           "org.bluez.Device1"
 #define AGENT_MANAGER_IFACE    "org.bluez.AgentManager1"
 #define AGENT_IFACE            "org.bluez.Agent1"
-#define AGENT_PATH             "/org/midi_ble_rt/agent"
+#define AGENT_PATH             "/org/midi_ble_rt/midi_ble_rt_agent"
 #define GATT_SERVICE_IFACE     "org.bluez.GattService1"
 #define GATT_CHRC_IFACE        "org.bluez.GattCharacteristic1"
 
@@ -135,6 +136,8 @@ static void help_global(const char *argv0) {
         "Commands:\n"
         "  list         List known BlueZ devices\n"
         "  scan         Run BlueZ discovery, then list devices\n"
+        "  instruments  List imported MIDI-BLE-RT instruments\n"
+        "  remove-instrument Remove an imported MIDI-BLE-RT instrument config\n"
         "  info         Show one device's BlueZ properties\n"
         "  probe        Connect if needed and inspect BLE-MIDI GATT objects\n"
         "  pair         Pair a device through BlueZ Device1.Pair\n"
@@ -212,6 +215,30 @@ static bool help_command(const char *argv0, const char *cmd) {
             "  %s scan --timeout 10 --midi-only\n"
             "\n",
             argv0, argv0, argv0);
+        return true;
+    }
+
+
+    if (g_strcmp0(cmd, "instruments") == 0 || g_strcmp0(cmd, "imported") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s instruments\n"
+            "  %s imported\n"
+            "\n"
+            "Description:\n"
+            "  Lists instruments imported into the local MIDI-BLE-RT catalog.\n"
+            "  The catalog is read from ~/.config/midi-ble-rt/devices.d/*.ini.\n"
+            "  Legacy ~/.config/midi-ble-rt/*.ini files are also shown for diagnostics.\n"
+            "\n"
+            "Columns:\n"
+            "  FILE      Config filename\n"
+            "  ADDRESS   Bluetooth address configured for the instrument\n"
+            "  NAME      Configured instrument name\n"
+            "  PROFILE   MIDI-BLE-RT profile\n"
+            "  PAIRED    Current BlueZ pairing state, when the device is known to BlueZ\n"
+            "  TRUSTED   Current BlueZ trusted state, when the device is known to BlueZ\n"
+            "\n",
+            argv0, argv0);
         return true;
     }
 
@@ -388,6 +415,26 @@ static bool help_command(const char *argv0, const char *cmd) {
             argv0, argv0, argv0);
         return true;
     }
+
+
+    if (g_strcmp0(cmd, "remove-instrument") == 0 ||
+        g_strcmp0(cmd, "delete-instrument") == 0 ||
+        g_strcmp0(cmd, "unimport") == 0) {
+        g_print(
+            "Usage:\n"
+            "  %s remove-instrument DEVICE --yes\n"
+            "  %s unimport DEVICE --yes\n"
+            "\n"
+            "Description:\n"
+            "  Removes the local MIDI-BLE-RT instrument config file from the catalog.\n"
+            "  This does not remove BlueZ pairing/cache. Use `forget DEVICE --yes` for that.\n"
+            "\n"
+            "DEVICE may be a Bluetooth address, configured name, profile name, or config filename.\n"
+            "\n",
+            argv0, argv0);
+        return true;
+    }
+
 
     if (g_strcmp0(cmd, "disconnect") == 0) {
         g_print(
@@ -1109,7 +1156,7 @@ static bool bluez_agent_register(Ctl *ctl, BluezAgent *agent) {
         const char *remote = error ? g_dbus_error_get_remote_error(error) : NULL;
 
         if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
-            g_print("BlueZ Agent1 already registered at %s.\n", AGENT_PATH);
+            g_print("midi-ble-rt-agent already registered at %s.\n", AGENT_PATH);
             g_clear_error(&error);
         } else {
             g_printerr("AgentManager1.RegisterAgent failed: %s\n",
@@ -1149,7 +1196,7 @@ static bool bluez_agent_register(Ctl *ctl, BluezAgent *agent) {
         g_variant_unref(ret);
     }
 
-    g_print("BlueZ Agent1 registered at %s.\n", AGENT_PATH);
+    g_print("midi-ble-rt-agent registered at %s.\n", AGENT_PATH);
     return true;
 }
 
@@ -1195,6 +1242,25 @@ static void bluez_agent_unregister(BluezAgent *agent) {
 }
 
 
+
+typedef struct {
+    GMainLoop *loop;
+    GVariant *ret;
+    GError *error;
+} PairAsyncState;
+
+static void pair_async_done(GObject *source_object,
+                            GAsyncResult *result,
+                            gpointer user_data) {
+    GDBusConnection *bus = G_DBUS_CONNECTION(source_object);
+    PairAsyncState *state = user_data;
+
+    state->ret = g_dbus_connection_call_finish(bus, result, &state->error);
+
+    if (state->loop)
+        g_main_loop_quit(state->loop);
+}
+
 static bool pair_device(Ctl *ctl, const char *path) {
     bool paired = false;
     if (get_device_bool(ctl, path, "Paired", &paired) && paired) {
@@ -1207,35 +1273,79 @@ static bool pair_device(Ctl *ctl, const char *path) {
     if (!agent_ok)
         g_printerr("Warning: BlueZ Agent1 registration failed; trying Device1.Pair() anyway.\n");
 
-    GError *error = NULL;
-    g_print("Calling Device1.Pair()...\n");
+    const int max_attempts = 2;
 
-    GVariant *ret = g_dbus_connection_call_sync(
-        ctl->bus, BLUEZ_BUS, path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_PAIR_TIMEOUT_MS, NULL, &error);
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        PairAsyncState state = {0};
+        state.loop = g_main_loop_new(NULL, FALSE);
 
-    if (!ret) {
-        const char *remote = g_dbus_error_get_remote_error(error);
+        g_print("Calling Device1.Pair() with Agent1 available%s...\n",
+                attempt > 1 ? " (retry)" : "");
+
+        g_dbus_connection_call(
+            ctl->bus,
+            BLUEZ_BUS,
+            path,
+            DEVICE_IFACE,
+            "Pair",
+            NULL,
+            NULL,
+            G_DBUS_CALL_FLAGS_NONE,
+            MB_BLUEZ_PAIR_TIMEOUT_MS,
+            NULL,
+            pair_async_done,
+            &state);
+
+        g_main_loop_run(state.loop);
+
+        if (state.loop) {
+            g_main_loop_unref(state.loop);
+            state.loop = NULL;
+        }
+
+        if (state.ret) {
+            g_variant_unref(state.ret);
+            bluez_agent_unregister(&agent);
+            g_print("Pair ok.\n");
+            return true;
+        }
+
+        const char *remote = state.error ? g_dbus_error_get_remote_error(state.error) : NULL;
+
         if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
-            g_clear_error(&error);
+            g_clear_error(&state.error);
             bluez_agent_unregister(&agent);
             g_print("Device is already paired according to BlueZ.\n");
             return true;
         }
 
-        g_printerr("Device1.Pair failed: %s\n", error->message);
+        bool retryable =
+            remote &&
+            (g_strcmp0(remote, "org.bluez.Error.AuthenticationCanceled") == 0 ||
+             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0);
+
+        if (retryable && attempt < max_attempts) {
+            g_printerr("Device1.Pair transient failure: %s\n",
+                       state.error && state.error->message ? state.error->message : "unknown error");
+            g_printerr("Retrying Device1.Pair() once with Agent1 still registered...\n");
+            g_clear_error(&state.error);
+            g_usleep(1200 * G_TIME_SPAN_MILLISECOND);
+            continue;
+        }
+
+        g_printerr("Device1.Pair failed: %s\n",
+                   state.error && state.error->message ? state.error->message : "unknown error");
         g_printerr("BlueZ Agent1 was %s. If pairing still fails, remove the device from BlueZ and retry with the instrument in pairing mode.\n",
                    agent_ok ? "registered" : "not registered");
-        g_clear_error(&error);
+        g_clear_error(&state.error);
         bluez_agent_unregister(&agent);
         return false;
     }
 
-    g_variant_unref(ret);
     bluez_agent_unregister(&agent);
-    g_print("Pair ok.\n");
-    return true;
+    return false;
 }
+
 
 static bool connect_device(Ctl *ctl, const char *path) {
     bool connected = false;
@@ -1648,6 +1758,39 @@ static char *default_config_path(ProfileKind profile) {
     return g_build_filename(dir, "midi-ble-rt", "devices.d", "device.ini", NULL);
 }
 
+
+static char *config_id_from_name_address(const char *name, const char *address) {
+    const char *base = name && *name ? name : address;
+    if (!base || !*base)
+        base = "ble-midi-device";
+
+    char *tmp = g_ascii_strdown(base, -1);
+
+    for (char *p = tmp; *p; p++) {
+        if (!g_ascii_isalnum(*p))
+            *p = '-';
+    }
+
+    char **parts = g_strsplit(tmp, "-", -1);
+    GString *out = g_string_new(NULL);
+
+    for (guint i = 0; parts && parts[i]; i++) {
+        if (!*parts[i])
+            continue;
+        if (out->len > 0)
+            g_string_append_c(out, '-');
+        g_string_append(out, parts[i]);
+    }
+
+    g_strfreev(parts);
+    g_free(tmp);
+
+    if (out->len == 0)
+        g_string_append(out, "ble-midi-device");
+
+    return g_string_free(out, FALSE);
+}
+
 static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKind profile) {
     GVariant *props = device_props(ctl, device_path);
     if (!props)
@@ -1661,6 +1804,8 @@ static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKi
     if (!name)
         name = alias ? g_strdup(alias) : g_strdup("BLE-MIDI device");
 
+    char *id = config_id_from_name_address(name, address);
+
     const char *port_name = profile == PROFILE_ROLAND_GOKEYS
         ? "Roland GO:KEYS BLE-MIDI"
         : "BLE-MIDI Device";
@@ -1671,6 +1816,8 @@ static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKi
     char *text = g_strdup_printf(
         "[device]\n"
         "# Written by midi-ble-rtctl configure.\n"
+        "# address is the canonical MIDI-BLE-RT catalog identity.\n"
+        "id = %s\n"
         "address = %s\n"
         "name = %s\n"
         "profile = %s\n"
@@ -1693,8 +1840,9 @@ static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKi
         "[debug]\n"
         "print_ble_packets = yes\n"
         "print_midi_events = no\n",
-        address, name, profile_name(profile), io_alias_line, port_name);
+        id, address, name, profile_name(profile), io_alias_line, port_name);
 
+    g_free(id);
     g_free(address);
     g_free(name);
     g_free(alias);
@@ -1727,6 +1875,189 @@ static bool write_config_file(const char *path, const char *text, bool force) {
     g_print("written: %s\n", path);
     return true;
 }
+
+
+static char *keyfile_dup_optional_string(GKeyFile *kf,
+                                         const char *group,
+                                         const char *key) {
+    GError *error = NULL;
+    char *value = g_key_file_get_string(kf, group, key, &error);
+    if (error) {
+        g_clear_error(&error);
+        return NULL;
+    }
+    return value;
+}
+
+static bool bluez_state_for_address(Ctl *ctl,
+                                    const char *address,
+                                    bool *out_known,
+                                    bool *out_paired,
+                                    bool *out_trusted,
+                                    bool *out_connected) {
+    if (out_known) *out_known = false;
+    if (out_paired) *out_paired = false;
+    if (out_trusted) *out_trusted = false;
+    if (out_connected) *out_connected = false;
+
+    if (!address || !*address)
+        return false;
+
+    GVariant *objects = get_managed_objects(ctl);
+    if (!objects)
+        return false;
+
+    GVariantIter iter;
+    const char *path = NULL;
+    GVariant *ifaces = NULL;
+    bool found = false;
+
+    g_variant_iter_init(&iter, objects);
+    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+        GVariant *props = g_variant_lookup_value(ifaces, DEVICE_IFACE, G_VARIANT_TYPE("a{sv}"));
+        if (!props) {
+            g_variant_unref(ifaces);
+            continue;
+        }
+
+        char *dev_address = props_dup_string(props, "Address");
+        if (dev_address && g_ascii_strcasecmp(dev_address, address) == 0) {
+            GVariant *v_paired = g_variant_lookup_value(props, "Paired", G_VARIANT_TYPE_BOOLEAN);
+            GVariant *v_trusted = g_variant_lookup_value(props, "Trusted", G_VARIANT_TYPE_BOOLEAN);
+            GVariant *v_connected = g_variant_lookup_value(props, "Connected", G_VARIANT_TYPE_BOOLEAN);
+
+            if (out_known) *out_known = true;
+            if (out_paired) *out_paired = v_paired ? g_variant_get_boolean(v_paired) : false;
+            if (out_trusted) *out_trusted = v_trusted ? g_variant_get_boolean(v_trusted) : false;
+            if (out_connected) *out_connected = v_connected ? g_variant_get_boolean(v_connected) : false;
+
+            if (v_paired) g_variant_unref(v_paired);
+            if (v_trusted) g_variant_unref(v_trusted);
+            if (v_connected) g_variant_unref(v_connected);
+
+            found = true;
+        }
+
+        g_free(dev_address);
+        g_variant_unref(props);
+        g_variant_unref(ifaces);
+
+        if (found)
+            break;
+    }
+
+    g_variant_unref(objects);
+    return found;
+}
+
+static bool print_imported_config_row(Ctl *ctl, const char *path, const char *base_dir) {
+    GKeyFile *kf = g_key_file_new();
+    GError *error = NULL;
+
+    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
+        g_printerr("Cannot read config %s: %s\n",
+                   path, error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        g_key_file_unref(kf);
+        return false;
+    }
+
+    char *address = keyfile_dup_optional_string(kf, "device", "address");
+    char *name = keyfile_dup_optional_string(kf, "device", "name");
+    char *profile = keyfile_dup_optional_string(kf, "device", "profile");
+
+    if (!address)
+        address = g_strdup("-");
+    if (!name)
+        name = g_strdup("-");
+    if (!profile)
+        profile = g_strdup("-");
+
+    bool known = false;
+    bool paired = false;
+    bool trusted = false;
+    bool connected = false;
+    bluez_state_for_address(ctl, address, &known, &paired, &trusted, &connected);
+
+    const char *file = path;
+    if (base_dir && g_str_has_prefix(path, base_dir)) {
+        file = path + strlen(base_dir);
+        if (*file == G_DIR_SEPARATOR)
+            file++;
+    }
+
+    g_print("%-32.32s %-17s %-28.28s %-18.18s %-6s %-7s %-9s\n",
+            file,
+            address,
+            name,
+            profile,
+            known ? yesno(paired) : "-",
+            known ? yesno(trusted) : "-",
+            known ? yesno(connected) : "-");
+
+    g_free(address);
+    g_free(name);
+    g_free(profile);
+    g_key_file_unref(kf);
+    return true;
+}
+
+static unsigned list_imported_configs_in_dir(Ctl *ctl,
+                                             const char *dir,
+                                             const char *base_dir) {
+    GDir *gdir = g_dir_open(dir, 0, NULL);
+    if (!gdir)
+        return 0;
+
+    unsigned count = 0;
+    const char *name = NULL;
+
+    while ((name = g_dir_read_name(gdir)) != NULL) {
+        if (!g_str_has_suffix(name, ".ini"))
+            continue;
+
+        char *path = g_build_filename(dir, name, NULL);
+
+        if (g_file_test(path, G_FILE_TEST_IS_REGULAR)) {
+            if (print_imported_config_row(ctl, path, base_dir))
+                count++;
+        }
+
+        g_free(path);
+    }
+
+    g_dir_close(gdir);
+    return count;
+}
+
+static int cmd_instruments(Ctl *ctl) {
+    const char *user_config_dir = g_get_user_config_dir();
+    char *root = g_build_filename(user_config_dir, "midi-ble-rt", NULL);
+    char *devices_d = g_build_filename(root, "devices.d", NULL);
+
+    g_print("%-32s %-17s %-28s %-18s %-6s %-7s %-9s\n",
+            "FILE", "ADDRESS", "NAME", "PROFILE", "PAIRED", "TRUSTED", "CONNECTED");
+
+    unsigned count = 0;
+
+    count += list_imported_configs_in_dir(ctl, devices_d, devices_d);
+
+    /*
+     * Temporary legacy fallback: show old configs directly under ~/.config/midi-ble-rt
+     * so old imported instruments remain visible during migration.
+     */
+    count += list_imported_configs_in_dir(ctl, root, root);
+
+    if (count == 0) {
+        g_print("No imported MIDI-BLE-RT instruments found.\n");
+        g_print("Expected catalog directory: %s\n", devices_d);
+    }
+
+    g_free(devices_d);
+    g_free(root);
+    return 0;
+}
+
 
 static int cmd_configure(Ctl *ctl, const char *selector, const ConfigureOptions *opts) {
     char *path = find_device_path(ctl, selector);
@@ -1769,6 +2100,158 @@ static int cmd_configure(Ctl *ctl, const char *selector, const ConfigureOptions 
     g_free(path);
     return ok ? 0 : 1;
 }
+
+
+static char *canonical_config_selector(const char *s) {
+    if (!s)
+        return g_strdup("");
+
+    char *lower = g_ascii_strdown(s, -1);
+
+    for (char *p = lower; *p; p++) {
+        if (*p == ':' || *p == ' ' || *p == '_' || *p == '.')
+            *p = '-';
+    }
+
+    return lower;
+}
+
+static bool imported_config_matches_selector(const char *path, const char *selector) {
+    if (!path || !selector || !*selector)
+        return false;
+
+    GKeyFile *kf = g_key_file_new();
+    GError *error = NULL;
+
+    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
+        g_clear_error(&error);
+        g_key_file_unref(kf);
+        return false;
+    }
+
+    char *address = keyfile_dup_optional_string(kf, "device", "address");
+    char *name = keyfile_dup_optional_string(kf, "device", "name");
+    char *profile = keyfile_dup_optional_string(kf, "device", "profile");
+    char *basename = g_path_get_basename(path);
+
+    bool match = false;
+
+    if (address && g_ascii_strcasecmp(address, selector) == 0)
+        match = true;
+    if (!match && name && contains_casefold(name, selector))
+        match = true;
+    if (!match && profile && contains_casefold(profile, selector))
+        match = true;
+    if (!match && basename && contains_casefold(basename, selector))
+        match = true;
+
+    if (!match) {
+        char *canon_selector = canonical_config_selector(selector);
+        char *canon_basename = canonical_config_selector(basename);
+        char *canon_name = canonical_config_selector(name);
+        char *canon_profile = canonical_config_selector(profile);
+
+        if ((canon_basename && strstr(canon_basename, canon_selector)) ||
+            (canon_name && strstr(canon_name, canon_selector)) ||
+            (canon_profile && strstr(canon_profile, canon_selector)))
+            match = true;
+
+        g_free(canon_selector);
+        g_free(canon_basename);
+        g_free(canon_name);
+        g_free(canon_profile);
+    }
+
+    g_free(address);
+    g_free(name);
+    g_free(profile);
+    g_free(basename);
+    g_key_file_unref(kf);
+    return match;
+}
+
+static void collect_matching_imported_configs_in_dir(GPtrArray *matches,
+                                                     const char *dir,
+                                                     const char *selector) {
+    GDir *gdir = g_dir_open(dir, 0, NULL);
+    if (!gdir)
+        return;
+
+    const char *name = NULL;
+
+    while ((name = g_dir_read_name(gdir)) != NULL) {
+        if (!g_str_has_suffix(name, ".ini"))
+            continue;
+
+        char *path = g_build_filename(dir, name, NULL);
+
+        if (g_file_test(path, G_FILE_TEST_IS_REGULAR) &&
+            imported_config_matches_selector(path, selector))
+            g_ptr_array_add(matches, path);
+        else
+            g_free(path);
+    }
+
+    g_dir_close(gdir);
+}
+
+static GPtrArray *find_imported_config_files(const char *selector) {
+    const char *user_config_dir = g_get_user_config_dir();
+    char *root = g_build_filename(user_config_dir, "midi-ble-rt", NULL);
+    char *devices_d = g_build_filename(root, "devices.d", NULL);
+
+    GPtrArray *matches = g_ptr_array_new_with_free_func(g_free);
+
+    collect_matching_imported_configs_in_dir(matches, devices_d, selector);
+    collect_matching_imported_configs_in_dir(matches, root, selector);
+
+    g_free(devices_d);
+    g_free(root);
+    return matches;
+}
+
+static int cmd_remove_instrument(Ctl *ctl, const char *selector, bool yes) {
+    (void)ctl;
+
+    if (!yes) {
+        g_printerr("Refusing to remove imported instrument without --yes.\n");
+        g_printerr("This removes only the local MIDI-BLE-RT .ini config; it does not forget BlueZ pairing.\n");
+        return 2;
+    }
+
+    GPtrArray *matches = find_imported_config_files(selector);
+
+    if (matches->len == 0) {
+        g_printerr("No imported instrument config matched: %s\n", selector);
+        g_ptr_array_unref(matches);
+        return 1;
+    }
+
+    if (matches->len > 1) {
+        g_printerr("Ambiguous imported instrument selector: %s\n", selector);
+        g_printerr("Matching config files:\n");
+        for (guint i = 0; i < matches->len; i++)
+            g_printerr("  %s\n", (char *)g_ptr_array_index(matches, i));
+        g_printerr("Use a Bluetooth address or exact config filename.\n");
+        g_ptr_array_unref(matches);
+        return 2;
+    }
+
+    const char *path = g_ptr_array_index(matches, 0);
+
+    if (g_remove(path) != 0) {
+        g_printerr("Failed to remove imported instrument config: %s\n", path);
+        g_ptr_array_unref(matches);
+        return 1;
+    }
+
+    g_print("removed: %s\n", path);
+    g_print("BlueZ pairing was not removed. Use `midi-ble-rtctl forget DEVICE --yes` if needed.\n");
+
+    g_ptr_array_unref(matches);
+    return 0;
+}
+
 
 static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opts) {
     char *path = find_device_path(ctl, selector);
@@ -1887,7 +2370,14 @@ int main(int argc, char **argv) {
 
     int rc = 0;
 
-    if (g_strcmp0(cmd, "list") == 0) {
+    if (g_strcmp0(cmd, "instruments") == 0 || g_strcmp0(cmd, "imported") == 0) {
+        if (argc != 2) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+        rc = cmd_instruments(&ctl);
+    } else if (g_strcmp0(cmd, "list") == 0) {
         ListOptions opts = {0};
         for (int i = 2; i < argc; i++) {
             if (g_strcmp0(argv[i], "--midi-only") == 0)
@@ -2010,6 +2500,27 @@ int main(int argc, char **argv) {
             }
         }
         rc = cmd_configure(&ctl, argv[2], &opts);
+    } else if (g_strcmp0(cmd, "remove-instrument") == 0 ||
+               g_strcmp0(cmd, "delete-instrument") == 0 ||
+               g_strcmp0(cmd, "unimport") == 0) {
+        if (argc < 3) {
+            usage(argv[0]);
+            rc = 2;
+            goto out;
+        }
+
+        bool yes = false;
+        for (int i = 3; i < argc; i++) {
+            if (g_strcmp0(argv[i], "--yes") == 0)
+                yes = true;
+            else {
+                usage(argv[0]);
+                rc = 2;
+                goto out;
+            }
+        }
+
+        rc = cmd_remove_instrument(&ctl, argv[2], yes);
     } else if (g_strcmp0(cmd, "disconnect") == 0) {
         if (argc != 3) {
             usage(argv[0]);

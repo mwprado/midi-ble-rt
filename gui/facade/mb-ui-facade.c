@@ -121,11 +121,25 @@ static bool snapshot_has_device_address_or_id(MbUiSnapshot *snapshot,
 
     for (guint i = 0; i < snapshot->devices->len; i++) {
         const MbUiDevice *device = g_ptr_array_index(snapshot->devices, i);
+        if (!device)
+            continue;
 
-        if (id && device->id && g_ascii_strcasecmp(id, device->id) == 0)
-            return true;
+        /*
+         * Catalog identity is the Bluetooth address.
+         *
+         * The UI id is a derived label/cache key only.  It must not merge two
+         * different instruments that happen to share the same generated id.
+         */
+        if (address && *address && device->address && *device->address)
+            if (g_ascii_strcasecmp(address, device->address) == 0)
+                return true;
 
-        if (address && device->address && g_ascii_strcasecmp(address, device->address) == 0)
+        /*
+         * Fallback only for legacy/incomplete entries with no address.
+         */
+        if ((!address || !*address || !device->address || !*device->address) &&
+            id && *id && device->id && *device->id &&
+            g_ascii_strcasecmp(id, device->id) == 0)
             return true;
     }
 
@@ -705,16 +719,35 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
         char *name = g_key_file_get_string(key, "device", "name", NULL);
         char *profile = g_key_file_get_string(key, "device", "profile", NULL);
 
-        if (id && *id && address && *address) {
-            if (!snapshot_has_device_address_or_id(snapshot, id, address)) {
-                MbUiDevice *device = mb_ui_device_new(id,
+        if (address && *address) {
+            char *generated_id = NULL;
+            const char *effective_id = id && *id ? id : NULL;
+            const char *effective_name = name && *name ? name : NULL;
+
+            /*
+             * The address is mandatory and canonical.  id is optional and
+             * derived only for UI labels, row keys and compatibility.
+             */
+            if (!effective_id) {
+                generated_id = scan_device_id_from_name_address(effective_name, address);
+                effective_id = generated_id;
+            }
+
+            if (!effective_name)
+                effective_name = effective_id && *effective_id ? effective_id : address;
+
+            if (!snapshot_has_device_address_or_id(snapshot, effective_id, address)) {
+                MbUiDevice *device = mb_ui_device_new(effective_id,
                                                       address,
-                                                      name && *name ? name : id,
+                                                      effective_name,
                                                       "DISCONNECTED",
                                                       -1);
                 device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
+                device->imported = true;
                 g_ptr_array_add(snapshot->devices, device);
             }
+
+            g_free(generated_id);
         }
 
         g_free(profile);
@@ -1714,6 +1747,27 @@ bool mb_ui_facade_forget_device(MbUiFacade *facade,
 
 
 
+
+
+bool mb_ui_facade_remove_imported_device(MbUiFacade *facade,
+                                        const char *device_id,
+                                        GError **error) {
+    if (!device_id || !*device_id) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "No device selected");
+        return false;
+    }
+
+    char *out = run_ctl(facade, "remove-instrument", device_id, "--yes", error);
+    if (!out)
+        return false;
+
+    g_printerr("[midi-ble-rt-gui] remove imported device output:\n%s", out);
+    g_free(out);
+    return true;
+}
 
 bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
                                         const char *device_id,
