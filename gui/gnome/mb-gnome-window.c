@@ -498,7 +498,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
     char devices_text[96];
     g_snprintf(devices_text,
                sizeof(devices_text),
-               "%u dispositivo%s encontrado%s",
+               "%u instrumento%s importado%s",
                count,
                count == 1 ? "" : "s",
                count == 1 ? "" : "s");
@@ -519,7 +519,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
     gtk_widget_set_visible(state->device_box, TRUE);
 
     set_label(state->device_name, safe(device->name, "Dispositivo BLE-MIDI"));
-    set_label(state->device_kind, "Instrumento BLE-MIDI encontrado");
+    set_label(state->device_kind, "Instrumento BLE-MIDI importado");
     set_label(state->device_state, hero_status_text(device->state));
 
     gtk_widget_remove_css_class(state->device_state, "ok-text");
@@ -707,7 +707,7 @@ static void refresh_task_done(GObject *source_object,
         state->snapshot = snapshot;
     }
 
-    set_label(state->last_scan_label, "Última varredura: agora");
+    set_label(state->last_scan_label, "Catálogo atualizado agora");
     rebuild_sidebar(state);
 }
 
@@ -858,7 +858,7 @@ static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
 
     if (count == 0) {
         GtkWidget *row = gtk_list_box_row_new();
-        GtkWidget *label = label_new("Nenhum instrumento novo encontrado.", "muted-text");
+        GtkWidget *label = label_new("Nenhum instrumento novo importado.", "muted-text");
         gtk_widget_set_margin_top(label, 12);
         gtk_widget_set_margin_bottom(label, 12);
         gtk_widget_set_margin_start(label, 12);
@@ -1398,7 +1398,7 @@ static void forget_clicked_cb(GtkButton *button, gpointer user_data) {
 
     char *body = g_strdup_printf(
         "Isto vai desconectar e esquecer “%s”.\n\n"
-        "A configuração local será removida e o dispositivo também será removido do BlueZ. "
+        "A configuração local será removida e o instrumento também será removido do BlueZ. "
         "Para usar novamente, será necessário escanear e conectar de novo.",
         safe(device->name, "Dispositivo BLE-MIDI"));
 
@@ -1574,7 +1574,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     GtkWidget *last_scan = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     GtkWidget *last_scan_icon = gtk_image_new_from_icon_name("view-refresh-symbolic");
-    state->last_scan_label = label_new("Última varredura: agora", "muted-text");
+    state->last_scan_label = label_new("Catálogo atualizado agora", "muted-text");
     gtk_box_append(GTK_BOX(last_scan), last_scan_icon);
     gtk_box_append(GTK_BOX(last_scan), state->last_scan_label);
     gtk_box_append(GTK_BOX(sidebar), last_scan);
@@ -1611,7 +1611,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_hexpand(hero_text, TRUE);
 
     state->device_name = label_new("Roland GO:KEYS", "device-name");
-    state->device_kind = label_new("Instrumento BLE-MIDI encontrado", "device-kind");
+    state->device_kind = label_new("Instrumento BLE-MIDI importado", "device-kind");
     state->device_state = label_new("Pronto para conectar", "ok-text");
 
     gtk_box_append(GTK_BOX(hero_text), state->device_name);
@@ -1664,7 +1664,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_box_append(GTK_BOX(config),
                    config_row_new("view-refresh-symbolic",
                                   "Reconectar automaticamente",
-                                  "Reconecta quando o dispositivo estiver disponível",
+                                  "Reconecta quando o instrumento estiver disponível",
                                   state->auto_reconnect_switch));
 
     state->scan_on_open_switch = gtk_switch_new();
@@ -1672,7 +1672,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_box_append(GTK_BOX(config),
                    config_row_new("edit-find-symbolic",
                                   "Escanear ao abrir",
-                                  "Inicia a busca por dispositivos ao abrir o aplicativo",
+                                  "Inicia a busca por instrumentos ao abrir o aplicativo",
                                   state->scan_on_open_switch));
 
     const char *profile_items[] = {
@@ -1686,7 +1686,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_size_request(state->profile_combo, 150, -1);
     gtk_box_append(GTK_BOX(config),
                    config_row_new("avatar-default-symbolic",
-                                  "Perfil do dispositivo",
+                                  "Perfil do instrumento",
                                   "Define o perfil BLE-MIDI a ser usado",
                                   state->profile_combo));
 
@@ -1703,7 +1703,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_box_append(GTK_BOX(config),
                    config_row_new("alarm-symbolic",
                                   "Timeout de varredura",
-                                  "Tempo de busca por dispositivos",
+                                  "Tempo de busca por instrumentos",
                                   state->timeout_combo));
 
     state->clock_filter_switch = gtk_switch_new();
@@ -1741,7 +1741,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     GtkWidget *svc = status_footer_item(&state->service_dot, &state->service_label, "Serviço MIDI-BLE inativo");
     GtkWidget *sep1 = gtk_label_new("•");
-    GtkWidget *devices = status_footer_item(NULL, &state->footer_devices_label, "0 dispositivos encontrados");
+    GtkWidget *devices = status_footer_item(NULL, &state->footer_devices_label, "0 instrumentos importados");
     GtkWidget *sep2 = gtk_label_new("•");
     GtkWidget *conn = status_footer_item(NULL, &state->footer_connection_label, "Nenhum conectado");
 
