@@ -1185,7 +1185,12 @@ static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
 static void scan_pair_dialog_destroy_cb(GtkWidget *widget,
                                         gpointer user_data) {
     (void)widget;
-    scan_pair_dialog_free(user_data);
+
+    ScanPairDialog *dialog = user_data;
+    if (dialog && dialog->state)
+        mb_gnome_window_refresh(dialog->state);
+
+    scan_pair_dialog_free(dialog);
 }
 
 static void show_scan_pair_dialog(MbGnomeWindowState *state) {
@@ -1236,14 +1241,10 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     gtk_widget_set_halign(actions, GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(root), actions);
 
-    GtkWidget *cancel = gtk_button_new_with_label("Cancelar");
-    gtk_box_append(GTK_BOX(actions), cancel);
-    g_signal_connect_swapped(cancel, "clicked", G_CALLBACK(gtk_window_destroy), dialog->window);
-
-    GtkWidget *ok = gtk_button_new_with_label("OK");
-    gtk_widget_add_css_class(ok, "suggested-action");
-    gtk_box_append(GTK_BOX(actions), ok);
-    g_signal_connect_swapped(ok, "clicked", G_CALLBACK(gtk_window_destroy), dialog->window);
+    GtkWidget *close = gtk_button_new_with_label("Fechar");
+    gtk_widget_add_css_class(close, "suggested-action");
+    gtk_box_append(GTK_BOX(actions), close);
+    g_signal_connect_swapped(close, "clicked", G_CALLBACK(gtk_window_destroy), dialog->window);
 
     g_signal_connect(dialog->window,
                      "destroy",
