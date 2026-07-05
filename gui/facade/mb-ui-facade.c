@@ -1013,7 +1013,7 @@ static bool imported_config_exists_for_address(const char *address) {
 
     /*
      * Compatibility during GUI migration: older configure code wrote directly
-     * under ~/.config/midi-ble-rt/*.ini. This keeps already-created configs
+     * under legacy .ini files directly in ~/.config/midi-ble-rt.
      * visible until the tree is normalized.
      */
     char *legacy_dir = g_build_filename(base, "midi-ble-rt", NULL);

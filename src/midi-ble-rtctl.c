@@ -28,6 +28,9 @@
 #define PROPERTIES_IFACE       "org.freedesktop.DBus.Properties"
 #define ADAPTER_IFACE          "org.bluez.Adapter1"
 #define DEVICE_IFACE           "org.bluez.Device1"
+#define AGENT_MANAGER_IFACE    "org.bluez.AgentManager1"
+#define AGENT_IFACE            "org.bluez.Agent1"
+#define AGENT_PATH             "/org/midi_ble_rt/agent"
 #define GATT_SERVICE_IFACE     "org.bluez.GattService1"
 #define GATT_CHRC_IFACE        "org.bluez.GattCharacteristic1"
 
@@ -38,6 +41,13 @@
 typedef struct {
     GDBusConnection *bus;
 } Ctl;
+
+typedef struct {
+    Ctl *ctl;
+    GDBusNodeInfo *node_info;
+    guint registration_id;
+    bool registered_with_bluez;
+} BluezAgent;
 
 typedef struct {
     bool midi_only;
@@ -258,9 +268,9 @@ static bool help_command(const char *argv0, const char *cmd) {
             "  %s pair DEVICE\n"
             "\n"
             "Description:\n"
-            "  Calls BlueZ Device1.Pair() unless the device is already paired.\n"
-            "  If BlueZ requires user authorization and no Agent1 is available, this may fail.\n"
-            "  Agent1 support is planned for a later phase.\n"
+            "  Registers a temporary BlueZ Agent1, then calls Device1.Pair() unless\n"
+            "  the device is already paired. The agent auto-accepts authorization\n"
+            "  requests suitable for simple BLE-MIDI devices.\n"
             "\n",
             argv0);
         help_device_selector();
@@ -907,12 +917,295 @@ static bool set_device_trusted(Ctl *ctl, const char *path, bool trusted) {
     return true;
 }
 
+
+static const char bluez_agent_xml[] =
+    "<node>"
+    "  <interface name='org.bluez.Agent1'>"
+    "    <method name='Release'/>"
+    "    <method name='RequestPinCode'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='pincode' type='s' direction='out'/>"
+    "    </method>"
+    "    <method name='DisplayPinCode'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='pincode' type='s' direction='in'/>"
+    "    </method>"
+    "    <method name='RequestPasskey'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='passkey' type='u' direction='out'/>"
+    "    </method>"
+    "    <method name='DisplayPasskey'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='passkey' type='u' direction='in'/>"
+    "      <arg name='entered' type='q' direction='in'/>"
+    "    </method>"
+    "    <method name='RequestConfirmation'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='passkey' type='u' direction='in'/>"
+    "    </method>"
+    "    <method name='RequestAuthorization'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "    </method>"
+    "    <method name='AuthorizeService'>"
+    "      <arg name='device' type='o' direction='in'/>"
+    "      <arg name='uuid' type='s' direction='in'/>"
+    "    </method>"
+    "    <method name='Cancel'/>"
+    "  </interface>"
+    "</node>";
+
+static void agent_method_call(GDBusConnection *connection,
+                              const char *sender,
+                              const char *object_path,
+                              const char *interface_name,
+                              const char *method_name,
+                              GVariant *parameters,
+                              GDBusMethodInvocation *invocation,
+                              gpointer user_data) {
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    (void)user_data;
+
+    if (g_strcmp0(method_name, "Release") == 0) {
+        g_print("BlueZ Agent1.Release\n");
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "RequestPinCode") == 0) {
+        const char *device = NULL;
+        g_variant_get(parameters, "(&o)", &device);
+        g_print("BlueZ Agent1.RequestPinCode for %s; returning 0000\n", device ? device : "-");
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", "0000"));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "DisplayPinCode") == 0) {
+        const char *device = NULL;
+        const char *pincode = NULL;
+        g_variant_get(parameters, "(&o&s)", &device, &pincode);
+        g_print("BlueZ Agent1.DisplayPinCode for %s: %s\n",
+                device ? device : "-", pincode ? pincode : "-");
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "RequestPasskey") == 0) {
+        const char *device = NULL;
+        g_variant_get(parameters, "(&o)", &device);
+        g_print("BlueZ Agent1.RequestPasskey for %s; returning 000000\n", device ? device : "-");
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", 0u));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "DisplayPasskey") == 0) {
+        const char *device = NULL;
+        guint32 passkey = 0;
+        guint16 entered = 0;
+        g_variant_get(parameters, "(&ouq)", &device, &passkey, &entered);
+        g_print("BlueZ Agent1.DisplayPasskey for %s: %06u entered=%u\n",
+                device ? device : "-", passkey, entered);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "RequestConfirmation") == 0) {
+        const char *device = NULL;
+        guint32 passkey = 0;
+        g_variant_get(parameters, "(&ou)", &device, &passkey);
+        g_print("BlueZ Agent1.RequestConfirmation for %s: %06u accepted\n",
+                device ? device : "-", passkey);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "RequestAuthorization") == 0) {
+        const char *device = NULL;
+        g_variant_get(parameters, "(&o)", &device);
+        g_print("BlueZ Agent1.RequestAuthorization for %s accepted\n", device ? device : "-");
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "AuthorizeService") == 0) {
+        const char *device = NULL;
+        const char *uuid = NULL;
+        g_variant_get(parameters, "(&o&s)", &device, &uuid);
+        g_print("BlueZ Agent1.AuthorizeService for %s uuid=%s accepted\n",
+                device ? device : "-", uuid ? uuid : "-");
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0(method_name, "Cancel") == 0) {
+        g_print("BlueZ Agent1.Cancel\n");
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    g_dbus_method_invocation_return_error(invocation,
+                                          G_IO_ERROR,
+                                          G_IO_ERROR_NOT_SUPPORTED,
+                                          "Unsupported Agent1 method: %s",
+                                          method_name);
+}
+
+static const GDBusInterfaceVTable agent_vtable = {
+    .method_call = agent_method_call,
+    .get_property = NULL,
+    .set_property = NULL,
+};
+
+static bool bluez_agent_register(Ctl *ctl, BluezAgent *agent) {
+    if (!ctl || !ctl->bus || !agent)
+        return false;
+
+    memset(agent, 0, sizeof(*agent));
+    agent->ctl = ctl;
+
+    GError *error = NULL;
+    agent->node_info = g_dbus_node_info_new_for_xml(bluez_agent_xml, &error);
+    if (!agent->node_info) {
+        g_printerr("Cannot create BlueZ Agent1 introspection data: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    agent->registration_id = g_dbus_connection_register_object(
+        ctl->bus,
+        AGENT_PATH,
+        agent->node_info->interfaces[0],
+        &agent_vtable,
+        agent,
+        NULL,
+        &error);
+
+    if (agent->registration_id == 0) {
+        g_printerr("Cannot export BlueZ Agent1 object: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        g_dbus_node_info_unref(agent->node_info);
+        agent->node_info = NULL;
+        return false;
+    }
+
+    GVariant *ret = g_dbus_connection_call_sync(
+        ctl->bus,
+        BLUEZ_BUS,
+        "/org/bluez",
+        AGENT_MANAGER_IFACE,
+        "RegisterAgent",
+        g_variant_new("(os)", AGENT_PATH, "NoInputNoOutput"),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        MB_BLUEZ_PAIR_TIMEOUT_MS,
+        NULL,
+        &error);
+
+    if (!ret) {
+        const char *remote = error ? g_dbus_error_get_remote_error(error) : NULL;
+
+        if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
+            g_print("BlueZ Agent1 already registered at %s.\n", AGENT_PATH);
+            g_clear_error(&error);
+        } else {
+            g_printerr("AgentManager1.RegisterAgent failed: %s\n",
+                       error && error->message ? error->message : "unknown error");
+            g_clear_error(&error);
+            g_dbus_connection_unregister_object(ctl->bus, agent->registration_id);
+            agent->registration_id = 0;
+            g_dbus_node_info_unref(agent->node_info);
+            agent->node_info = NULL;
+            return false;
+        }
+    } else {
+        g_variant_unref(ret);
+    }
+
+    agent->registered_with_bluez = true;
+
+    ret = g_dbus_connection_call_sync(
+        ctl->bus,
+        BLUEZ_BUS,
+        "/org/bluez",
+        AGENT_MANAGER_IFACE,
+        "RequestDefaultAgent",
+        g_variant_new("(o)", AGENT_PATH),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        MB_BLUEZ_PAIR_TIMEOUT_MS,
+        NULL,
+        &error);
+
+    if (!ret) {
+        g_printerr("AgentManager1.RequestDefaultAgent failed: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        /* Non-fatal. RegisterAgent is usually enough for Pair() from this process. */
+    } else {
+        g_variant_unref(ret);
+    }
+
+    g_print("BlueZ Agent1 registered at %s.\n", AGENT_PATH);
+    return true;
+}
+
+static void bluez_agent_unregister(BluezAgent *agent) {
+    if (!agent || !agent->ctl || !agent->ctl->bus)
+        return;
+
+    if (agent->registered_with_bluez) {
+        GError *error = NULL;
+        GVariant *ret = g_dbus_connection_call_sync(
+            agent->ctl->bus,
+            BLUEZ_BUS,
+            "/org/bluez",
+            AGENT_MANAGER_IFACE,
+            "UnregisterAgent",
+            g_variant_new("(o)", AGENT_PATH),
+            NULL,
+            G_DBUS_CALL_FLAGS_NONE,
+            MB_BLUEZ_PAIR_TIMEOUT_MS,
+            NULL,
+            &error);
+
+        if (!ret) {
+            g_printerr("AgentManager1.UnregisterAgent failed: %s\n",
+                       error && error->message ? error->message : "unknown error");
+            g_clear_error(&error);
+        } else {
+            g_variant_unref(ret);
+        }
+
+        agent->registered_with_bluez = false;
+    }
+
+    if (agent->registration_id != 0) {
+        g_dbus_connection_unregister_object(agent->ctl->bus, agent->registration_id);
+        agent->registration_id = 0;
+    }
+
+    if (agent->node_info) {
+        g_dbus_node_info_unref(agent->node_info);
+        agent->node_info = NULL;
+    }
+}
+
+
 static bool pair_device(Ctl *ctl, const char *path) {
     bool paired = false;
     if (get_device_bool(ctl, path, "Paired", &paired) && paired) {
         g_print("Device already paired.\n");
         return true;
     }
+
+    BluezAgent agent = {0};
+    bool agent_ok = bluez_agent_register(ctl, &agent);
+    if (!agent_ok)
+        g_printerr("Warning: BlueZ Agent1 registration failed; trying Device1.Pair() anyway.\n");
 
     GError *error = NULL;
     g_print("Calling Device1.Pair()...\n");
@@ -925,17 +1218,21 @@ static bool pair_device(Ctl *ctl, const char *path) {
         const char *remote = g_dbus_error_get_remote_error(error);
         if (remote && g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
             g_clear_error(&error);
+            bluez_agent_unregister(&agent);
             g_print("Device is already paired according to BlueZ.\n");
             return true;
         }
 
         g_printerr("Device1.Pair failed: %s\n", error->message);
-        g_printerr("If BlueZ asks for authorization, Agent1 support is the next implementation step.\n");
+        g_printerr("BlueZ Agent1 was %s. If pairing still fails, remove the device from BlueZ and retry with the instrument in pairing mode.\n",
+                   agent_ok ? "registered" : "not registered");
         g_clear_error(&error);
+        bluez_agent_unregister(&agent);
         return false;
     }
 
     g_variant_unref(ret);
+    bluez_agent_unregister(&agent);
     g_print("Pair ok.\n");
     return true;
 }
@@ -1340,11 +1637,15 @@ static ProfileKind infer_device_profile(Ctl *ctl, const char *path) {
 
 static char *default_config_path(ProfileKind profile) {
     const char *dir = g_get_user_config_dir();
+
+    /*
+     * The config-directory daemon runtime and the GUI catalog use devices.d.
+     */
     if (profile == PROFILE_ROLAND_GOKEYS)
-        return g_build_filename(dir, "midi-ble-rt", "roland-gokeys.ini", NULL);
+        return g_build_filename(dir, "midi-ble-rt", "devices.d", "roland-gokeys.ini", NULL);
     if (profile == PROFILE_STANDARD_BLE_MIDI)
-        return g_build_filename(dir, "midi-ble-rt", "standard-ble-midi.ini", NULL);
-    return g_build_filename(dir, "midi-ble-rt", "device.ini", NULL);
+        return g_build_filename(dir, "midi-ble-rt", "devices.d", "standard-ble-midi.ini", NULL);
+    return g_build_filename(dir, "midi-ble-rt", "devices.d", "device.ini", NULL);
 }
 
 static char *config_text_for_device(Ctl *ctl, const char *device_path, ProfileKind profile) {
