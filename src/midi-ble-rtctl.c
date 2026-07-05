@@ -1481,13 +1481,25 @@ static int cmd_connect(Ctl *ctl, const char *selector, const ConnectOptions *opt
     g_print("Connect device: %s\n", path);
     g_print("Profile: %s\n", profile_name(profile));
 
+    /*
+     * Pairing policy:
+     *
+     * Do not force Device1.Pair() for Roland GO:KEYS. In the observed
+     * GO:KEYS flow, Pair() can fail with AuthenticationFailed when no
+     * BlueZ Agent1 is available, while Trusted=true + Device1.Connect()
+     * is the useful preparation path for MIDI/GATT.
+     *
+     * Pair is therefore explicit only: --pair.
+     */
     bool should_pair = opts->force_pair;
-    if (profile == PROFILE_ROLAND_GOKEYS)
-        should_pair = true;
     if (opts->no_pair)
         should_pair = false;
 
     bool should_trust = !opts->no_trust;
+
+    if (profile == PROFILE_ROLAND_GOKEYS && !should_pair)
+        g_print("GO:KEYS quirk: trusting before connect; skipping Device1.Pair() unless --pair is explicit.\n");
+
     if (profile == PROFILE_UNKNOWN && !opts->force_pair)
         g_print("Profile unknown; connect will avoid forced pair unless --pair is given.\n");
 
