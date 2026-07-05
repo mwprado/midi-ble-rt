@@ -200,7 +200,6 @@ endif()
 
 install(TARGETS midi-ble-rtd midi-ble-rtctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-
 install(DIRECTORY config/ DESTINATION ${CMAKE_INSTALL_DATADIR}/midi-ble-rt/config FILES_MATCHING PATTERN "*.example")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/systemd/user/midi-ble-rtd.service" DESTINATION ${SYSTEMD_USER_UNIT_DIR})
 install(FILES docs/MULTI_DEVICE_CONFIG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
