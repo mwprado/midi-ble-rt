@@ -38,6 +38,7 @@ typedef struct {
     bool trusted;
     bool connected;
     bool gatt_resolved;
+    bool imported;
     char *profile;
 } MbUiDevice;
 
