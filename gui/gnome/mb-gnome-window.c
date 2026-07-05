@@ -148,9 +148,16 @@ static bool device_is_unpaired_for_gui(const MbUiDevice *device) {
     if (!device)
         return false;
 
-    if (!device->paired)
-        return true;
-
+    /*
+     * Important:
+     *
+     * In the main imported-instruments snapshot, paired=false may only mean
+     * "BlueZ pairing state was not overlaid yet".  It is not proof that the
+     * device is unpaired.
+     *
+     * Only the explicit daemon/UI state UNPAIRED should force the user-facing
+     * "Parear novamente" status in the main window.
+     */
     return g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0;
 }
 
@@ -517,6 +524,12 @@ static void update_main_panel(MbGnomeWindowState *state) {
     gtk_widget_add_css_class(state->service_dot, online ? "ok-text" : "err-text");
 
     guint count = state->snapshot && state->snapshot->devices ? state->snapshot->devices->len : 0;
+
+    if (state->scan_button)
+        button_set_icon_text(state->scan_button,
+                             "edit-find-symbolic",
+                             count > 0 ? "Adicionar novamente" : "Adicionar instrumento");
+
     char devices_text[96];
     g_snprintf(devices_text,
                sizeof(devices_text),
