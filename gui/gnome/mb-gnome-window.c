@@ -106,39 +106,11 @@ static bool state_is_error(const char *state) {
     return g_ascii_strcasecmp(safe(state, ""), "ERROR") == 0;
 }
 
-static const char *friendly_state(const char *state) {
-    if (!state || !*state)
-        return "Desconhecido";
-    if (g_ascii_strcasecmp(state, "IDLE") == 0)
-        return "Disponível";
-    if (g_ascii_strcasecmp(state, "CONNECTING") == 0)
-        return "Conectando";
-    if (g_ascii_strcasecmp(state, "WAIT_SERVICES") == 0)
-        return "Preparando conexão";
-    if (g_ascii_strcasecmp(state, "BINDING_MIDI") == 0)
-        return "Configurando MIDI";
-    if (g_ascii_strcasecmp(state, "STREAMING") == 0)
-        return "Conectado";
-    if (g_ascii_strcasecmp(state, "RECONNECTING") == 0)
-        return "Reconectando";
-    if (g_ascii_strcasecmp(state, "ERROR") == 0)
-        return "Erro";
-    if (g_ascii_strcasecmp(state, "DISCONNECTED") == 0)
-        return "Desconectado";
-    if (g_ascii_strcasecmp(state, "UNPAIRED") == 0)
-        return "Despareado · pareie novamente";
-    return state;
-}
 
-static const char *hero_status_text(const char *state) {
-    if (state_is_streaming(state))
-        return "Conectado";
-    if (state_is_error(state))
-        return "Erro de conexão";
-    if (g_ascii_strcasecmp(safe(state, ""), "UNPAIRED") == 0)
-        return "Despareado · pareie novamente";
-    return "Pronto para conectar";
-}
+
+
+
+
 
 static GtkWidget *label_new(const char *text, const char *css_class) {
     GtkWidget *label = gtk_label_new(text);
@@ -152,6 +124,56 @@ static void set_label(GtkWidget *label, const char *text) {
     if (GTK_IS_LABEL(label))
         gtk_label_set_text(GTK_LABEL(label), text ? text : "");
 }
+
+
+static void button_set_icon_text(GtkWidget *button,
+                                 const char *icon_name,
+                                 const char *text) {
+    if (!GTK_IS_BUTTON(button))
+        return;
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+
+    GtkWidget *icon = gtk_image_new_from_icon_name(icon_name ? icon_name : "insert-link-symbolic");
+    GtkWidget *label = gtk_label_new(text ? text : "");
+
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), label);
+    gtk_button_set_child(GTK_BUTTON(button), box);
+}
+
+static bool device_is_unpaired_for_gui(const MbUiDevice *device) {
+    if (!device)
+        return false;
+
+    if (!device->paired)
+        return true;
+
+    return g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0;
+}
+
+static bool device_is_functional_for_gui(const MbUiDevice *device) {
+    return device && device->imported && !device_is_unpaired_for_gui(device);
+}
+
+static const char *main_device_status_text(const MbUiDevice *device) {
+    if (!device)
+        return "Desconhecido";
+
+    if (!device->imported)
+        return "Ausente na lista";
+
+    if (device_is_unpaired_for_gui(device))
+        return "Parear novamente";
+
+    if (state_is_streaming(device->state))
+        return "Conectado";
+
+    return "Funcional";
+}
+
 
 static GtkWidget *icon_button_new(const char *icon_name, const char *text) {
     GtkWidget *button = gtk_button_new();
@@ -266,20 +288,8 @@ static GtkWidget *musical_keyboard_icon_new(const char *css_class, int size) {
     return box;
 }
 
-static GtkWidget *green_status_new(const char *text) {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_add_css_class(box, "inline-status");
 
-    GtkWidget *icon = gtk_image_new_from_icon_name("emblem-ok-symbolic");
-    gtk_widget_add_css_class(icon, "ok-text");
 
-    GtkWidget *label = gtk_label_new(text);
-    gtk_widget_add_css_class(label, "ok-text");
-
-    gtk_box_append(GTK_BOX(box), icon);
-    gtk_box_append(GTK_BOX(box), label);
-    return box;
-}
 
 static GtkWidget *config_row_new(const char *icon_name,
                                  const char *title,
@@ -459,24 +469,32 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
     bool busy = state->command_in_flight;
     bool streaming = has_device && state_is_streaming(device->state);
     bool service_online = state->snapshot && state->snapshot->status.online;
+    bool functional = has_device && device_is_functional_for_gui(device);
 
     /*
-     * GUI rule:
-     * - Scan can work without daemon.
-     * - Connect/Disconnect/Refresh/Forget require the Serviço MIDI-BLE daemon.
-     * - If there is no active connection, only Conectar may be enabled.
+     * Workflow table:
+     * - imported + paired: visible, functional, connect/disconnect toggle enabled.
+     * - imported + not paired: visible, must pair again, connect toggle disabled.
+     * - not imported: absent from main list.
+     *
+     * Excluir is local catalog removal and must not require daemon online.
      */
-    gtk_widget_set_sensitive(state->connect_button,
-                             service_online && has_device && !busy && !streaming);
+    if (state->connect_button) {
+        button_set_icon_text(state->connect_button,
+                             streaming ? "edit-clear-symbolic" : "insert-link-symbolic",
+                             streaming ? "Desconectar" : "Conectar");
+        gtk_widget_set_sensitive(state->connect_button,
+                                 service_online && functional && !busy);
+    }
 
-    gtk_widget_set_sensitive(state->disconnect_button,
-                             service_online && has_device && !busy && streaming);
+    if (state->disconnect_button)
+        gtk_widget_set_visible(state->disconnect_button, FALSE);
 
     gtk_widget_set_sensitive(state->refresh_button,
-                             service_online && has_device && !busy && streaming);
+                             service_online && has_device && !busy);
 
     gtk_widget_set_sensitive(state->forget_button,
-                             service_online && has_device && !busy && streaming);
+                             has_device && !busy);
 
     if (state->scan_button)
         gtk_widget_set_sensitive(state->scan_button, !state->scan_in_flight && !busy);
@@ -524,14 +542,13 @@ static void update_main_panel(MbGnomeWindowState *state) {
 
     set_label(state->device_name, safe(device->name, "Dispositivo BLE-MIDI"));
     set_label(state->device_kind, "Instrumento BLE-MIDI importado");
-    set_label(state->device_state, hero_status_text(device->state));
+    set_label(state->device_state, main_device_status_text(device));
 
     gtk_widget_remove_css_class(state->device_state, "ok-text");
     gtk_widget_remove_css_class(state->device_state, "err-text");
     gtk_widget_remove_css_class(state->device_state, "muted-text");
     gtk_widget_add_css_class(state->device_state,
-                             (state_is_error(device->state) ||
-                              g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0)
+                             device_is_unpaired_for_gui(device) || state_is_error(device->state)
                                  ? "err-text"
                                  : "ok-text");
 
@@ -562,11 +579,10 @@ static GtkWidget *device_row_new(const MbUiDevice *device) {
     GtkWidget *status_line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     GtkWidget *dot = gtk_label_new("●");
     gtk_widget_add_css_class(dot,
-                             (state_is_error(device->state) ||
-                              g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0)
+                             device_is_unpaired_for_gui(device) || state_is_error(device->state)
                                  ? "err-text"
                                  : "ok-text");
-    GtkWidget *state_label = gtk_label_new(friendly_state(device->state));
+    GtkWidget *state_label = gtk_label_new(main_device_status_text(device));
     gtk_widget_add_css_class(state_label, "device-row-status");
     gtk_box_append(GTK_BOX(status_line), dot);
     gtk_box_append(GTK_BOX(status_line), state_label);
@@ -776,10 +792,8 @@ static void scan_pair_row_selected(GtkListBox *box,
     scan_pair_dialog_set_busy(dialog, dialog->busy);
 }
 
-static void scan_pair_dialog_row_import_clicked(GtkButton *button,
-                                                gpointer user_data);
-static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
-                                              gpointer user_data);
+static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
+                                                     gpointer user_data);
 
 static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDevice *device) {
     GtkWidget *row = gtk_list_box_row_new();
@@ -815,36 +829,34 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDev
     GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_set_halign(actions, GTK_ALIGN_END);
 
-    GtkWidget *import_button = gtk_button_new_with_label("Importar");
-    GtkWidget *pair_button = gtk_button_new_with_label("Parear");
+    GtkWidget *pair_import_button = gtk_button_new_with_label("Parear e Importar");
+    gtk_widget_add_css_class(pair_import_button, "suggested-action");
 
-    if (device && device->imported)
-        gtk_button_set_label(GTK_BUTTON(import_button), "Já importado");
+    /*
+     * User-facing rule:
+     *
+     * - paired + imported: nothing to do
+     * - paired + not imported: import/create .ini
+     * - not paired + imported: pair again, keep existing .ini
+     * - not paired + not imported: pair and create .ini
+     */
+    bool already_ready = device && device->paired && device->imported;
+    gtk_widget_set_sensitive(pair_import_button, device && !already_ready);
 
-    if (device && device->imported && !device->paired)
-        gtk_button_set_label(GTK_BUTTON(pair_button), "Parear novamente");
-
-    gtk_widget_set_sensitive(import_button, device && device->paired && !device->imported);
-    gtk_widget_set_sensitive(pair_button, device && !device->paired);
+    if (already_ready)
+        gtk_button_set_label(GTK_BUTTON(pair_import_button), "Já pronto");
 
     if (device && device->id) {
-        g_object_set_data_full(G_OBJECT(import_button), "device-id", g_strdup(device->id), g_free);
-        g_object_set_data_full(G_OBJECT(pair_button), "device-id", g_strdup(device->id), g_free);
+        g_object_set_data_full(G_OBJECT(pair_import_button), "device-id", g_strdup(device->id), g_free);
         g_object_set_data_full(G_OBJECT(row), "device-id", g_strdup(device->id), g_free);
     }
 
-    g_signal_connect(import_button,
+    g_signal_connect(pair_import_button,
                      "clicked",
-                     G_CALLBACK(scan_pair_dialog_row_import_clicked),
+                     G_CALLBACK(scan_pair_dialog_row_pair_import_clicked),
                      dialog);
 
-    g_signal_connect(pair_button,
-                     "clicked",
-                     G_CALLBACK(scan_pair_dialog_row_pair_clicked),
-                     dialog);
-
-    gtk_box_append(GTK_BOX(actions), import_button);
-    gtk_box_append(GTK_BOX(actions), pair_button);
+    gtk_box_append(GTK_BOX(actions), pair_import_button);
     gtk_box_append(GTK_BOX(outer), actions);
 
     gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), outer);
@@ -945,7 +957,7 @@ static void scan_pair_task_done(GObject *source,
     dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Importe um instrumento já pareado ou pareie um novo.");
+        set_label(dialog->status_label, "Escolha um instrumento para preparar o uso.");
 
     scan_pair_dialog_set_busy(dialog, false);
     scan_pair_dialog_rebuild_list(dialog);
@@ -978,7 +990,7 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Descobrindo instrumentos BLE-MIDI...");
+        set_label(dialog->status_label, "Procurando instrumentos BLE-MIDI...");
 
     ScanPairTask *scan = g_new0(ScanPairTask, 1);
     scan->dialog = dialog;
@@ -1013,10 +1025,31 @@ static void import_task_thread(GTask *task,
 
     ImportTask *import = task_data;
     GError *error = NULL;
+    bool paired = false;
 
-    if (!mb_ui_facade_import_scanned_device(import->dialog->state->facade,
-                                            import->device_id,
-                                            &error)) {
+    if (import && import->dialog && import->dialog->snapshot && import->dialog->snapshot->devices) {
+        const MbUiDevice *device = mb_ui_snapshot_find_device(import->dialog->snapshot,
+                                                              import->device_id);
+        paired = device && device->paired;
+    }
+
+    /*
+     * One visible button, two internal paths:
+     * - already paired: only import/trust/configure if needed
+     * - not paired: pair/trust/configure if needed
+     */
+    bool ok = false;
+    if (paired) {
+        ok = mb_ui_facade_import_scanned_device(import->dialog->state->facade,
+                                                import->device_id,
+                                                &error);
+    } else {
+        ok = mb_ui_facade_pair_scanned_device(import->dialog->state->facade,
+                                              import->device_id,
+                                              &error);
+    }
+
+    if (!ok) {
         g_task_return_error(task, error);
         return;
     }
@@ -1051,15 +1084,15 @@ static void import_task_done(GObject *source,
     g_printerr("[midi-ble-rt-gui] import: device enrolled successfully\n");
 
     if (dialog && dialog->status_label)
-        set_label(dialog->status_label, "Instrumento importado com sucesso.");
+        set_label(dialog->status_label, "Instrumento pronto para uso.");
 
     scan_pair_dialog_refresh_snapshot(dialog);
     scan_pair_dialog_set_busy(dialog, false);
     mb_gnome_window_refresh(dialog->state);
 }
 
-static void scan_pair_dialog_row_import_clicked(GtkButton *button,
-                                                gpointer user_data) {
+static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
+                                                     gpointer user_data) {
     ScanPairDialog *dialog = user_data;
 
     if (!dialog || dialog->busy)
@@ -1072,7 +1105,7 @@ static void scan_pair_dialog_row_import_clicked(GtkButton *button,
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Importando instrumento já pareado...");
+        set_label(dialog->status_label, "Preparando instrumento...");
 
     ImportTask *import = g_new0(ImportTask, 1);
     import->dialog = dialog;
@@ -1084,100 +1117,6 @@ static void scan_pair_dialog_row_import_clicked(GtkButton *button,
     g_object_unref(task);
 }
 
-typedef struct {
-    ScanPairDialog *dialog;
-    char *device_id;
-} PairTask;
-
-static void pair_task_free(PairTask *task) {
-    if (!task)
-        return;
-
-    g_free(task->device_id);
-    g_free(task);
-}
-
-static void pair_task_thread(GTask *task,
-                             gpointer source_object,
-                             gpointer task_data,
-                             GCancellable *cancellable) {
-    (void)source_object;
-    (void)cancellable;
-
-    PairTask *pair = task_data;
-    GError *error = NULL;
-
-    if (!mb_ui_facade_pair_scanned_device(pair->dialog->state->facade,
-                                          pair->device_id,
-                                          &error)) {
-        g_task_return_error(task, error);
-        return;
-    }
-
-    g_task_return_boolean(task, TRUE);
-}
-
-static void pair_task_done(GObject *source,
-                           GAsyncResult *result,
-                           gpointer user_data) {
-    (void)source;
-
-    ScanPairDialog *dialog = user_data;
-    GError *error = NULL;
-
-    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
-        g_printerr("[midi-ble-rt-gui] ERROR: pair failed: %s\n",
-                   error && error->message ? error->message : "Erro desconhecido");
-
-        if (dialog && dialog->status_label)
-            set_label(dialog->status_label, error ? error->message : "Falha ao parear instrumento.");
-
-        show_error_dialog(dialog->state,
-                          "Falha ao parear instrumento",
-                          error ? error->message : "Erro desconhecido");
-
-        g_clear_error(&error);
-        scan_pair_dialog_set_busy(dialog, false);
-        return;
-    }
-
-    g_printerr("[midi-ble-rt-gui] pair: device enrolled successfully\n");
-
-    if (dialog && dialog->status_label)
-        set_label(dialog->status_label, "Instrumento pareado com sucesso.");
-
-    scan_pair_dialog_refresh_snapshot(dialog);
-    scan_pair_dialog_set_busy(dialog, false);
-    mb_gnome_window_refresh(dialog->state);
-}
-
-
-
-static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
-                                              gpointer user_data) {
-    ScanPairDialog *dialog = user_data;
-
-    if (!dialog || dialog->busy)
-        return;
-
-    const char *device_id = g_object_get_data(G_OBJECT(button), "device-id");
-    if (!device_id || !*device_id)
-        return;
-
-    scan_pair_dialog_set_busy(dialog, true);
-
-    if (dialog->status_label)
-        set_label(dialog->status_label, "Pareando instrumento e atualizando configuração...");
-
-    PairTask *pair = g_new0(PairTask, 1);
-    pair->dialog = dialog;
-    pair->device_id = g_strdup(device_id);
-
-    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, pair_task_done, dialog);
-    g_task_set_task_data(task, pair, (GDestroyNotify)pair_task_free);
-    g_task_run_in_thread(task, pair_task_thread);
-    g_object_unref(task);
-}
 
 
 
@@ -1216,7 +1155,7 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     GtkWidget *title = label_new("Adicionar instrumento BLE-MIDI", "page-title");
     gtk_box_append(GTK_BOX(root), title);
 
-    dialog->status_label = label_new("Descobrindo instrumentos BLE-MIDI...", "muted-text");
+    dialog->status_label = label_new("Procurando instrumentos BLE-MIDI...", "muted-text");
     gtk_box_append(GTK_BOX(root), dialog->status_label);
 
     GtkWidget *scroller = gtk_scrolled_window_new();
@@ -1323,6 +1262,8 @@ static void device_command_task_thread(GTask *task,
         ok = mb_ui_facade_disconnect(cmd->state->facade, cmd->device_id, &error);
     } else if (g_strcmp0(cmd->verb, "refresh") == 0) {
         ok = mb_ui_facade_refresh_device(cmd->state->facade, cmd->device_id, &error);
+    } else if (g_strcmp0(cmd->verb, "remove") == 0) {
+        ok = mb_ui_facade_remove_imported_device(cmd->state->facade, cmd->device_id, &error);
     } else if (g_strcmp0(cmd->verb, "forget") == 0) {
         ok = mb_ui_facade_forget_device(cmd->state->facade, cmd->device_id, &error);
     } else {
@@ -1346,6 +1287,7 @@ static void device_command_done(GObject *source_object,
     state->command_in_flight = false;
 
     DeviceCommandTask *cmd = g_task_get_task_data(G_TASK(result));
+    bool was_remove = cmd && g_strcmp0(cmd->verb, "remove") == 0;
     bool was_forget = cmd && g_strcmp0(cmd->verb, "forget") == 0;
 
     if (!g_task_propagate_boolean(G_TASK(result), &error)) {
@@ -1358,21 +1300,8 @@ static void device_command_done(GObject *source_object,
         return;
     }
 
-    if (was_forget) {
+    if (was_remove || was_forget)
         g_clear_pointer(&state->selected_id, g_free);
-
-        if (state->snapshot) {
-            mb_ui_snapshot_free(state->snapshot);
-            state->snapshot = NULL;
-        }
-
-        state->snapshot = mb_ui_snapshot_new();
-        state->snapshot->status.online = true;
-
-        rebuild_sidebar(state);
-        update_main_panel(state);
-        return;
-    }
 
     mb_gnome_window_refresh(state);
 }
@@ -1403,13 +1332,18 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
 
 static void connect_clicked_cb(GtkButton *button, gpointer user_data) {
     (void)button;
-    device_command(user_data, "connect");
+
+    MbGnomeWindowState *state = user_data;
+    const MbUiDevice *device = selected_device(state);
+
+    if (device && state_is_streaming(device->state))
+        device_command(state, "disconnect");
+    else
+        device_command(state, "connect");
 }
 
-static void disconnect_clicked_cb(GtkButton *button, gpointer user_data) {
-    (void)button;
-    device_command(user_data, "disconnect");
-}
+
+
 
 static void refresh_device_clicked_cb(GtkButton *button, gpointer user_data) {
     (void)button;
@@ -1423,10 +1357,15 @@ static void forget_confirm_response_cb(AdwAlertDialog *dialog,
 
     MbGnomeWindowState *state = user_data;
 
-    if (g_strcmp0(response, "forget") != 0)
+    if (g_strcmp0(response, "remove") == 0) {
+        device_command(state, "remove");
         return;
+    }
 
-    device_command(state, "forget");
+    if (g_strcmp0(response, "forget") == 0) {
+        device_command(state, "forget");
+        return;
+    }
 }
 
 static void forget_clicked_cb(GtkButton *button, gpointer user_data) {
@@ -1443,18 +1382,22 @@ static void forget_clicked_cb(GtkButton *button, gpointer user_data) {
     }
 
     char *body = g_strdup_printf(
-        "Isto vai desconectar e esquecer “%s”.\n\n"
-        "A configuração local será removida e o instrumento também será removido do BlueZ. "
-        "Para usar novamente, será necessário escanear e conectar de novo.",
+        "Escolha como remover “%s”.\n\n"
+        "Excluir remove apenas o instrumento do catálogo local MIDI-BLE-RT. "
+        "Excluir e esquecer também remove o pareamento/cache do BlueZ.",
         safe(device->name, "Dispositivo BLE-MIDI"));
 
-    AdwDialog *dialog = adw_alert_dialog_new("Esquecer instrumento?", body);
+    AdwDialog *dialog = adw_alert_dialog_new("Excluir instrumento?", body);
 
     adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "cancel", "Cancelar");
-    adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "forget", "Esquecer");
+    adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "remove", "Excluir");
+    adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "forget", "Excluir e esquecer");
 
     adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "cancel");
     adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+    adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog),
+                                             "remove",
+                                             ADW_RESPONSE_DESTRUCTIVE);
     adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog),
                                              "forget",
                                              ADW_RESPONSE_DESTRUCTIVE);
@@ -1662,7 +1605,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     gtk_box_append(GTK_BOX(hero_text), state->device_name);
     gtk_box_append(GTK_BOX(hero_text), state->device_kind);
-    gtk_box_append(GTK_BOX(hero_text), green_status_new("Pronto para conectar"));
+    gtk_box_append(GTK_BOX(hero_text), state->device_state);
     gtk_box_append(GTK_BOX(hero_top), hero_text);
 
     gtk_box_append(GTK_BOX(hero), hero_top);
@@ -1676,18 +1619,16 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_add_css_class(state->connect_button, "suggested-action");
     gtk_widget_set_hexpand(state->connect_button, TRUE);
 
-    state->disconnect_button = icon_button_new("edit-clear-symbolic", "Desconectar");
-    gtk_widget_set_hexpand(state->disconnect_button, TRUE);
+    state->disconnect_button = NULL;
 
     state->refresh_button = icon_button_new("view-refresh-symbolic", "Atualizar");
     gtk_widget_set_hexpand(state->refresh_button, TRUE);
 
-    state->forget_button = icon_button_new("edit-delete-symbolic", "Esquecer");
+    state->forget_button = icon_button_new("edit-delete-symbolic", "Excluir");
     gtk_widget_add_css_class(state->forget_button, "destructive-action");
     gtk_widget_set_hexpand(state->forget_button, TRUE);
 
     gtk_box_append(GTK_BOX(actions), state->connect_button);
-    gtk_box_append(GTK_BOX(actions), state->disconnect_button);
     gtk_box_append(GTK_BOX(actions), state->refresh_button);
     gtk_box_append(GTK_BOX(actions), state->forget_button);
     gtk_box_append(GTK_BOX(hero), actions);
@@ -1806,7 +1747,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     g_signal_connect(settings, "clicked", G_CALLBACK(diagnostics_clicked_cb), state);
     g_signal_connect(state->sidebar_list, "row-selected", G_CALLBACK(row_selected_cb), state);
     g_signal_connect(state->connect_button, "clicked", G_CALLBACK(connect_clicked_cb), state);
-    g_signal_connect(state->disconnect_button, "clicked", G_CALLBACK(disconnect_clicked_cb), state);
     g_signal_connect(state->refresh_button, "clicked", G_CALLBACK(refresh_device_clicked_cb), state);
     g_signal_connect(state->forget_button, "clicked", G_CALLBACK(forget_clicked_cb), state);
 
