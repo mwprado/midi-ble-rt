@@ -28,7 +28,7 @@ O daemon já pode ser utilizado pela linha de comando. A GUI apenas organiza o f
 
 6. A lista principal da janela deve listar os dispositivos/instrumentos configurados a partir dos arquivos de configuração existentes.
 
-7. Um dispositivo já importado pode ter sido despareado, esquecido ou perdido no BlueZ. Nesse caso, ele deve continuar aparecendo na lista principal, porque ainda existe configuração local, mas deve constar como **Indisponível** ou **Pareie novamente**.
+7. Um dispositivo já importado pode ter sido despareado, esquecido ou perdido no BlueZ. Nesse caso, ele deve continuar aparecendo na lista principal, porque ainda existe configuração local, mas deve constar como **Despareado** ou **Não pareado**.
 
 ## Lista principal
 
@@ -98,11 +98,11 @@ Após sucesso, o instrumento deve aparecer na lista principal.
 
 Em caso de falha, a GUI deve apresentar mensagem clara ao usuário e registrar o erro no log da GUI.
 
-## Instrumento importado indisponível
+## Instrumento importado despareado
 
 Um instrumento pode estar importado/configurado no MIDI-BLE-RT, mas ter sido despareado, esquecido ou perdido no BlueZ.
 
-Nesse caso, ele deve continuar aparecendo na lista principal, porque ainda existe configuração local, mas com estado visual de indisponível.
+Nesse caso, ele deve continuar aparecendo na lista principal, porque ainda existe configuração local, mas com estado visual de despareado/não pareado.
 
 Comportamento esperado:
 
@@ -110,11 +110,11 @@ Comportamento esperado:
 Arquivo .ini existe
 BlueZ não possui pairing válido
   → listar na janela principal
-  → estado: Indisponível
+  → estado: Despareado ou Não pareado
   → ação recomendada: Parear novamente
 ```
 
-A GUI não deve apagar automaticamente a configuração local só porque o BlueZ não possui mais o pareamento.
+A GUI não deve apagar automaticamente a configuração local só porque o BlueZ não possui mais o pareamento. Também não deve recriar ou sobrescrever a configuração local se ela já existe.
 
 ## Regra central
 

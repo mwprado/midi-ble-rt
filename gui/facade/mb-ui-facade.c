@@ -600,7 +600,7 @@ static void overlay_bluez_pairing_from_scan_output(MbUiSnapshot *catalog, const 
 
             if (!is_paired) {
                 g_free(device->state);
-                device->state = g_strdup("UNAVAILABLE");
+                device->state = g_strdup("UNPAIRED");
                 device->alsa_port = -1;
             }
 
@@ -915,6 +915,132 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
 }
 
 
+
+static void mark_scan_devices_imported_from_catalog(MbUiSnapshot *scan_snapshot) {
+    if (!scan_snapshot || !scan_snapshot->devices)
+        return;
+
+    MbUiSnapshot *catalog = mb_ui_snapshot_new();
+    load_imported_device_configs(catalog);
+
+    for (guint i = 0; i < scan_snapshot->devices->len; i++) {
+        MbUiDevice *scan_device = g_ptr_array_index(scan_snapshot->devices, i);
+        if (!scan_device)
+            continue;
+
+        for (guint j = 0; j < catalog->devices->len; j++) {
+            const MbUiDevice *configured = g_ptr_array_index(catalog->devices, j);
+            if (!configured)
+                continue;
+
+            bool same_address =
+                scan_device->address && configured->address &&
+                g_ascii_strcasecmp(scan_device->address, configured->address) == 0;
+
+            bool same_id =
+                scan_device->id && configured->id &&
+                g_strcmp0(scan_device->id, configured->id) == 0;
+
+            if (same_address || same_id) {
+                scan_device->imported = true;
+                break;
+            }
+        }
+    }
+
+    mb_ui_snapshot_free(catalog);
+}
+
+
+static bool config_file_mentions_address(const char *path, const char *address) {
+    if (!path || !*path || !address || !*address)
+        return false;
+
+    char *contents = NULL;
+    gsize len = 0;
+
+    if (!g_file_get_contents(path, &contents, &len, NULL))
+        return false;
+
+    char *contents_down = g_ascii_strdown(contents, -1);
+    char *address_down = g_ascii_strdown(address, -1);
+
+    bool found = contents_down && address_down && strstr(contents_down, address_down) != NULL;
+
+    g_free(address_down);
+    g_free(contents_down);
+    g_free(contents);
+
+    return found;
+}
+
+static bool config_dir_has_imported_address(const char *dir_path, const char *address) {
+    if (!dir_path || !*dir_path || !address || !*address)
+        return false;
+
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (!dir)
+        return false;
+
+    bool found = false;
+    const char *name = NULL;
+
+    while (!found && (name = g_dir_read_name(dir)) != NULL) {
+        if (!g_str_has_suffix(name, ".ini"))
+            continue;
+
+        char *path = g_build_filename(dir_path, name, NULL);
+        found = config_file_mentions_address(path, address);
+        g_free(path);
+    }
+
+    g_dir_close(dir);
+    return found;
+}
+
+static bool imported_config_exists_for_address(const char *address) {
+    if (!address || !*address)
+        return false;
+
+    const char *base = g_get_user_config_dir();
+
+    char *devices_dir = g_build_filename(base, "midi-ble-rt", "devices.d", NULL);
+    bool found = config_dir_has_imported_address(devices_dir, address);
+    g_free(devices_dir);
+
+    if (found)
+        return true;
+
+    /*
+     * Compatibility during GUI migration: older configure code wrote directly
+     * under ~/.config/midi-ble-rt/*.ini. This keeps already-created configs
+     * visible until the tree is normalized.
+     */
+    char *legacy_dir = g_build_filename(base, "midi-ble-rt", NULL);
+    found = config_dir_has_imported_address(legacy_dir, address);
+    g_free(legacy_dir);
+
+    return found;
+}
+
+static void mark_scan_devices_imported_from_config_files(MbUiSnapshot *scan_snapshot) {
+    if (!scan_snapshot || !scan_snapshot->devices)
+        return;
+
+    for (guint i = 0; i < scan_snapshot->devices->len; i++) {
+        MbUiDevice *device = g_ptr_array_index(scan_snapshot->devices, i);
+        if (!device || !device->address)
+            continue;
+
+        if (imported_config_exists_for_address(device->address)) {
+            device->imported = true;
+            g_printerr("[midi-ble-rt-gui] discovery: %s already imported by local config\n",
+                       device->address);
+        }
+    }
+}
+
+
 MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
     /*
      * Snapshot exclusivo do diálogo de pareamento.
@@ -930,6 +1056,8 @@ MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
 
     merge_scan_cache_into_snapshot(facade, snapshot);
 
+    mark_scan_devices_imported_from_catalog(snapshot);
+    mark_scan_devices_imported_from_config_files(snapshot);
     return snapshot;
 }
 
@@ -1597,7 +1725,7 @@ bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
 
     /*
      * Import means: BlueZ already knows/pairs the device.
-     * Do not Pair() here. Only trust + configure + daemon recheck.
+     * Do not Pair() here. Only trust + configure when no local config exists.
      */
     char *trust_argv[] = {
         facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
@@ -1611,23 +1739,27 @@ bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
         return false;
     }
 
-    char *configure_argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "configure",
-        device.address,
-        "--profile",
-        device.profile,
-        "--force",
-        NULL,
-    };
+    if (!imported_config_exists_for_address(device.address)) {
+        char *configure_argv[] = {
+            facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
+            "configure",
+            device.address,
+            "--profile",
+            device.profile,
+            NULL,
+        };
 
-    if (!run_ctl_argv_checked(facade, "configure imported device", configure_argv, error)) {
-        pair_enroll_device_clear(&device);
-        return false;
+        if (!run_ctl_argv_checked(facade, "configure imported device", configure_argv, error)) {
+            pair_enroll_device_clear(&device);
+            return false;
+        }
+    } else {
+        g_printerr("[midi-ble-rt-gui] import: local config already exists for %s; not rewriting\n",
+                   device.address ? device.address : "-");
     }
 
     GError *recheck_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-recheck", NULL, NULL, &recheck_error);
+    char *ignored = run_ctl(facade, "daemon-recheck", device.address, NULL, &recheck_error);
     g_free(ignored);
 
     if (recheck_error) {
@@ -1645,6 +1777,7 @@ bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
     return true;
 }
 
+
 bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,
                                       GError **error) {
@@ -1653,11 +1786,6 @@ bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
     if (!capture_pair_enroll_device(facade, device_id, &device, error))
         return false;
 
-    /*
-     * This is the enrollment flow used by the scan dialog.
-     * The main window deliberately does not expose Pair/Trust/Configure
-     * as separate musician-facing actions.
-     */
     char *pair_argv[] = {
         facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
         "pair",
@@ -1682,36 +1810,36 @@ bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
         return false;
     }
 
-    char *configure_argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "configure",
-        device.address,
-        "--profile",
-        device.profile,
-        "--force",
-        NULL,
-    };
+    if (!imported_config_exists_for_address(device.address)) {
+        char *configure_argv[] = {
+            facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
+            "configure",
+            device.address,
+            "--profile",
+            device.profile,
+            NULL,
+        };
 
-    if (!run_ctl_argv_checked(facade, "configure paired device", configure_argv, error)) {
-        pair_enroll_device_clear(&device);
-        return false;
+        if (!run_ctl_argv_checked(facade, "configure paired device", configure_argv, error)) {
+            pair_enroll_device_clear(&device);
+            return false;
+        }
+    } else {
+        g_printerr("[midi-ble-rt-gui] pair: local config already exists for %s; not rewriting\n",
+                   device.address ? device.address : "-");
     }
 
     GError *recheck_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-recheck", NULL, NULL, &recheck_error);
+    char *ignored = run_ctl(facade, "daemon-recheck", device.address, NULL, &recheck_error);
     g_free(ignored);
 
     if (recheck_error) {
-        /*
-         * Daemon may be offline during enrollment. That is not fatal for
-         * pairing/configuration; the main window will show service state.
-         */
-        g_printerr("[midi-ble-rt-gui] pair: daemon-recheck skipped/failed: %s\\n",
-                   recheck_error->message);
+        g_printerr("[midi-ble-rt-gui] pair: daemon-recheck skipped/failed: %s\n",
+                   recheck_error->message ? recheck_error->message : "unknown error");
         g_clear_error(&recheck_error);
     }
 
-    g_printerr("[midi-ble-rt-gui] pair: enrolled %s address=%s profile=%s\\n",
+    g_printerr("[midi-ble-rt-gui] pair: enrolled %s address=%s profile=%s\n",
                device.name ? device.name : "-",
                device.address ? device.address : "-",
                device.profile ? device.profile : "-");
@@ -1719,4 +1847,5 @@ bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
     pair_enroll_device_clear(&device);
     return true;
 }
+
 

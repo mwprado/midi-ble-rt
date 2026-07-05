@@ -125,8 +125,8 @@ static const char *friendly_state(const char *state) {
         return "Erro";
     if (g_ascii_strcasecmp(state, "DISCONNECTED") == 0)
         return "Desconectado";
-    if (g_ascii_strcasecmp(state, "UNAVAILABLE") == 0)
-        return "Indisponível · pareie novamente";
+    if (g_ascii_strcasecmp(state, "UNPAIRED") == 0)
+        return "Despareado · pareie novamente";
     return state;
 }
 
@@ -135,8 +135,8 @@ static const char *hero_status_text(const char *state) {
         return "Conectado";
     if (state_is_error(state))
         return "Erro de conexão";
-    if (g_ascii_strcasecmp(safe(state, ""), "UNAVAILABLE") == 0)
-        return "Indisponível · pareie novamente";
+    if (g_ascii_strcasecmp(safe(state, ""), "UNPAIRED") == 0)
+        return "Despareado · pareie novamente";
     return "Pronto para conectar";
 }
 
@@ -531,7 +531,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
     gtk_widget_remove_css_class(state->device_state, "muted-text");
     gtk_widget_add_css_class(state->device_state,
                              (state_is_error(device->state) ||
-                              g_ascii_strcasecmp(safe(device->state, ""), "UNAVAILABLE") == 0)
+                              g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0)
                                  ? "err-text"
                                  : "ok-text");
 
@@ -563,7 +563,7 @@ static GtkWidget *device_row_new(const MbUiDevice *device) {
     GtkWidget *dot = gtk_label_new("●");
     gtk_widget_add_css_class(dot,
                              (state_is_error(device->state) ||
-                              g_ascii_strcasecmp(safe(device->state, ""), "UNAVAILABLE") == 0)
+                              g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0)
                                  ? "err-text"
                                  : "ok-text");
     GtkWidget *state_label = gtk_label_new(friendly_state(device->state));
@@ -795,9 +795,14 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDev
 
     GtkWidget *name = label_new(device && device->name ? device->name : "Dispositivo BLE-MIDI", "device-name");
 
-    char *meta_text = g_strdup_printf("%s · %s · %s",
+    const char *import_state = device && device->imported ? "Já importado" : "Não importado";
+
+    char *meta_text = g_strdup_printf("%s · %s · %s · %s",
                                       device && device->address ? device->address : "-",
-                                      device && device->paired ? "Pareado no BlueZ" : "Não pareado",
+                                      import_state,
+                                      device && device->paired
+                                          ? "Pareado no BlueZ"
+                                          : (device && device->imported ? "Despareado no BlueZ" : "Não pareado no BlueZ"),
                                       device && device->profile && *device->profile ? device->profile : "BLE-MIDI");
 
     GtkWidget *meta = label_new(meta_text, "muted-text");
@@ -813,7 +818,13 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDev
     GtkWidget *import_button = gtk_button_new_with_label("Importar");
     GtkWidget *pair_button = gtk_button_new_with_label("Parear");
 
-    gtk_widget_set_sensitive(import_button, device && device->paired);
+    if (device && device->imported)
+        gtk_button_set_label(GTK_BUTTON(import_button), "Já importado");
+
+    if (device && device->imported && !device->paired)
+        gtk_button_set_label(GTK_BUTTON(pair_button), "Parear novamente");
+
+    gtk_widget_set_sensitive(import_button, device && device->paired && !device->imported);
     gtk_widget_set_sensitive(pair_button, device && !device->paired);
 
     if (device && device->id) {
@@ -940,6 +951,26 @@ static void scan_pair_task_done(GObject *source,
     scan_pair_dialog_rebuild_list(dialog);
 }
 
+
+static void scan_pair_dialog_refresh_snapshot(ScanPairDialog *dialog) {
+    if (!dialog || !dialog->state || !dialog->state->facade)
+        return;
+
+    GError *scan_error = NULL;
+
+    if (!mb_ui_facade_scan_devices(dialog->state->facade, 2, &scan_error)) {
+        g_printerr("[midi-ble-rt-gui] discovery refresh skipped/failed: %s\n",
+                   scan_error && scan_error->message ? scan_error->message : "unknown error");
+        g_clear_error(&scan_error);
+    }
+
+    if (dialog->snapshot)
+        mb_ui_snapshot_free(dialog->snapshot);
+
+    dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
+    scan_pair_dialog_rebuild_list(dialog);
+}
+
 static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     if (!dialog || dialog->busy)
         return;
@@ -1022,6 +1053,7 @@ static void import_task_done(GObject *source,
     if (dialog && dialog->status_label)
         set_label(dialog->status_label, "Instrumento importado com sucesso.");
 
+    scan_pair_dialog_refresh_snapshot(dialog);
     scan_pair_dialog_set_busy(dialog, false);
     mb_gnome_window_refresh(dialog->state);
 }
@@ -1112,8 +1144,9 @@ static void pair_task_done(GObject *source,
     g_printerr("[midi-ble-rt-gui] pair: device enrolled successfully\n");
 
     if (dialog && dialog->status_label)
-        set_label(dialog->status_label, "Instrumento pareado e importado com sucesso.");
+        set_label(dialog->status_label, "Instrumento pareado com sucesso.");
 
+    scan_pair_dialog_refresh_snapshot(dialog);
     scan_pair_dialog_set_busy(dialog, false);
     mb_gnome_window_refresh(dialog->state);
 }
@@ -1134,7 +1167,7 @@ static void scan_pair_dialog_row_pair_clicked(GtkButton *button,
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Pareando instrumento e importando configuração...");
+        set_label(dialog->status_label, "Pareando instrumento e atualizando configuração...");
 
     PairTask *pair = g_new0(PairTask, 1);
     pair->dialog = dialog;
