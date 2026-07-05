@@ -37,6 +37,7 @@ void mb_ui_device_free(MbUiDevice *device) {
     g_free(device->address);
     g_free(device->name);
     g_free(device->state);
+    g_free(device->profile);
     g_free(device);
 }
 

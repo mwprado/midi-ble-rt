@@ -27,6 +27,19 @@ typedef struct {
     char *name;
     char *state;
     int alsa_port;
+
+    /*
+     * BlueZ/discovery metadata.
+     *
+     * For imported devices these fields may be false/empty unless overlaid
+     * from discovery. For scan snapshots they drive the Add Instrument dialog.
+     */
+    bool paired;
+    bool trusted;
+    bool connected;
+    bool gatt_resolved;
+    bool imported;
+    char *profile;
 } MbUiDevice;
 
 typedef struct {
