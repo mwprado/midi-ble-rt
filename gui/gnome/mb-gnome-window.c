@@ -40,6 +40,9 @@ typedef struct {
     GtkWidget *refresh_button;
     GtkWidget *forget_button;
 
+    GtkWidget *config_card;
+    GtkWidget *details_card;
+
     GtkWidget *auto_reconnect_switch;
     GtkWidget *scan_on_open_switch;
     GtkWidget *clock_filter_switch;
@@ -162,6 +165,15 @@ static bool device_is_unpaired_for_gui(const MbUiDevice *device) {
 }
 
 static bool device_is_functional_for_gui(const MbUiDevice *device) {
+    /*
+     * Main-window effective rule:
+     *
+     * Imported devices are considered usable unless the backend/overlay has
+     * explicitly marked them as UNPAIRED.
+     *
+     * This avoids disabling a functional imported instrument just because the
+     * main snapshot did not receive a fresh BlueZ paired=true overlay yet.
+     */
     return device && device->imported && !device_is_unpaired_for_gui(device);
 }
 
@@ -351,14 +363,10 @@ static GtkWidget *status_footer_item(GtkWidget **dot_out, GtkWidget **label_out,
 }
 
 static const MbUiDevice *selected_device(MbGnomeWindowState *state) {
-    if (!state || !state->snapshot)
+    if (!state || !state->snapshot || !state->selected_id)
         return NULL;
 
-    const MbUiDevice *device = mb_ui_snapshot_find_device(state->snapshot, state->selected_id);
-    if (device)
-        return device;
-
-    return mb_ui_snapshot_get_device(state->snapshot, 0);
+    return mb_ui_snapshot_find_device(state->snapshot, state->selected_id);
 }
 
 
@@ -475,30 +483,30 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
     bool has_device = device != NULL;
     bool busy = state->command_in_flight;
     bool streaming = has_device && state_is_streaming(device->state);
-    bool service_online = state->snapshot && state->snapshot->status.online;
     bool functional = has_device && device_is_functional_for_gui(device);
 
     /*
      * Workflow table:
-     * - imported + paired: visible, functional, connect/disconnect toggle enabled.
-     * - imported + not paired: visible, must pair again, connect toggle disabled.
-     * - not imported: absent from main list.
+     * - imported + paired/effectively functional: connect/disconnect toggle enabled.
+     * - imported + explicitly UNPAIRED: connect/disconnect disabled.
+     * - Excluir is local catalog removal and must not require daemon online.
      *
-     * Excluir is local catalog removal and must not require daemon online.
+     * Do not use service_online to disable the whole instrument UI.  The daemon
+     * state is operational, not catalog/identity state.
      */
     if (state->connect_button) {
         button_set_icon_text(state->connect_button,
                              streaming ? "edit-clear-symbolic" : "insert-link-symbolic",
                              streaming ? "Desconectar" : "Conectar");
         gtk_widget_set_sensitive(state->connect_button,
-                                 service_online && functional && !busy);
+                                 functional && !busy);
     }
 
     if (state->disconnect_button)
         gtk_widget_set_visible(state->disconnect_button, FALSE);
 
     gtk_widget_set_sensitive(state->refresh_button,
-                             service_online && has_device && !busy);
+                             has_device && !busy);
 
     gtk_widget_set_sensitive(state->forget_button,
                              has_device && !busy);
@@ -515,6 +523,11 @@ static void update_main_panel(MbGnomeWindowState *state) {
     bool online = state->snapshot && state->snapshot->status.online;
     const MbUiDevice *device = selected_device(state);
 
+    /*
+     * Panels and action buttons are only meaningful for the selected row.
+     * rebuild_sidebar() guarantees a default selection when imported devices
+     * exist.  If there is no selected row, keep the main panel inactive.
+     */
     if (!device_is_visible_in_main_list(device))
         device = NULL;
 
@@ -533,7 +546,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
     char devices_text[96];
     g_snprintf(devices_text,
                sizeof(devices_text),
-               "%u instrumento%s importado%s",
+               "%u instrumento%s conhecido%s",
                count,
                count == 1 ? "" : "s",
                count == 1 ? "" : "s");
@@ -543,6 +556,13 @@ static void update_main_panel(MbGnomeWindowState *state) {
         gtk_widget_set_visible(state->empty_box, TRUE);
         gtk_widget_set_visible(state->device_box, FALSE);
         set_label(state->footer_connection_label, "Nenhum conectado");
+
+        if (state->config_card)
+            gtk_widget_set_sensitive(state->config_card, FALSE);
+
+        if (state->details_card)
+            gtk_widget_set_sensitive(state->details_card, FALSE);
+
         update_action_sensitivity(state, NULL);
         return;
     }
@@ -566,6 +586,15 @@ static void update_main_panel(MbGnomeWindowState *state) {
                                  : "ok-text");
 
     set_label(state->footer_connection_label, state_is_streaming(device->state) ? "Conectado" : "Nenhum conectado");
+
+    bool functional = device_is_functional_for_gui(device);
+
+    if (state->config_card)
+        gtk_widget_set_sensitive(state->config_card, functional);
+
+    if (state->details_card)
+        gtk_widget_set_sensitive(state->details_card, functional);
+
     update_action_sensitivity(state, device);
     update_daemon_switch_state(state);
 }
@@ -620,25 +649,42 @@ static void rebuild_sidebar(MbGnomeWindowState *state) {
         return;
     }
 
+    GtkListBoxRow *first_visible_row = NULL;
+    GtkListBoxRow *selected_row = NULL;
+
     for (guint i = 0; i < state->snapshot->devices->len; i++) {
         const MbUiDevice *device = g_ptr_array_index(state->snapshot->devices, i);
 
         if (!device_is_visible_in_main_list(device))
             continue;
+
         GtkWidget *row = gtk_list_box_row_new();
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), device_row_new(device));
         g_object_set_data_full(G_OBJECT(row), "device-id", g_strdup(device->id), g_free);
         gtk_list_box_append(GTK_LIST_BOX(state->sidebar_list), row);
 
+        if (!first_visible_row)
+            first_visible_row = GTK_LIST_BOX_ROW(row);
+
         if (state->selected_id && g_strcmp0(state->selected_id, device->id) == 0)
-            gtk_list_box_select_row(GTK_LIST_BOX(state->sidebar_list), GTK_LIST_BOX_ROW(row));
+            selected_row = GTK_LIST_BOX_ROW(row);
     }
 
-    if (!state->selected_id && state->snapshot->devices->len > 0) {
-        GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(state->sidebar_list), 0);
-        if (first)
-            gtk_list_box_select_row(GTK_LIST_BOX(state->sidebar_list), first);
+    /*
+     * Selection contract:
+     * if the main list has at least one imported instrument, exactly one
+     * instrument should be selected by default.  Buttons and panels always
+     * refer to the selected instrument only.
+     */
+    if (!selected_row && first_visible_row) {
+        const char *first_id = g_object_get_data(G_OBJECT(first_visible_row), "device-id");
+        g_free(state->selected_id);
+        state->selected_id = g_strdup(first_id);
+        selected_row = first_visible_row;
     }
+
+    if (selected_row)
+        gtk_list_box_select_row(GTK_LIST_BOX(state->sidebar_list), selected_row);
 
     update_main_panel(state);
 }
@@ -773,6 +819,31 @@ static bool device_is_scan_only_for_dialog(const MbUiDevice *device) {
     return device != NULL;
 }
 
+
+static void scan_pair_dialog_set_status(ScanPairDialog *dialog,
+                                        const char *text,
+                                        bool error) {
+    if (!dialog || !dialog->status_label)
+        return;
+
+    gtk_widget_remove_css_class(dialog->status_label, "err-text");
+    gtk_widget_remove_css_class(dialog->status_label, "muted-text");
+    gtk_widget_remove_css_class(dialog->status_label, "ok-text");
+
+    gtk_widget_add_css_class(dialog->status_label, error ? "err-text" : "muted-text");
+
+    /*
+     * Keep this label short. Long backend/BlueZ errors belong in stderr/logs,
+     * otherwise the action dialog changes size and looks unstable.
+     */
+    gtk_label_set_ellipsize(GTK_LABEL(dialog->status_label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(dialog->status_label), 48);
+    gtk_label_set_single_line_mode(GTK_LABEL(dialog->status_label), TRUE);
+
+    set_label(dialog->status_label, text);
+}
+
+
 static void scan_pair_dialog_set_busy(ScanPairDialog *dialog, bool busy) {
     if (!dialog)
         return;
@@ -808,51 +879,43 @@ static void scan_pair_row_selected(GtkListBox *box,
 static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
                                                      gpointer user_data);
 
-static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDevice *device) {
-    GtkWidget *row = gtk_list_box_row_new();
+static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog,
+                                             const MbUiDevice *device) {
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_widget_add_css_class(row, "device-row");
 
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_top(outer, 8);
-    gtk_widget_set_margin_bottom(outer, 8);
-    gtk_widget_set_margin_start(outer, 10);
-    gtk_widget_set_margin_end(outer, 10);
+    GtkWidget *circle = musical_keyboard_icon_new("small-circle", 42);
+    gtk_box_append(GTK_BOX(row), circle);
 
-    GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    GtkWidget *text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_set_hexpand(text, TRUE);
 
-    GtkWidget *name = label_new(device && device->name ? device->name : "Dispositivo BLE-MIDI", "device-name");
+    /*
+     * Pairing/import dialog must stay musician-facing and minimal.
+     * Show only:
+     *   - visible instrument id/name
+     *   - Bluetooth address
+     *
+     * Pairing/imported state is expressed by the single action button.
+     * Technical details belong to the main details panel.
+     */
+    const char *title = safe(device && device->name ? device->name : NULL,
+                             device && device->id ? device->id : "Dispositivo BLE-MIDI");
+    const char *address = safe(device && device->address ? device->address : NULL, "Endereço não informado");
 
-    const char *import_state = device && device->imported ? "Já importado" : "Não importado";
-
-    char *meta_text = g_strdup_printf("%s · %s · %s · %s",
-                                      device && device->address ? device->address : "-",
-                                      import_state,
-                                      device && device->paired
-                                          ? "Pareado no BlueZ"
-                                          : (device && device->imported ? "Despareado no BlueZ" : "Não pareado no BlueZ"),
-                                      device && device->profile && *device->profile ? device->profile : "BLE-MIDI");
-
-    GtkWidget *meta = label_new(meta_text, "muted-text");
-    g_free(meta_text);
+    GtkWidget *name = label_new(title, "device-row-name");
+    GtkWidget *addr = label_new(address, "device-row-status");
 
     gtk_box_append(GTK_BOX(text), name);
-    gtk_box_append(GTK_BOX(text), meta);
-    gtk_box_append(GTK_BOX(outer), text);
+    gtk_box_append(GTK_BOX(text), addr);
+    gtk_box_append(GTK_BOX(row), text);
 
-    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_halign(actions, GTK_ALIGN_END);
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_valign(actions, GTK_ALIGN_CENTER);
 
     GtkWidget *pair_import_button = gtk_button_new_with_label("Parear e Importar");
     gtk_widget_add_css_class(pair_import_button, "suggested-action");
 
-    /*
-     * User-facing rule:
-     *
-     * - paired + imported: nothing to do
-     * - paired + not imported: import/create .ini
-     * - not paired + imported: pair again, keep existing .ini
-     * - not paired + not imported: pair and create .ini
-     */
     bool already_ready = device && device->paired && device->imported;
     gtk_widget_set_sensitive(pair_import_button, device && !already_ready);
 
@@ -870,11 +933,11 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog, const MbUiDev
                      dialog);
 
     gtk_box_append(GTK_BOX(actions), pair_import_button);
-    gtk_box_append(GTK_BOX(outer), actions);
+    gtk_box_append(GTK_BOX(row), actions);
 
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), outer);
     return row;
 }
+
 
 
 static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
@@ -956,8 +1019,7 @@ static void scan_pair_task_done(GObject *source,
         g_printerr("[midi-ble-rt-gui] ERROR: scan dialog failed: %s\n",
                    error && error->message ? error->message : "Erro desconhecido");
 
-        if (dialog && dialog->status_label)
-            set_label(dialog->status_label, error ? error->message : "Falha ao escanear.");
+        scan_pair_dialog_set_status(dialog, "Não foi possível procurar instrumentos", true);
 
         g_clear_error(&error);
         scan_pair_dialog_set_busy(dialog, false);
@@ -970,7 +1032,7 @@ static void scan_pair_task_done(GObject *source,
     dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Escolha um instrumento para preparar o uso.");
+        set_label(dialog->status_label, "Escolha um instrumento");
 
     scan_pair_dialog_set_busy(dialog, false);
     scan_pair_dialog_rebuild_list(dialog);
@@ -1003,7 +1065,7 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     scan_pair_dialog_set_busy(dialog, true);
 
     if (dialog->status_label)
-        set_label(dialog->status_label, "Procurando instrumentos BLE-MIDI...");
+        set_label(dialog->status_label, "Procurando instrumentos…");
 
     ScanPairTask *scan = g_new0(ScanPairTask, 1);
     scan->dialog = dialog;
@@ -1082,12 +1144,7 @@ static void import_task_done(GObject *source,
         g_printerr("[midi-ble-rt-gui] ERROR: import failed: %s\n",
                    error && error->message ? error->message : "Erro desconhecido");
 
-        if (dialog && dialog->status_label)
-            set_label(dialog->status_label, error ? error->message : "Falha ao importar instrumento.");
-
-        show_error_dialog(dialog->state,
-                          "Falha ao importar instrumento",
-                          error ? error->message : "Erro desconhecido");
+        scan_pair_dialog_set_status(dialog, "Não foi possível preparar o instrumento. Tente novamente", true);
 
         g_clear_error(&error);
         scan_pair_dialog_set_busy(dialog, false);
@@ -1096,8 +1153,7 @@ static void import_task_done(GObject *source,
 
     g_printerr("[midi-ble-rt-gui] import: device enrolled successfully\n");
 
-    if (dialog && dialog->status_label)
-        set_label(dialog->status_label, "Instrumento pronto para uso.");
+    scan_pair_dialog_set_status(dialog, "Instrumento pronto", false);
 
     scan_pair_dialog_refresh_snapshot(dialog);
     scan_pair_dialog_set_busy(dialog, false);
@@ -1117,8 +1173,7 @@ static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
 
     scan_pair_dialog_set_busy(dialog, true);
 
-    if (dialog->status_label)
-        set_label(dialog->status_label, "Preparando instrumento...");
+    scan_pair_dialog_set_status(dialog, "Preparando instrumento…", false);
 
     ImportTask *import = g_new0(ImportTask, 1);
     import->dialog = dialog;
@@ -1168,7 +1223,7 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
     GtkWidget *title = label_new("Adicionar instrumento BLE-MIDI", "page-title");
     gtk_box_append(GTK_BOX(root), title);
 
-    dialog->status_label = label_new("Procurando instrumentos BLE-MIDI...", "muted-text");
+    dialog->status_label = label_new("Procurando instrumentos…", "muted-text");
     gtk_box_append(GTK_BOX(root), dialog->status_label);
 
     GtkWidget *scroller = gtk_scrolled_window_new();
@@ -1325,7 +1380,7 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
 
     const MbUiDevice *device = selected_device(state);
     if (!device) {
-        show_error_dialog(state, "Nenhum instrumento importado", "Selecione um instrumento BLE-MIDI primeiro.");
+        show_error_dialog(state, "Nenhum instrumento conhecido", "Selecione um instrumento BLE-MIDI primeiro.");
         return;
     }
 
@@ -1535,9 +1590,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_add_css_class(sidebar, "sidebar");
     gtk_widget_set_size_request(sidebar, 335, -1);
 
-    GtkWidget *sidebar_title = label_new("Instrumentos importados", "section-title");
-    gtk_box_append(GTK_BOX(sidebar), sidebar_title);
-
     state->scan_button = icon_button_new("edit-find-symbolic", "Adicionar instrumento");
     gtk_widget_add_css_class(state->scan_button, "suggested-action");
     gtk_widget_add_css_class(state->scan_button, "scan-button");
@@ -1546,6 +1598,9 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_box_append(GTK_BOX(sidebar), state->scan_button);
 
     g_signal_connect(state->scan_button, "clicked", G_CALLBACK(scan_clicked_cb), state);
+
+    GtkWidget *sidebar_title = label_new("Instrumentos conhecidos", "section-title");
+    gtk_box_append(GTK_BOX(sidebar), sidebar_title);
 
     GtkWidget *list_card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(list_card, "device-list-card");
@@ -1574,12 +1629,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_vexpand(spacer, TRUE);
     gtk_box_append(GTK_BOX(sidebar), spacer);
 
-    GtkWidget *last_scan = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *last_scan_icon = gtk_image_new_from_icon_name("view-refresh-symbolic");
-    state->last_scan_label = label_new("Catálogo atualizado agora", "muted-text");
-    gtk_box_append(GTK_BOX(last_scan), last_scan_icon);
-    gtk_box_append(GTK_BOX(last_scan), state->last_scan_label);
-    gtk_box_append(GTK_BOX(sidebar), last_scan);
 
     GtkWidget *main = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
     gtk_widget_add_css_class(main, "main");
@@ -1591,9 +1640,9 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_halign(state->empty_box, GTK_ALIGN_CENTER);
 
     GtkWidget *empty_icon = musical_keyboard_icon_new(NULL, 88);
-    GtkWidget *empty_title = label_new("Nenhum instrumento importado", "device-name");
+    GtkWidget *empty_title = label_new("Nenhum instrumento conhecido", "device-name");
     gtk_label_set_xalign(GTK_LABEL(empty_title), 0.5f);
-    GtkWidget *empty_hint = label_new("Adicione ou importe um instrumento BLE-MIDI para começar.", "muted-text");
+    GtkWidget *empty_hint = label_new("Adicione um instrumento BLE-MIDI para começar.", "muted-text");
     gtk_label_set_xalign(GTK_LABEL(empty_hint), 0.5f);
 
     gtk_box_append(GTK_BOX(state->empty_box), empty_icon);
@@ -1648,13 +1697,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     GtkWidget *config = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
     gtk_widget_add_css_class(config, "config-card");
-
-    /*
-     * Configuração básica ainda é visual/provisória.
-     * Mantemos o bloco visível para validar layout, mas sem interação
-     * até a semântica ser ligada corretamente à façade/backend.
-     */
-    gtk_widget_set_sensitive(config, FALSE);
+    state->config_card = config;
 
     GtkWidget *config_title = label_new("Configuração", "config-title");
     gtk_box_append(GTK_BOX(config), config_title);
@@ -1716,6 +1759,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     GtkWidget *details = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_add_css_class(details, "details-card");
+    state->details_card = details;
 
     GtkWidget *details_icon = gtk_image_new_from_icon_name("dialog-information-symbolic");
     GtkWidget *details_label = label_new("Detalhes técnicos", "config-title");
