@@ -623,6 +623,9 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
 
         if (state->forget_button)
             gtk_widget_set_sensitive(state->forget_button, FALSE);
+
+        gtk_widget_set_visible(state->empty_box, TRUE);
+        gtk_widget_set_visible(state->device_box, FALSE);
     }
 }
 
@@ -661,38 +664,41 @@ static gboolean daemon_observer_poll_cb(gpointer user_data) {
 }
 
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device) {
-    bool has_device = device != NULL;
+    if (!state)
+        return;
+
+    bool has_selection = device != NULL;
     bool busy = state->command_in_flight;
-    bool streaming = has_device && state_is_streaming(device->state);
-    bool functional = has_device && device_is_functional_for_gui(device);
-    bool service_active = user_systemd_daemon_service_active();
+    bool streaming = has_selection && state_is_streaming(device->state);
 
     /*
-     * Runtime actions are daemon-client actions.
+     * Observer rule:
      *
-     * The GUI must not connect/disconnect when the user systemd service is
-     * inactive.  It is only a client of midi-ble-rtd; it must not imply or
-     * create daemon runtime state by itself.
-     *
-     * Excluir remains available because it is catalog/configuration state.
+     * - Search/list availability comes from daemon_functional.
+     * - Basic panel and local actions come from list selection.
+     * - Runtime connect/disconnect additionally requires daemon_functional.
      */
     if (state->connect_button) {
         button_set_icon_text(state->connect_button,
                              streaming ? "edit-clear-symbolic" : "insert-link-symbolic",
                              streaming ? "Desconectar" : "Conectar");
+
         gtk_widget_set_sensitive(state->connect_button,
-                                 service_active && functional && !busy);
+                                 state->daemon_functional &&
+                                 has_selection &&
+                                 !busy);
     }
 
     if (state->disconnect_button)
         gtk_widget_set_visible(state->disconnect_button, FALSE);
 
     if (state->refresh_button)
-        gtk_widget_set_sensitive(state->refresh_button,
-                                 has_device && !busy);
+        gtk_widget_set_sensitive(state->refresh_button, FALSE);
 
-    gtk_widget_set_sensitive(state->forget_button,
-                             has_device && !busy);
+    if (state->forget_button)
+        gtk_widget_set_sensitive(state->forget_button,
+                                 has_selection &&
+                                 !busy);
 
     if (state->scan_button)
         gtk_widget_set_sensitive(state->scan_button,
@@ -700,6 +706,7 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
                                  !state->scan_in_flight &&
                                  !busy);
 }
+
 
 
 
@@ -774,13 +781,13 @@ static void update_main_panel(MbGnomeWindowState *state) {
 
     set_label(state->footer_connection_label, state_is_streaming(device->state) ? "Conectado" : "Nenhum conectado");
 
-    bool functional = device_is_functional_for_gui(device);
+    bool has_selection = device != NULL;
 
     if (state->config_card)
-        gtk_widget_set_sensitive(state->config_card, functional);
+        gtk_widget_set_sensitive(state->config_card, has_selection);
 
     if (state->details_card)
-        gtk_widget_set_sensitive(state->details_card, functional);
+        gtk_widget_set_sensitive(state->details_card, has_selection);
 
     update_action_sensitivity(state, device);
     update_daemon_switch_state(state);
@@ -988,7 +995,16 @@ static void refresh_task_done(GObject *source_object,
      */
     bool systemd_active = user_systemd_daemon_service_active();
     bool daemon_online = state->snapshot && state->snapshot->status.online;
-    bool new_daemon_functional = systemd_active && daemon_online;
+
+/*
+ * Root observer step:
+ *
+ * The daemon switch/list/search layer follows the user systemd service.
+ * daemon-status is runtime communication through midi-ble-rtctl; it is useful
+ * for diagnostics, but it must not keep root GUI controls disabled after the
+ * service was successfully started.
+ */    
+    bool new_daemon_functional = systemd_active;
 
     g_printerr("[midi-ble-rt-gui] daemon observer: systemd_active=%d daemon_online=%d daemon_functional=%d\n",
                systemd_active,
@@ -1498,6 +1514,10 @@ static void row_selected_cb(GtkListBox *box, GtkListBoxRow *row, gpointer user_d
     (void)box;
 
     MbGnomeWindowState *state = user_data;
+
+    if (!state || !state->daemon_functional)
+        return;
+
     if (!row)
         return;
 
@@ -1591,7 +1611,7 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
     if ((g_strcmp0(verb, "connect") == 0 ||
          g_strcmp0(verb, "disconnect") == 0 ||
          g_strcmp0(verb, "refresh") == 0) &&
-        !user_systemd_daemon_service_active()) {
+        !state->daemon_functional) {
         show_error_dialog(state,
                           "Serviço MIDI-BLE desligado",
                           "Ligue o Serviço MIDI-BLE antes de conectar ou desconectar instrumentos.");
