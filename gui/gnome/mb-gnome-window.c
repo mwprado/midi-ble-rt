@@ -6,6 +6,7 @@
 #include <string.h>
 
 #define REFRESH_INTERVAL_SECONDS 2
+#define DAEMON_OBSERVER_INTERVAL_SECONDS 1
 
 typedef struct {
     AdwApplicationWindow *window;
@@ -24,6 +25,7 @@ typedef struct {
     bool daemon_requested_active;
     bool daemon_functional;
     guint daemon_transition_source_id;
+    guint daemon_observer_source_id;
     GtkWidget *footer_devices_label;
     GtkWidget *footer_connection_label;
     GtkWidget *last_scan_label;
@@ -67,6 +69,10 @@ static void daemon_schedule_transition_refresh(MbGnomeWindowState *state,
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
+static void daemon_root_observer_apply(MbGnomeWindowState *state);
+static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
+                                                bool daemon_functional);
+static gboolean daemon_observer_poll_cb(gpointer user_data);
 
 typedef struct {
     MbGnomeWindowState *state;
@@ -504,18 +510,9 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
     if (!state || !state->daemon_switch)
         return;
 
-    /*
-     * The switch controls the user systemd service, therefore systemd is the
-     * authoritative source for the switch position.
-     *
-     * daemon-status remains useful for runtime/connectivity information, but it
-     * must not make the systemd service switch appear active when the service is
-     * inactive.
-     */
-    bool service_active = user_systemd_daemon_service_active();
     bool visual_active = state->daemon_transition_in_flight
                              ? state->daemon_requested_active
-                             : service_active;
+                             : state->daemon_functional;
 
     g_signal_handlers_block_by_func(state->daemon_switch,
                                     G_CALLBACK(daemon_switch_notify_active_cb),
@@ -535,12 +532,13 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
                           : "Desligando Serviço MIDI-BLE");
         } else {
             set_label(state->daemon_switch_label,
-                      service_active
+                      state->daemon_functional
                           ? "Serviço MIDI-BLE ativado"
                           : "Serviço MIDI-BLE desativado");
         }
     }
 }
+
 
 
 
@@ -560,9 +558,7 @@ static void daemon_switch_notify_active_cb(GObject *object,
         return;
 
     bool requested_active = gtk_switch_get_active(GTK_SWITCH(object));
-    bool online = state->snapshot && state->snapshot->status.online;
-
-    if (requested_active == online)
+    if (requested_active == state->daemon_functional)
         return;
 
     state->daemon_transition_in_flight = true;
@@ -574,7 +570,7 @@ static void daemon_switch_notify_active_cb(GObject *object,
 
         if (!start_daemon_from_gui(state, &error)) {
             state->daemon_transition_in_flight = false;
-            state->daemon_requested_active = online;
+            state->daemon_requested_active = state->daemon_functional;
             update_daemon_switch_state(state);
 
             show_error_dialog(state,
@@ -592,6 +588,77 @@ static void daemon_switch_notify_active_cb(GObject *object,
     daemon_schedule_transition_refresh(state, 700);
 }
 
+
+static void daemon_root_observer_apply(MbGnomeWindowState *state) {
+    if (!state)
+        return;
+
+    /*
+     * Root observer, step 1:
+     * the daemon state controls scan/search and the main instrument list.
+     */
+    if (state->scan_button)
+        gtk_widget_set_sensitive(state->scan_button,
+                                 state->daemon_functional &&
+                                 !state->scan_in_flight &&
+                                 !state->command_in_flight);
+
+    if (state->sidebar_list)
+        gtk_widget_set_sensitive(state->sidebar_list, state->daemon_functional);
+
+    if (!state->daemon_functional) {
+        if (state->sidebar_list)
+            gtk_list_box_unselect_all(GTK_LIST_BOX(state->sidebar_list));
+
+        g_clear_pointer(&state->selected_id, g_free);
+
+        if (state->config_card)
+            gtk_widget_set_sensitive(state->config_card, FALSE);
+
+        if (state->details_card)
+            gtk_widget_set_sensitive(state->details_card, FALSE);
+
+        if (state->connect_button)
+            gtk_widget_set_sensitive(state->connect_button, FALSE);
+
+        if (state->forget_button)
+            gtk_widget_set_sensitive(state->forget_button, FALSE);
+    }
+}
+
+static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
+                                                bool daemon_functional) {
+    if (!state)
+        return;
+
+    bool changed = state->daemon_functional != daemon_functional;
+    state->daemon_functional = daemon_functional;
+
+    /*
+     * Initial-state signaling rule:
+     * even if the value did not change, propagate it because widgets may have
+     * been created before the first daemon-status result.
+     */
+    if (!state->daemon_functional)
+        g_clear_pointer(&state->selected_id, g_free);
+
+    g_printerr("[midi-ble-rt-gui] daemon observer signal: functional=%d changed=%d\n",
+               state->daemon_functional,
+               changed);
+
+    daemon_root_observer_apply(state);
+}
+
+
+static gboolean daemon_observer_poll_cb(gpointer user_data) {
+    MbGnomeWindowState *state = user_data;
+
+    if (!state)
+        return G_SOURCE_REMOVE;
+
+    mb_gnome_window_refresh(state);
+    return G_SOURCE_CONTINUE;
+}
 
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device) {
     bool has_device = device != NULL;
@@ -628,7 +695,10 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
                              has_device && !busy);
 
     if (state->scan_button)
-        gtk_widget_set_sensitive(state->scan_button, !state->scan_in_flight && !busy);
+        gtk_widget_set_sensitive(state->scan_button,
+                                 state->daemon_functional &&
+                                 !state->scan_in_flight &&
+                                 !busy);
 }
 
 
@@ -636,8 +706,8 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
 
 static bool device_is_visible_in_main_list(const MbUiDevice *device);
 static void update_main_panel(MbGnomeWindowState *state) {
-    bool online = state->snapshot && state->snapshot->status.online;
-    const MbUiDevice *device = selected_device(state);
+    bool online = state->daemon_functional;
+    const MbUiDevice *device = state->daemon_functional ? selected_device(state) : NULL;
 
     /*
      * Panels and action buttons are only meaningful for the selected row.
@@ -911,9 +981,25 @@ static void refresh_task_done(GObject *source_object,
         state->snapshot = snapshot;
     }
 
+    /*
+     * Root daemon observer:
+     * functional means both the user systemd service is active and the daemon
+     * answers daemon-status through the facade snapshot.
+     */
+    bool systemd_active = user_systemd_daemon_service_active();
+    bool daemon_online = state->snapshot && state->snapshot->status.online;
+    bool new_daemon_functional = systemd_active && daemon_online;
+
+    g_printerr("[midi-ble-rt-gui] daemon observer: systemd_active=%d daemon_online=%d daemon_functional=%d\n",
+               systemd_active,
+               daemon_online,
+               new_daemon_functional);
+
     set_label(state->last_scan_label, "Catálogo atualizado agora");
+    daemon_root_observer_set_functional(state, new_daemon_functional);
     rebuild_sidebar(state);
 }
+
 
 static void mb_gnome_window_refresh(MbGnomeWindowState *state) {
     if (!state || state->refresh_in_flight)
@@ -1389,6 +1475,13 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
     if (!state)
         return;
 
+    if (!state->daemon_functional) {
+        show_error_dialog(state,
+                          "Serviço MIDI-BLE desligado",
+                          "Ligue o Serviço MIDI-BLE antes de buscar instrumentos.");
+        return;
+    }
+
     show_scan_pair_dialog(state);
 }
 
@@ -1657,6 +1750,9 @@ static void state_free(MbGnomeWindowState *state) {
 
     if (state->daemon_transition_source_id)
         g_source_remove(state->daemon_transition_source_id);
+
+    if (state->daemon_observer_source_id)
+        g_source_remove(state->daemon_observer_source_id);
 
     mb_ui_snapshot_free(state->snapshot);
     mb_ui_facade_free(state->facade);
@@ -1945,7 +2041,17 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     set_label(state->daemon_switch_label, "Verificando Serviço MIDI-BLE");
     update_action_sensitivity(state, NULL);
 
+    /*
+     * Signal the initial daemon state to every dependent component.
+     */
+    daemon_root_observer_set_functional(state, false);
+
     mb_gnome_window_refresh(state);
+
+    state->daemon_observer_source_id =
+        g_timeout_add_seconds(DAEMON_OBSERVER_INTERVAL_SECONDS,
+                              daemon_observer_poll_cb,
+                              state);
 
     return GTK_WINDOW(state->window);
 }
