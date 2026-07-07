@@ -1,6 +1,7 @@
 #include "mb-gnome-window.h"
 #include "mb-ui-facade.h"
 #include "mb-daemon-observer.h"
+#include "mb-bluez-observer.h"
 
 #include <gio/gio.h>
 #include <stdbool.h>
@@ -24,8 +25,12 @@ typedef struct {
     bool daemon_transition_in_flight;
     bool daemon_requested_active;
     bool daemon_functional;
+    bool bluez_available;
+    bool bluez_powered;
+    bool bluez_discovering;
     guint daemon_transition_source_id;
     MbDaemonObserver *daemon_observer;
+    MbBluezObserver *bluez_observer;
     GtkWidget *footer_devices_label;
     GtkWidget *footer_connection_label;
     GtkWidget *last_scan_label;
@@ -105,6 +110,12 @@ typedef struct {
 } ScanTask;
 
 static void mb_gnome_window_refresh(MbGnomeWindowState *state);
+static void update_scan_button_state(MbGnomeWindowState *state);
+static void bluez_observer_state_changed_cb(bool available,
+                                           bool powered,
+                                           bool discovering,
+                                           const char *adapter_path,
+                                           void *user_data);
 
 static const char *safe(const char *s, const char *fallback) {
     return s && *s ? s : fallback;
@@ -117,11 +128,6 @@ static bool state_is_streaming(const char *state) {
 static bool state_is_error(const char *state) {
     return g_ascii_strcasecmp(safe(state, ""), "ERROR") == 0;
 }
-
-
-
-
-
 
 
 static GtkWidget *label_new(const char *text, const char *css_class) {
@@ -304,8 +310,6 @@ static GtkWidget *musical_keyboard_icon_new(const char *css_class, int size) {
 }
 
 
-
-
 static GtkWidget *config_row_new(const char *icon_name,
                                  const char *title,
                                  const char *subtitle,
@@ -366,9 +370,6 @@ static const MbUiDevice *selected_device(MbGnomeWindowState *state) {
 }
 
 
-
-
-
 static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
     (void)state;
 
@@ -425,8 +426,6 @@ static void stop_daemon_from_gui(MbGnomeWindowState *state) {
 }
 
 
-
-
 static gboolean daemon_transition_refresh_cb(gpointer user_data) {
     MbGnomeWindowState *state = user_data;
 
@@ -448,7 +447,8 @@ static gboolean daemon_transition_refresh_cb(gpointer user_data) {
     update_daemon_switch_state(state);
 
     if (state->daemon_functional)
-        mb_gnome_window_refresh(state);
+    
+    mb_gnome_window_refresh(state);
 
     return G_SOURCE_REMOVE;
 }
@@ -499,10 +499,6 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
         }
     }
 }
-
-
-
-
 
 
 static void daemon_switch_notify_active_cb(GObject *object,
@@ -558,11 +554,7 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
      * Root observer, step 1:
      * the daemon state controls scan/search and the main instrument list.
      */
-    if (state->scan_button)
-        gtk_widget_set_sensitive(state->scan_button,
-                                 state->daemon_functional &&
-                                 !state->scan_in_flight &&
-                                 !state->command_in_flight);
+    update_scan_button_state(state);
 
     if (state->sidebar_list)
         gtk_widget_set_sensitive(state->sidebar_list, state->daemon_functional);
@@ -644,6 +636,59 @@ static void daemon_observer_state_changed_cb(bool active,
         mb_gnome_window_refresh(state);
 }
 
+
+static bool bluez_can_scan_for_gui(const MbGnomeWindowState *state) {
+    return state &&
+           state->bluez_available &&
+           state->bluez_powered &&
+           !state->bluez_discovering;
+}
+
+static void update_scan_button_state(MbGnomeWindowState *state) {
+    if (!state || !state->scan_button)
+        return;
+
+    guint count = state->snapshot && state->snapshot->devices ? state->snapshot->devices->len : 0;
+    const char *label = count > 0 ? "Adicionar novamente" : "Adicionar instrumento";
+
+    if (!state->bluez_available)
+        label = "Bluetooth indisponível";
+    else if (!state->bluez_powered)
+        label = "Bluetooth desligado";
+    else if (state->bluez_discovering || state->scan_in_flight)
+        label = "Procurando instrumentos…";
+
+    button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
+
+    gtk_widget_set_sensitive(state->scan_button,
+                             bluez_can_scan_for_gui(state) &&
+                             !state->scan_in_flight &&
+                             !state->command_in_flight);
+}
+
+static void bluez_observer_state_changed_cb(bool available,
+                                           bool powered,
+                                           bool discovering,
+                                           const char *adapter_path,
+                                           void *user_data) {
+    MbGnomeWindowState *state = user_data;
+
+    if (!state)
+        return;
+
+    state->bluez_available = available;
+    state->bluez_powered = powered;
+    state->bluez_discovering = discovering;
+
+    g_printerr("[midi-ble-rt-gui] BlueZ observer: available=%d powered=%d discovering=%d adapter=%s\n",
+               available,
+               powered,
+               discovering,
+               adapter_path && *adapter_path ? adapter_path : "-");
+
+    update_scan_button_state(state);
+}
+
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device) {
     if (!state)
         return;
@@ -681,15 +726,8 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
                                  has_selection &&
                                  !busy);
 
-    if (state->scan_button)
-        gtk_widget_set_sensitive(state->scan_button,
-                                 state->daemon_functional &&
-                                 !state->scan_in_flight &&
-                                 !busy);
+    update_scan_button_state(state);
 }
-
-
-
 
 
 static bool device_is_visible_in_main_list(const MbUiDevice *device);
@@ -712,10 +750,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
 
     guint count = state->snapshot && state->snapshot->devices ? state->snapshot->devices->len : 0;
 
-    if (state->scan_button)
-        button_set_icon_text(state->scan_button,
-                             "edit-find-symbolic",
-                             count > 0 ? "Adicionar novamente" : "Adicionar instrumento");
+    update_scan_button_state(state);
 
     char devices_text[96];
     g_snprintf(devices_text,
@@ -1368,9 +1403,6 @@ static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
 }
 
 
-
-
-
 static void scan_pair_dialog_destroy_cb(GtkWidget *widget,
                                         gpointer user_data) {
     (void)widget;
@@ -1454,18 +1486,18 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
     if (!state)
         return;
 
-    if (!state->daemon_functional) {
+    if (!state->bluez_available || !state->bluez_powered) {
         show_error_dialog(state,
-                          "Serviço MIDI-BLE desligado",
-                          "Ligue o Serviço MIDI-BLE antes de buscar instrumentos.");
+                          "Bluetooth indisponível",
+                          "Ligue o Bluetooth antes de buscar instrumentos BLE-MIDI.");
         return;
     }
 
+    if (state->bluez_discovering)
+        return;
+
     show_scan_pair_dialog(state);
 }
-
-
-
 
 
 static void diagnostics_clicked_cb(GtkButton *button, gpointer user_data) {
@@ -1613,11 +1645,6 @@ static void connect_clicked_cb(GtkButton *button, gpointer user_data) {
     else
         device_command(state, "connect");
 }
-
-
-
-
-
 
 
 static void forget_confirm_response_cb(AdwAlertDialog *dialog,
@@ -2027,6 +2054,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
      * Signal the initial daemon state to every dependent component.
      */
     daemon_root_observer_set_functional(state, false);
+    update_scan_button_state(state);
 
     state->daemon_observer = mb_daemon_observer_new();
 
@@ -2039,6 +2067,18 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
                    observer_error && observer_error->message ? observer_error->message : "unknown error");
         g_clear_error(&observer_error);
         set_label(state->daemon_switch_label, "Serviço MIDI-BLE indisponível");
+    }
+
+    state->bluez_observer = mb_bluez_observer_new();
+    GError *bluez_error = NULL;
+    if (!mb_bluez_observer_start(state->bluez_observer,
+                                 bluez_observer_state_changed_cb,
+                                 state,
+                                 &bluez_error)) {
+        g_printerr("[midi-ble-rt-gui] BlueZ observer unavailable: %s\n",
+                   bluez_error && bluez_error->message ? bluez_error->message : "unknown error");
+        g_clear_error(&bluez_error);
+        bluez_observer_state_changed_cb(false, false, false, NULL, state);
     }
 
     mb_gnome_window_refresh(state);
