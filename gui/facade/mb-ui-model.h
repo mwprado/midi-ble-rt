@@ -40,6 +40,22 @@ typedef struct {
     bool gatt_resolved;
     bool imported;
     char *profile;
+
+    /*
+     * Literal values loaded from the winning .ini file under devices.d.
+     * NULL means the key was not present in the file.
+     */
+    char *config_file;
+    char *enabled;
+    char *connect_on_start;
+    char *alsa_port_name;
+    char *policy_pair;
+    char *policy_trust;
+    char *policy_reconnect_on_link_loss;
+    char *midi_enable_tx;
+    char *gatt_service_uuid;
+    char *gatt_io_uuid;
+    char *gatt_io_uuid_alias;
 } MbUiDevice;
 
 typedef struct {

@@ -284,6 +284,45 @@ static char *devices_config_dir(void) {
                             NULL);
 }
 
+static char *key_file_get_optional_string(GKeyFile *key,
+                                          const char *group,
+                                          const char *name) {
+    if (!key || !group || !name)
+        return NULL;
+
+    GError *error = NULL;
+    char *value = g_key_file_get_string(key, group, name, &error);
+
+    if (error) {
+        g_clear_error(&error);
+        return NULL;
+    }
+
+    if (value)
+        g_strstrip(value);
+
+    if (!value || !*value) {
+        g_free(value);
+        return NULL;
+    }
+
+    return value;
+}
+
+static char *key_file_get_first_optional_string(GKeyFile *key,
+                                                const char *group1,
+                                                const char *name1,
+                                                const char *group2,
+                                                const char *name2) {
+    char *value = key_file_get_optional_string(key, group1, name1);
+
+    if (value)
+        return value;
+
+    return key_file_get_optional_string(key, group2, name2);
+}
+
+
 
 static bool run_ctl_argv_checked(MbUiFacade *facade,
                                  const char *context,
@@ -709,16 +748,53 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
             continue;
         }
 
-        char *id = g_key_file_get_string(key, "device", "id", NULL);
-        char *address = g_key_file_get_string(key, "device", "address", NULL);
-        char *name = g_key_file_get_string(key, "device", "name", NULL);
-        char *profile = g_key_file_get_string(key, "device", "profile", NULL);
+        char *id = key_file_get_optional_string(key, "device", "id");
+        char *address = key_file_get_optional_string(key, "device", "address");
+        char *name = key_file_get_optional_string(key, "device", "name");
+        char *profile = key_file_get_optional_string(key, "device", "profile");
+
+        char *enabled = key_file_get_optional_string(key, "device", "enabled");
+        char *connect_on_start = key_file_get_optional_string(key, "device", "connect_on_start");
+        char *alsa_port_name = key_file_get_first_optional_string(key,
+                                                                  "device",
+                                                                  "alsa_port_name",
+                                                                  "alsa",
+                                                                  "port_name");
+        char *policy_pair = key_file_get_first_optional_string(key,
+                                                               "policy",
+                                                               "pair",
+                                                               "device",
+                                                               "pair");
+        char *policy_trust = key_file_get_first_optional_string(key,
+                                                                "policy",
+                                                                "trust",
+                                                                "device",
+                                                                "trust");
+        char *policy_reconnect = key_file_get_first_optional_string(key,
+                                                                    "policy",
+                                                                    "reconnect_on_link_loss",
+                                                                    "device",
+                                                                    "auto_reconnect");
+        char *midi_enable_tx = key_file_get_optional_string(key, "midi", "enable_tx");
+        char *gatt_service_uuid = key_file_get_optional_string(key, "gatt", "service_uuid");
+        char *gatt_io_uuid = key_file_get_optional_string(key, "gatt", "io_uuid");
+        char *gatt_io_uuid_alias = key_file_get_optional_string(key, "gatt", "io_uuid_alias");
 
         if (!bt_address_is_valid_for_catalog(address)) {
             g_printerr("[midi-ble-rt-gui] catalog: ignored %s: invalid address=%s\n",
                        filename ? filename : "-",
                        address ? address : "-");
 
+            g_free(gatt_io_uuid_alias);
+            g_free(gatt_io_uuid);
+            g_free(gatt_service_uuid);
+            g_free(midi_enable_tx);
+            g_free(policy_reconnect);
+            g_free(policy_trust);
+            g_free(policy_pair);
+            g_free(alsa_port_name);
+            g_free(connect_on_start);
+            g_free(enabled);
             g_free(profile);
             g_free(name);
             g_free(address);
@@ -746,8 +822,19 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
                                                   effective_name,
                                                   "DISCONNECTED",
                                                   -1);
-            device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
+            device->profile = g_strdup(profile);
             device->imported = true;
+            device->config_file = g_strdup(filename);
+            device->enabled = g_strdup(enabled);
+            device->connect_on_start = g_strdup(connect_on_start);
+            device->alsa_port_name = g_strdup(alsa_port_name);
+            device->policy_pair = g_strdup(policy_pair);
+            device->policy_trust = g_strdup(policy_trust);
+            device->policy_reconnect_on_link_loss = g_strdup(policy_reconnect);
+            device->midi_enable_tx = g_strdup(midi_enable_tx);
+            device->gatt_service_uuid = g_strdup(gatt_service_uuid);
+            device->gatt_io_uuid = g_strdup(gatt_io_uuid);
+            device->gatt_io_uuid_alias = g_strdup(gatt_io_uuid_alias);
             g_ptr_array_add(snapshot->devices, device);
 
             g_printerr("[midi-ble-rt-gui] catalog: added file=%s id=%s address=%s name=%s profile=%s total=%u\n",
@@ -764,6 +851,16 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
         }
 
         g_free(generated_id);
+        g_free(gatt_io_uuid_alias);
+        g_free(gatt_io_uuid);
+        g_free(gatt_service_uuid);
+        g_free(midi_enable_tx);
+        g_free(policy_reconnect);
+        g_free(policy_trust);
+        g_free(policy_pair);
+        g_free(alsa_port_name);
+        g_free(connect_on_start);
+        g_free(enabled);
         g_free(profile);
         g_free(name);
         g_free(address);

@@ -38,6 +38,17 @@ void mb_ui_device_free(MbUiDevice *device) {
     g_free(device->name);
     g_free(device->state);
     g_free(device->profile);
+    g_free(device->config_file);
+    g_free(device->enabled);
+    g_free(device->connect_on_start);
+    g_free(device->alsa_port_name);
+    g_free(device->policy_pair);
+    g_free(device->policy_trust);
+    g_free(device->policy_reconnect_on_link_loss);
+    g_free(device->midi_enable_tx);
+    g_free(device->gatt_service_uuid);
+    g_free(device->gatt_io_uuid);
+    g_free(device->gatt_io_uuid_alias);
     g_free(device);
 }
 
