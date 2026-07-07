@@ -285,40 +285,6 @@ static char *devices_config_dir(void) {
 }
 
 
-static char *dup_field_value(const char *line, const char *key) {
-    if (!line || !key)
-        return NULL;
-
-    char *needle = g_strdup_printf("%s=", key);
-    char *p = strstr(line, needle);
-    g_free(needle);
-
-    if (!p)
-        return NULL;
-
-    p = strchr(p, '=');
-    if (!p)
-        return NULL;
-    p++;
-
-    const char *end = p;
-    while (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r')
-        end++;
-
-    return g_strndup(p, (gsize)(end - p));
-}
-
-static unsigned field_uint(const char *line, const char *key) {
-    char *value = dup_field_value(line, key);
-    if (!value)
-        return 0;
-
-    unsigned out = (unsigned)g_ascii_strtoull(value, NULL, 10);
-    g_free(value);
-    return out;
-}
-
-
 static bool run_ctl_argv_checked(MbUiFacade *facade,
                                  const char *context,
                                  char **argv,
@@ -459,78 +425,6 @@ static char *run_ctl(MbUiFacade *facade,
     return stdout_text;
 }
 
-static void parse_status_line(MbUiSnapshot *snapshot, const char *line) {
-    if (!snapshot || !line)
-        return;
-
-    snapshot->status.online = g_str_has_prefix(line, "OK STATUS");
-    snapshot->status.devices = field_uint(line, "devices");
-    snapshot->status.streaming = field_uint(line, "streaming");
-    snapshot->status.rx_workers = field_uint(line, "rx_workers");
-    snapshot->status.tx_workers = field_uint(line, "tx_workers");
-    snapshot->status.rtkit_priority = field_uint(line, "rtkit_priority");
-    snapshot->status.lifecycle_queue = field_uint(line, "lifecycle_queue");
-
-    g_free(snapshot->status.alsa_tx_thread);
-    g_free(snapshot->status.rtkit);
-    g_free(snapshot->status.rtkit_rx);
-    g_free(snapshot->status.rtkit_tx);
-    g_free(snapshot->status.lifecycle_busy);
-
-    snapshot->status.alsa_tx_thread = dup_field_value(line, "alsa_tx_thread");
-    snapshot->status.rtkit = dup_field_value(line, "rtkit");
-    snapshot->status.rtkit_rx = dup_field_value(line, "rtkit_rx");
-    snapshot->status.rtkit_tx = dup_field_value(line, "rtkit_tx");
-    snapshot->status.lifecycle_busy = dup_field_value(line, "lifecycle_busy");
-}
-
-static void parse_list_output(MbUiSnapshot *snapshot, const char *text) {
-    if (!snapshot || !text)
-        return;
-
-    char **lines = g_strsplit(text, "\n", 0);
-    bool in_table = false;
-
-    for (gsize i = 0; lines && lines[i]; i++) {
-        char *line = lines[i];
-        g_strstrip(line);
-
-        if (*line == '\0')
-            continue;
-
-        if (g_strcmp0(line, "OK LIST") == 0) {
-            in_table = true;
-            continue;
-        }
-
-        if (!in_table)
-            continue;
-
-        if (g_strcmp0(line, ".") == 0)
-            break;
-
-        if (g_str_has_prefix(line, "id\taddress\tname\tstate\talsa_port"))
-            continue;
-
-        char **cols = g_strsplit(line, "\t", 5);
-        if (!cols || !cols[0] || !cols[1] || !cols[2] || !cols[3]) {
-            g_strfreev(cols);
-            continue;
-        }
-
-        MbUiDevice *device = mb_ui_device_new(safe_str(cols[0], "-"),
-                                              safe_str(cols[1], "-"),
-                                              safe_str(cols[2], "-"),
-                                              safe_str(cols[3], "UNKNOWN"),
-                                              cols[4] ? atoi(cols[4]) : -1);
-
-        g_ptr_array_add(snapshot->devices, device);
-        g_strfreev(cols);
-    }
-
-    g_strfreev(lines);
-}
-
 static char *sanitize_device_id(const char *device_id) {
     if (!device_id || !*device_id)
         return g_strdup("ble-midi-device");
@@ -566,120 +460,194 @@ static char *sanitize_device_id(const char *device_id) {
 
 
 
-static void overlay_bluez_pairing_from_scan_output(MbUiSnapshot *catalog, const char *text) {
-    if (!catalog || !catalog->devices || !text || !*text)
+static bool facade_variant_dict_lookup_bool(GVariant *dict,
+                                            const char *key,
+                                            bool *out) {
+    if (!dict || !key || !out)
+        return false;
+
+    GVariant *value = g_variant_lookup_value(dict, key, NULL);
+    if (!value)
+        return false;
+
+    bool ok = false;
+
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN)) {
+        *out = g_variant_get_boolean(value);
+        ok = true;
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
+        GVariant *inner = g_variant_get_variant(value);
+        if (g_variant_is_of_type(inner, G_VARIANT_TYPE_BOOLEAN)) {
+            *out = g_variant_get_boolean(inner);
+            ok = true;
+        }
+        g_variant_unref(inner);
+    }
+
+    g_variant_unref(value);
+    return ok;
+}
+
+static char *facade_variant_dict_dup_string(GVariant *dict,
+                                            const char *key) {
+    if (!dict || !key)
+        return NULL;
+
+    GVariant *value = g_variant_lookup_value(dict, key, NULL);
+    if (!value)
+        return NULL;
+
+    char *out = NULL;
+
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) {
+        out = g_strdup(g_variant_get_string(value, NULL));
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
+        GVariant *inner = g_variant_get_variant(value);
+        if (g_variant_is_of_type(inner, G_VARIANT_TYPE_STRING))
+            out = g_strdup(g_variant_get_string(inner, NULL));
+        g_variant_unref(inner);
+    }
+
+    g_variant_unref(value);
+    return out;
+}
+
+static void overlay_bluez_pairing_state(MbUiSnapshot *catalog) {
+    if (!catalog || !catalog->devices || catalog->devices->len == 0)
         return;
 
-    char **lines = g_strsplit(text, "\n", -1);
+    GError *error = NULL;
+    GDBusConnection *connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+    if (!connection) {
+        g_printerr("[midi-ble-rt-gui] BlueZ catalog overlay skipped: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return;
+    }
 
-    size_t paired_start = 0;
-    size_t trusted_start = 0;
-    bool have_header = false;
+    GVariant *reply = g_dbus_connection_call_sync(connection,
+                                                  "org.bluez",
+                                                  "/",
+                                                  "org.freedesktop.DBus.ObjectManager",
+                                                  "GetManagedObjects",
+                                                  NULL,
+                                                  G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+                                                  G_DBUS_CALL_FLAGS_NONE,
+                                                  -1,
+                                                  NULL,
+                                                  &error);
+    if (!reply) {
+        g_printerr("[midi-ble-rt-gui] BlueZ catalog overlay skipped: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        g_object_unref(connection);
+        return;
+    }
 
-    for (guint i = 0; lines && lines[i]; i++) {
-        const char *line = lines[i];
+    GVariant *objects = NULL;
+    g_variant_get(reply, "(@a{oa{sa{sv}}})", &objects);
 
-        if (g_str_has_prefix(line, "ADDRESS")) {
-            const char *p_paired = strstr(line, "PAIRED");
-            const char *p_trusted = strstr(line, "TRUSTED");
+    GVariantIter object_iter;
+    const char *path = NULL;
+    GVariant *ifaces = NULL;
 
-            if (p_paired && p_trusted) {
-                paired_start = (size_t)(p_paired - line);
-                trusted_start = (size_t)(p_trusted - line);
-                have_header = true;
-            }
-
+    g_variant_iter_init(&object_iter, objects);
+    while (g_variant_iter_next(&object_iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+        GVariant *props = g_variant_lookup_value(ifaces,
+                                                  "org.bluez.Device1",
+                                                  G_VARIANT_TYPE("a{sv}"));
+        if (!props) {
+            g_variant_unref(ifaces);
             continue;
         }
 
-        if (!have_header)
+        char *address = facade_variant_dict_dup_string(props, "Address");
+        if (!address || !*address) {
+            g_free(address);
+            g_variant_unref(props);
+            g_variant_unref(ifaces);
             continue;
+        }
 
-        if (!looks_like_bt_address(line))
-            continue;
+        bool paired = false;
+        bool connected = false;
+        bool trusted = false;
 
-        char *address = g_strndup(line, 17);
-        char *paired = scan_field_dup(line, paired_start, trusted_start);
-        bool is_paired = scan_bool_value(paired);
+        bool have_paired = facade_variant_dict_lookup_bool(props, "Paired", &paired);
+        bool have_connected = facade_variant_dict_lookup_bool(props, "Connected", &connected);
+        bool have_trusted = facade_variant_dict_lookup_bool(props, "Trusted", &trusted);
 
-        for (guint j = 0; j < catalog->devices->len; j++) {
-            MbUiDevice *device = g_ptr_array_index(catalog->devices, j);
+        for (guint i = 0; i < catalog->devices->len; i++) {
+            MbUiDevice *device = g_ptr_array_index(catalog->devices, i);
             if (!device || !device->address)
                 continue;
 
             if (g_ascii_strcasecmp(device->address, address) != 0)
                 continue;
 
-            device->paired = is_paired;
+            if (have_paired)
+                device->paired = paired;
+            if (have_connected)
+                device->connected = connected;
+            if (have_trusted)
+                device->trusted = trusted;
 
-            if (!is_paired) {
+            /*
+             * BlueZ overlay only expresses external Bluetooth state.
+             * Daemon overlay may later replace this with STREAMING/ERROR/etc.
+             */
+            if (have_connected && connected) {
+                g_free(device->state);
+                device->state = g_strdup("CONNECTED");
+            } else if (have_paired && !paired) {
                 g_free(device->state);
                 device->state = g_strdup("UNPAIRED");
                 device->alsa_port = -1;
+            } else if (have_paired && paired) {
+                g_free(device->state);
+                device->state = g_strdup("DISCONNECTED");
             }
 
+            g_printerr("[midi-ble-rt-gui] catalog BlueZ overlay: address=%s paired=%d connected=%d trusted=%d path=%s\n",
+                       address,
+                       device->paired,
+                       device->connected,
+                       device->trusted,
+                       path ? path : "-");
             break;
         }
 
-        g_free(paired);
         g_free(address);
+        g_variant_unref(props);
+        g_variant_unref(ifaces);
     }
 
-    g_strfreev(lines);
+    g_variant_unref(objects);
+    g_variant_unref(reply);
+    g_object_unref(connection);
 }
 
-static void overlay_bluez_pairing_state(MbUiFacade *facade, MbUiSnapshot *catalog) {
-    if (!facade || !catalog || !catalog->devices || catalog->devices->len == 0)
-        return;
 
-    GError *error = NULL;
-
-    /*
-     * Best-effort check. If BlueZ scan fails, keep catalog state based on
-     * local config and daemon overlay. The GUI must not hide imported devices.
-     */
-    char *out = run_ctl(facade, "scan", "--timeout", "1", &error);
-    if (!out) {
-        if (error) {
-            g_printerr("[midi-ble-rt-gui] BlueZ pairing overlay skipped: %s\n",
-                       error->message ? error->message : "unknown error");
-            g_clear_error(&error);
-        }
-        return;
-    }
-
-    overlay_bluez_pairing_from_scan_output(catalog, out);
-    g_free(out);
+static gint compare_config_filename_ptrs(gconstpointer a, gconstpointer b) {
+    const char * const *sa = a;
+    const char * const *sb = b;
+    return g_strcmp0(sa ? *sa : NULL, sb ? *sb : NULL);
 }
 
-static void overlay_daemon_state_by_address(MbUiSnapshot *catalog, const MbUiSnapshot *daemon) {
-    if (!catalog || !catalog->devices || !daemon || !daemon->devices)
-        return;
+static bool bt_address_is_valid_for_catalog(const char *address) {
+    if (!address || strlen(address) != 17)
+        return false;
 
-    for (guint i = 0; i < catalog->devices->len; i++) {
-        MbUiDevice *cat = g_ptr_array_index(catalog->devices, i);
-        if (!cat)
-            continue;
-
-        for (guint j = 0; j < daemon->devices->len; j++) {
-            const MbUiDevice *live = g_ptr_array_index(daemon->devices, j);
-            if (!live)
-                continue;
-
-            bool same_id = cat->id && live->id &&
-                           g_ascii_strcasecmp(cat->id, live->id) == 0;
-            bool same_addr = cat->address && live->address &&
-                             g_ascii_strcasecmp(cat->address, live->address) == 0;
-
-            if (!same_id && !same_addr)
-                continue;
-
-            g_free(cat->state);
-            cat->state = g_strdup(live->state ? live->state : "UNKNOWN");
-            cat->alsa_port = live->alsa_port;
-            break;
+    for (guint i = 0; i < 17; i++) {
+        if ((i + 1) % 3 == 0) {
+            if (address[i] != ':')
+                return false;
+        } else if (!g_ascii_isxdigit(address[i])) {
+            return false;
         }
     }
+
+    return true;
 }
 
 static void load_imported_device_configs(MbUiSnapshot *snapshot) {
@@ -687,7 +655,12 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
         return;
 
     char *dir = devices_config_dir();
+
+    g_printerr("[midi-ble-rt-gui] catalog: loading dir=%s\n",
+               dir ? dir : "-");
+
     if (!g_file_test(dir, G_FILE_TEST_IS_DIR)) {
+        g_printerr("[midi-ble-rt-gui] catalog: directory does not exist\n");
         g_free(dir);
         return;
     }
@@ -695,20 +668,42 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
     GError *error = NULL;
     GDir *gdir = g_dir_open(dir, 0, &error);
     if (!gdir) {
+        g_printerr("[midi-ble-rt-gui] catalog: cannot open dir: %s\n",
+                   error && error->message ? error->message : "unknown error");
         g_clear_error(&error);
         g_free(dir);
         return;
     }
 
-    const char *filename = NULL;
-    while ((filename = g_dir_read_name(gdir)) != NULL) {
-        if (!g_str_has_suffix(filename, ".ini"))
-            continue;
+    GPtrArray *filenames = g_ptr_array_new_with_free_func(g_free);
+    const char *entry = NULL;
 
+    while ((entry = g_dir_read_name(gdir)) != NULL) {
+        if (g_str_has_suffix(entry, ".ini"))
+            g_ptr_array_add(filenames, g_strdup(entry));
+    }
+
+    g_dir_close(gdir);
+    g_ptr_array_sort(filenames, compare_config_filename_ptrs);
+
+    g_printerr("[midi-ble-rt-gui] catalog: ini files=%u\n",
+               filenames->len);
+
+    for (guint i = 0; i < filenames->len; i++) {
+        const char *filename = g_ptr_array_index(filenames, i);
         char *path = g_build_filename(dir, filename, NULL);
+
+        g_printerr("[midi-ble-rt-gui] catalog: reading %s\n",
+                   path ? path : "-");
+
         GKeyFile *key = g_key_file_new();
 
-        if (!g_key_file_load_from_file(key, path, G_KEY_FILE_NONE, NULL)) {
+        error = NULL;
+        if (!g_key_file_load_from_file(key, path, G_KEY_FILE_NONE, &error)) {
+            g_printerr("[midi-ble-rt-gui] catalog: invalid ini %s: %s\n",
+                       filename ? filename : "-",
+                       error && error->message ? error->message : "unknown error");
+            g_clear_error(&error);
             g_key_file_unref(key);
             g_free(path);
             continue;
@@ -719,37 +714,56 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
         char *name = g_key_file_get_string(key, "device", "name", NULL);
         char *profile = g_key_file_get_string(key, "device", "profile", NULL);
 
-        if (address && *address) {
-            char *generated_id = NULL;
-            const char *effective_id = id && *id ? id : NULL;
-            const char *effective_name = name && *name ? name : NULL;
+        if (!bt_address_is_valid_for_catalog(address)) {
+            g_printerr("[midi-ble-rt-gui] catalog: ignored %s: invalid address=%s\n",
+                       filename ? filename : "-",
+                       address ? address : "-");
 
-            /*
-             * The address is mandatory and canonical.  id is optional and
-             * derived only for UI labels, row keys and compatibility.
-             */
-            if (!effective_id) {
-                generated_id = scan_device_id_from_name_address(effective_name, address);
-                effective_id = generated_id;
-            }
-
-            if (!effective_name)
-                effective_name = effective_id && *effective_id ? effective_id : address;
-
-            if (!snapshot_has_device_address_or_id(snapshot, effective_id, address)) {
-                MbUiDevice *device = mb_ui_device_new(effective_id,
-                                                      address,
-                                                      effective_name,
-                                                      "DISCONNECTED",
-                                                      -1);
-                device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
-                device->imported = true;
-                g_ptr_array_add(snapshot->devices, device);
-            }
-
-            g_free(generated_id);
+            g_free(profile);
+            g_free(name);
+            g_free(address);
+            g_free(id);
+            g_key_file_unref(key);
+            g_free(path);
+            continue;
         }
 
+        char *generated_id = NULL;
+        const char *effective_id = id && *id ? id : NULL;
+        const char *effective_name = name && *name ? name : NULL;
+
+        if (!effective_id) {
+            generated_id = scan_device_id_from_name_address(effective_name, address);
+            effective_id = generated_id;
+        }
+
+        if (!effective_name)
+            effective_name = effective_id && *effective_id ? effective_id : address;
+
+        if (!snapshot_has_device_address_or_id(snapshot, NULL, address)) {
+            MbUiDevice *device = mb_ui_device_new(effective_id,
+                                                  address,
+                                                  effective_name,
+                                                  "DISCONNECTED",
+                                                  -1);
+            device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
+            device->imported = true;
+            g_ptr_array_add(snapshot->devices, device);
+
+            g_printerr("[midi-ble-rt-gui] catalog: added file=%s id=%s address=%s name=%s profile=%s total=%u\n",
+                       filename ? filename : "-",
+                       effective_id ? effective_id : "-",
+                       address ? address : "-",
+                       effective_name ? effective_name : "-",
+                       profile && *profile ? profile : "standard_ble_midi",
+                       snapshot->devices->len);
+        } else {
+            g_printerr("[midi-ble-rt-gui] catalog: ignored duplicate file=%s address=%s\n",
+                       filename ? filename : "-",
+                       address ? address : "-");
+        }
+
+        g_free(generated_id);
         g_free(profile);
         g_free(name);
         g_free(address);
@@ -758,9 +772,13 @@ static void load_imported_device_configs(MbUiSnapshot *snapshot) {
         g_free(path);
     }
 
-    g_dir_close(gdir);
+    g_printerr("[midi-ble-rt-gui] catalog: final devices=%u\n",
+               snapshot->devices->len);
+
+    g_ptr_array_free(filenames, TRUE);
     g_free(dir);
 }
+
 
 static char *device_config_path(const MbUiDevice *device, GError **error) {
     char *safe_id = sanitize_device_id(device ? device->id : NULL);
@@ -895,55 +913,37 @@ bool mb_ui_facade_scan_devices(MbUiFacade *facade,
 
 
 MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
+    (void)facade;
+
     MbUiSnapshot *snapshot = mb_ui_snapshot_new();
 
     /*
-     * Main window semantics:
-     *   show only instruments imported/cataloged in devices.d .ini files.
+     * Main window invariant:
      *
-     * daemon-status and daemon-list are runtime overlays, not the source
-     * of the catalog.
+     * The sidebar is the persisted instrument catalog.
+     * Rows come only from valid .ini files under devices.d.
+     *
+     * BlueZ and daemon state are overlays.  They may update paired,
+     * connected, ALSA port and runtime state, but they must never create,
+     * hide or clear catalog rows.
      */
     load_imported_device_configs(snapshot);
 
-    GError *error = NULL;
-    char *status = run_ctl(facade, "daemon-status", NULL, NULL, &error);
-    if (!status) {
-        snapshot->status.online = false;
-        snapshot->last_error = g_strdup(error ? error->message : "service status failed");
-        g_clear_error(&error);
-        return snapshot;
-    }
+    /*
+     * Opening the window must not start discovery.  This reads BlueZ Device1
+     * objects already known by bluetoothd and updates paired/connected state.
+     */
+    overlay_bluez_pairing_state(snapshot);
 
-    char **status_lines = g_strsplit(status, "\n", 0);
-    for (gsize i = 0; status_lines && status_lines[i]; i++) {
-        char *line = status_lines[i];
-        g_strstrip(line);
-        if (g_str_has_prefix(line, "OK STATUS")) {
-            parse_status_line(snapshot, line);
-            break;
-        }
-    }
-
-    g_strfreev(status_lines);
-    g_free(status);
-
-    char *list = run_ctl(facade, "daemon-list", NULL, NULL, &error);
-    if (!list) {
-        if (!snapshot->last_error)
-            snapshot->last_error = g_strdup(error ? error->message : "device list failed");
-        g_clear_error(&error);
-        return snapshot;
-    }
-
-    MbUiSnapshot *daemon_snapshot = mb_ui_snapshot_new();
-    parse_list_output(daemon_snapshot, list);
-    overlay_daemon_state_by_address(snapshot, daemon_snapshot);
-    overlay_bluez_pairing_state(facade, snapshot);
-
-    mb_ui_snapshot_free(daemon_snapshot);
-    g_free(list);
-
+    /*
+     * Do not block the main catalog on the daemon control socket.
+     *
+     * The window already observes systemd for daemon availability.  The
+     * persisted catalog and BlueZ pairing/connection state are enough to render
+     * the main list.  Runtime daemon state may be overlaid later, but it must
+     * never prevent catalog rows from appearing.
+     */
+    snapshot->status.online = false;
     return snapshot;
 }
 
@@ -983,6 +983,7 @@ static void mark_scan_devices_imported_from_catalog(MbUiSnapshot *scan_snapshot)
 
     mb_ui_snapshot_free(catalog);
 }
+
 
 
 static bool config_file_mentions_address(const char *path, const char *address) {
@@ -1044,35 +1045,12 @@ static bool imported_config_exists_for_address(const char *address) {
     if (found)
         return true;
 
-    /*
-     * Compatibility during GUI migration: older configure code wrote directly
-     * under legacy .ini files directly in ~/.config/midi-ble-rt.
-     * visible until the tree is normalized.
-     */
     char *legacy_dir = g_build_filename(base, "midi-ble-rt", NULL);
     found = config_dir_has_imported_address(legacy_dir, address);
     g_free(legacy_dir);
 
     return found;
 }
-
-static void mark_scan_devices_imported_from_config_files(MbUiSnapshot *scan_snapshot) {
-    if (!scan_snapshot || !scan_snapshot->devices)
-        return;
-
-    for (guint i = 0; i < scan_snapshot->devices->len; i++) {
-        MbUiDevice *device = g_ptr_array_index(scan_snapshot->devices, i);
-        if (!device || !device->address)
-            continue;
-
-        if (imported_config_exists_for_address(device->address)) {
-            device->imported = true;
-            g_printerr("[midi-ble-rt-gui] discovery: %s already imported by local config\n",
-                       device->address);
-        }
-    }
-}
-
 
 MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
     /*
@@ -1090,7 +1068,6 @@ MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
     merge_scan_cache_into_snapshot(facade, snapshot);
 
     mark_scan_devices_imported_from_catalog(snapshot);
-    mark_scan_devices_imported_from_config_files(snapshot);
     return snapshot;
 }
 
