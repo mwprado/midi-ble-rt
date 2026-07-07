@@ -71,8 +71,6 @@ static void daemon_switch_notify_active_cb(GObject *object,
 static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error);
 static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error);
 static void update_daemon_switch_state(MbGnomeWindowState *state);
-static void daemon_schedule_transition_refresh(MbGnomeWindowState *state,
-                                               guint delay_ms);
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
@@ -430,47 +428,6 @@ static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
 }
 
 
-
-static gboolean daemon_transition_refresh_cb(gpointer user_data) {
-    MbGnomeWindowState *state = user_data;
-
-    if (!state)
-        return G_SOURCE_REMOVE;
-
-    state->daemon_transition_source_id = 0;
-    state->daemon_transition_in_flight = false;
-
-    if (state->daemon_observer) {
-        GError *error = NULL;
-        if (!mb_daemon_observer_refresh(state->daemon_observer, &error)) {
-            g_printerr("[midi-ble-rt-gui] daemon observer refresh failed: %s\n",
-                       error && error->message ? error->message : "unknown error");
-            g_clear_error(&error);
-        }
-    }
-
-    update_daemon_switch_state(state);
-
-    if (state->daemon_functional)
-    
-    mb_gnome_window_refresh(state);
-
-    return G_SOURCE_REMOVE;
-}
-
-static void daemon_schedule_transition_refresh(MbGnomeWindowState *state,
-                                               guint delay_ms) {
-    if (!state)
-        return;
-
-    if (state->daemon_transition_source_id) {
-        g_source_remove(state->daemon_transition_source_id);
-        state->daemon_transition_source_id = 0;
-    }
-
-    state->daemon_transition_source_id =
-        g_timeout_add(delay_ms, daemon_transition_refresh_cb, state);
-}
 
 static void update_daemon_switch_state(MbGnomeWindowState *state) {
     if (!state || !state->daemon_switch)

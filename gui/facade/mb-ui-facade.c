@@ -285,40 +285,6 @@ static char *devices_config_dir(void) {
 }
 
 
-static char *dup_field_value(const char *line, const char *key) {
-    if (!line || !key)
-        return NULL;
-
-    char *needle = g_strdup_printf("%s=", key);
-    char *p = strstr(line, needle);
-    g_free(needle);
-
-    if (!p)
-        return NULL;
-
-    p = strchr(p, '=');
-    if (!p)
-        return NULL;
-    p++;
-
-    const char *end = p;
-    while (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r')
-        end++;
-
-    return g_strndup(p, (gsize)(end - p));
-}
-
-static unsigned field_uint(const char *line, const char *key) {
-    char *value = dup_field_value(line, key);
-    if (!value)
-        return 0;
-
-    unsigned out = (unsigned)g_ascii_strtoull(value, NULL, 10);
-    g_free(value);
-    return out;
-}
-
-
 static bool run_ctl_argv_checked(MbUiFacade *facade,
                                  const char *context,
                                  char **argv,
@@ -459,78 +425,6 @@ static char *run_ctl(MbUiFacade *facade,
     return stdout_text;
 }
 
-static void parse_status_line(MbUiSnapshot *snapshot, const char *line) {
-    if (!snapshot || !line)
-        return;
-
-    snapshot->status.online = g_str_has_prefix(line, "OK STATUS");
-    snapshot->status.devices = field_uint(line, "devices");
-    snapshot->status.streaming = field_uint(line, "streaming");
-    snapshot->status.rx_workers = field_uint(line, "rx_workers");
-    snapshot->status.tx_workers = field_uint(line, "tx_workers");
-    snapshot->status.rtkit_priority = field_uint(line, "rtkit_priority");
-    snapshot->status.lifecycle_queue = field_uint(line, "lifecycle_queue");
-
-    g_free(snapshot->status.alsa_tx_thread);
-    g_free(snapshot->status.rtkit);
-    g_free(snapshot->status.rtkit_rx);
-    g_free(snapshot->status.rtkit_tx);
-    g_free(snapshot->status.lifecycle_busy);
-
-    snapshot->status.alsa_tx_thread = dup_field_value(line, "alsa_tx_thread");
-    snapshot->status.rtkit = dup_field_value(line, "rtkit");
-    snapshot->status.rtkit_rx = dup_field_value(line, "rtkit_rx");
-    snapshot->status.rtkit_tx = dup_field_value(line, "rtkit_tx");
-    snapshot->status.lifecycle_busy = dup_field_value(line, "lifecycle_busy");
-}
-
-static void parse_list_output(MbUiSnapshot *snapshot, const char *text) {
-    if (!snapshot || !text)
-        return;
-
-    char **lines = g_strsplit(text, "\n", 0);
-    bool in_table = false;
-
-    for (gsize i = 0; lines && lines[i]; i++) {
-        char *line = lines[i];
-        g_strstrip(line);
-
-        if (*line == '\0')
-            continue;
-
-        if (g_strcmp0(line, "OK LIST") == 0) {
-            in_table = true;
-            continue;
-        }
-
-        if (!in_table)
-            continue;
-
-        if (g_strcmp0(line, ".") == 0)
-            break;
-
-        if (g_str_has_prefix(line, "id\taddress\tname\tstate\talsa_port"))
-            continue;
-
-        char **cols = g_strsplit(line, "\t", 5);
-        if (!cols || !cols[0] || !cols[1] || !cols[2] || !cols[3]) {
-            g_strfreev(cols);
-            continue;
-        }
-
-        MbUiDevice *device = mb_ui_device_new(safe_str(cols[0], "-"),
-                                              safe_str(cols[1], "-"),
-                                              safe_str(cols[2], "-"),
-                                              safe_str(cols[3], "UNKNOWN"),
-                                              cols[4] ? atoi(cols[4]) : -1);
-
-        g_ptr_array_add(snapshot->devices, device);
-        g_strfreev(cols);
-    }
-
-    g_strfreev(lines);
-}
-
 static char *sanitize_device_id(const char *device_id) {
     if (!device_id || !*device_id)
         return g_strdup("ble-midi-device");
@@ -564,69 +458,6 @@ static char *sanitize_device_id(const char *device_id) {
     return g_string_free(out, FALSE);
 }
 
-
-
-static void overlay_bluez_pairing_from_scan_output(MbUiSnapshot *catalog, const char *text) {
-    if (!catalog || !catalog->devices || !text || !*text)
-        return;
-
-    char **lines = g_strsplit(text, "\n", -1);
-
-    size_t paired_start = 0;
-    size_t trusted_start = 0;
-    bool have_header = false;
-
-    for (guint i = 0; lines && lines[i]; i++) {
-        const char *line = lines[i];
-
-        if (g_str_has_prefix(line, "ADDRESS")) {
-            const char *p_paired = strstr(line, "PAIRED");
-            const char *p_trusted = strstr(line, "TRUSTED");
-
-            if (p_paired && p_trusted) {
-                paired_start = (size_t)(p_paired - line);
-                trusted_start = (size_t)(p_trusted - line);
-                have_header = true;
-            }
-
-            continue;
-        }
-
-        if (!have_header)
-            continue;
-
-        if (!looks_like_bt_address(line))
-            continue;
-
-        char *address = g_strndup(line, 17);
-        char *paired = scan_field_dup(line, paired_start, trusted_start);
-        bool is_paired = scan_bool_value(paired);
-
-        for (guint j = 0; j < catalog->devices->len; j++) {
-            MbUiDevice *device = g_ptr_array_index(catalog->devices, j);
-            if (!device || !device->address)
-                continue;
-
-            if (g_ascii_strcasecmp(device->address, address) != 0)
-                continue;
-
-            device->paired = is_paired;
-
-            if (!is_paired) {
-                g_free(device->state);
-                device->state = g_strdup("UNPAIRED");
-                device->alsa_port = -1;
-            }
-
-            break;
-        }
-
-        g_free(paired);
-        g_free(address);
-    }
-
-    g_strfreev(lines);
-}
 
 
 static bool facade_variant_dict_lookup_bool(GVariant *dict,
@@ -794,37 +625,6 @@ static void overlay_bluez_pairing_state(MbUiSnapshot *catalog) {
     g_variant_unref(objects);
     g_variant_unref(reply);
     g_object_unref(connection);
-}
-
-
-static void overlay_daemon_state_by_address(MbUiSnapshot *catalog, const MbUiSnapshot *daemon) {
-    if (!catalog || !catalog->devices || !daemon || !daemon->devices)
-        return;
-
-    for (guint i = 0; i < catalog->devices->len; i++) {
-        MbUiDevice *cat = g_ptr_array_index(catalog->devices, i);
-        if (!cat)
-            continue;
-
-        for (guint j = 0; j < daemon->devices->len; j++) {
-            const MbUiDevice *live = g_ptr_array_index(daemon->devices, j);
-            if (!live)
-                continue;
-
-            bool same_id = cat->id && live->id &&
-                           g_ascii_strcasecmp(cat->id, live->id) == 0;
-            bool same_addr = cat->address && live->address &&
-                             g_ascii_strcasecmp(cat->address, live->address) == 0;
-
-            if (!same_id && !same_addr)
-                continue;
-
-            g_free(cat->state);
-            cat->state = g_strdup(live->state ? live->state : "UNKNOWN");
-            cat->alsa_port = live->alsa_port;
-            break;
-        }
-    }
 }
 
 
@@ -1113,6 +913,8 @@ bool mb_ui_facade_scan_devices(MbUiFacade *facade,
 
 
 MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
+    (void)facade;
+
     MbUiSnapshot *snapshot = mb_ui_snapshot_new();
 
     /*
