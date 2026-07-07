@@ -26,6 +26,7 @@ typedef struct {
     bool daemon_requested_active;
     bool daemon_functional;
     bool bluez_available;
+    bool bluez_powered_known;
     bool bluez_powered;
     bool bluez_discovering;
     guint daemon_transition_source_id;
@@ -112,6 +113,7 @@ typedef struct {
 static void mb_gnome_window_refresh(MbGnomeWindowState *state);
 static void update_scan_button_state(MbGnomeWindowState *state);
 static void bluez_observer_state_changed_cb(bool available,
+                                           bool powered_known,
                                            bool powered,
                                            bool discovering,
                                            const char *adapter_path,
@@ -551,35 +553,18 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
         return;
 
     /*
-     * Root observer, step 1:
-     * the daemon state controls scan/search and the main instrument list.
+     * Root observer rule:
+     *
+     * The daemon controls runtime actions only.  It must never create, hide,
+     * clear or unselect catalog rows.  The main list is the persisted catalog
+     * loaded from devices.d/*.ini.
      */
     update_scan_button_state(state);
 
     if (state->sidebar_list)
-        gtk_widget_set_sensitive(state->sidebar_list, state->daemon_functional);
+        gtk_widget_set_sensitive(state->sidebar_list, TRUE);
 
-    if (!state->daemon_functional) {
-        if (state->sidebar_list)
-            gtk_list_box_unselect_all(GTK_LIST_BOX(state->sidebar_list));
-
-        g_clear_pointer(&state->selected_id, g_free);
-
-        if (state->config_card)
-            gtk_widget_set_sensitive(state->config_card, FALSE);
-
-        if (state->details_card)
-            gtk_widget_set_sensitive(state->details_card, FALSE);
-
-        if (state->connect_button)
-            gtk_widget_set_sensitive(state->connect_button, FALSE);
-
-        if (state->forget_button)
-            gtk_widget_set_sensitive(state->forget_button, FALSE);
-
-        gtk_widget_set_visible(state->empty_box, TRUE);
-        gtk_widget_set_visible(state->device_box, FALSE);
-    }
+    update_daemon_switch_state(state);
 }
 
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
@@ -595,9 +580,6 @@ static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
      * even if the value did not change, propagate it because widgets may have
      * been created before the first daemon-status result.
      */
-    if (!state->daemon_functional)
-        g_clear_pointer(&state->selected_id, g_free);
-
     g_printerr("[midi-ble-rt-gui] daemon observer signal: functional=%d changed=%d\n",
                state->daemon_functional,
                changed);
@@ -648,15 +630,23 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
     if (!state || !state->scan_button)
         return;
 
-    guint count = state->snapshot && state->snapshot->devices ? state->snapshot->devices->len : 0;
-    const char *label = count > 0 ? "Adicionar novamente" : "Adicionar instrumento";
+    const char *label = "Adicionar instrumento";
 
-    if (!state->bluez_available)
+    /*
+     * Only the GUI-owned scan operation may render "Procurando instrumentos".
+     * BlueZ Adapter1.Discovering can be true because of another process
+     * or the desktop Bluetooth stack.  That is not the same as our scan.
+     */
+    if (state->scan_in_flight)
+        label = "Procurando instrumentos…";
+    else if (!state->bluez_available)
         label = "Bluetooth indisponível";
+    else if (!state->bluez_powered_known)
+        label = "Verificando Bluetooth";
     else if (!state->bluez_powered)
         label = "Bluetooth desligado";
-    else if (state->bluez_discovering || state->scan_in_flight)
-        label = "Procurando instrumentos…";
+    else if (state->bluez_discovering)
+        label = "Bluetooth ocupado";
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
@@ -667,6 +657,7 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
 }
 
 static void bluez_observer_state_changed_cb(bool available,
+                                           bool powered_known,
                                            bool powered,
                                            bool discovering,
                                            const char *adapter_path,
@@ -677,11 +668,13 @@ static void bluez_observer_state_changed_cb(bool available,
         return;
 
     state->bluez_available = available;
+    state->bluez_powered_known = powered_known;
     state->bluez_powered = powered;
     state->bluez_discovering = discovering;
 
-    g_printerr("[midi-ble-rt-gui] BlueZ observer: available=%d powered=%d discovering=%d adapter=%s\n",
+    g_printerr("[midi-ble-rt-gui] BlueZ observer: available=%d powered_known=%d powered=%d discovering=%d adapter=%s\n",
                available,
+               powered_known,
                powered,
                discovering,
                adapter_path && *adapter_path ? adapter_path : "-");
@@ -733,7 +726,7 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
 static bool device_is_visible_in_main_list(const MbUiDevice *device);
 static void update_main_panel(MbGnomeWindowState *state) {
     bool online = state->daemon_functional;
-    const MbUiDevice *device = state->daemon_functional ? selected_device(state) : NULL;
+    const MbUiDevice *device = selected_device(state);
 
     /*
      * Panels and action buttons are only meaningful for the selected row.
@@ -847,6 +840,11 @@ static GtkWidget *device_row_new(const MbUiDevice *device) {
 }
 
 static void rebuild_sidebar(MbGnomeWindowState *state) {
+    g_printerr("[midi-ble-rt-gui] sidebar: rebuild devices=%u selected=%s daemon=%d\n",
+               state && state->snapshot && state->snapshot->devices ? state->snapshot->devices->len : 0,
+               state && state->selected_id ? state->selected_id : "-",
+               state ? state->daemon_functional : 0);
+
     GtkWidget *child = gtk_widget_get_first_child(state->sidebar_list);
     while (child) {
         GtkWidget *next = gtk_widget_get_next_sibling(child);
@@ -1133,11 +1131,20 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog,
     GtkWidget *pair_import_button = gtk_button_new_with_label("Parear e Importar");
     gtk_widget_add_css_class(pair_import_button, "suggested-action");
 
-    bool already_ready = device && device->paired && device->imported;
-    gtk_widget_set_sensitive(pair_import_button, device && !already_ready);
+    bool imported = device && device->imported;
+    bool paired = device && device->paired;
+    bool ready = imported && paired;
 
-    if (already_ready)
+    gtk_widget_set_sensitive(pair_import_button, device && !ready);
+
+    if (ready)
         gtk_button_set_label(GTK_BUTTON(pair_import_button), "Já pronto");
+    else if (imported && !paired)
+        gtk_button_set_label(GTK_BUTTON(pair_import_button), "Parear");
+    else if (!imported && paired)
+        gtk_button_set_label(GTK_BUTTON(pair_import_button), "Importar");
+    else
+        gtk_button_set_label(GTK_BUTTON(pair_import_button), "Parear e Importar");
 
     if (device && device->id) {
         g_object_set_data_full(G_OBJECT(pair_import_button), "device-id", g_strdup(device->id), g_free);
@@ -2078,7 +2085,7 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
         g_printerr("[midi-ble-rt-gui] BlueZ observer unavailable: %s\n",
                    bluez_error && bluez_error->message ? bluez_error->message : "unknown error");
         g_clear_error(&bluez_error);
-        bluez_observer_state_changed_cb(false, false, false, NULL, state);
+        bluez_observer_state_changed_cb(false, false, false, false, NULL, state);
     }
 
     mb_gnome_window_refresh(state);
