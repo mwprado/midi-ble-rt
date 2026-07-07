@@ -1,12 +1,12 @@
 #include "mb-gnome-window.h"
 #include "mb-ui-facade.h"
+#include "mb-daemon-observer.h"
 
 #include <gio/gio.h>
 #include <stdbool.h>
 #include <string.h>
 
 #define REFRESH_INTERVAL_SECONDS 2
-#define DAEMON_OBSERVER_INTERVAL_SECONDS 1
 
 typedef struct {
     AdwApplicationWindow *window;
@@ -25,7 +25,7 @@ typedef struct {
     bool daemon_requested_active;
     bool daemon_functional;
     guint daemon_transition_source_id;
-    guint daemon_observer_source_id;
+    MbDaemonObserver *daemon_observer;
     GtkWidget *footer_devices_label;
     GtkWidget *footer_connection_label;
     GtkWidget *last_scan_label;
@@ -72,7 +72,6 @@ static void show_error_dialog(MbGnomeWindowState *state,
 static void daemon_root_observer_apply(MbGnomeWindowState *state);
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
                                                 bool daemon_functional);
-static gboolean daemon_observer_poll_cb(gpointer user_data);
 
 typedef struct {
     MbGnomeWindowState *state;
@@ -172,19 +171,6 @@ static bool device_is_unpaired_for_gui(const MbUiDevice *device) {
      * "Parear novamente" status in the main window.
      */
     return g_ascii_strcasecmp(safe(device->state, ""), "UNPAIRED") == 0;
-}
-
-static bool device_is_functional_for_gui(const MbUiDevice *device) {
-    /*
-     * Main-window effective rule:
-     *
-     * Imported devices are considered usable unless the backend/overlay has
-     * explicitly marked them as UNPAIRED.
-     *
-     * This avoids disabling a functional imported instrument just because the
-     * main snapshot did not receive a fresh BlueZ paired=true overlay yet.
-     */
-    return device && device->imported && !device_is_unpaired_for_gui(device);
 }
 
 static const char *main_device_status_text(const MbUiDevice *device) {
@@ -441,44 +427,6 @@ static void stop_daemon_from_gui(MbGnomeWindowState *state) {
 
 
 
-static bool user_systemd_daemon_service_active(void) {
-    char *argv[] = {
-        "systemctl",
-        "--user",
-        "is-active",
-        "--quiet",
-        "midi-ble-rtd.service",
-        NULL,
-    };
-
-    gint wait_status = 0;
-    GError *error = NULL;
-
-    gboolean spawned = g_spawn_sync(NULL,
-                                    argv,
-                                    NULL,
-                                    G_SPAWN_SEARCH_PATH,
-                                    NULL,
-                                    NULL,
-                                    NULL,
-                                    NULL,
-                                    &wait_status,
-                                    &error);
-
-    if (!spawned) {
-        g_printerr("[midi-ble-rt-gui] systemd status check failed: %s\n",
-                   error && error->message ? error->message : "unknown error");
-        g_clear_error(&error);
-        return false;
-    }
-
-    /*
-     * is-active --quiet returns 0 only when the service is active.
-     * Non-zero includes inactive, failed, activating, not-found, etc.
-     */
-    return g_spawn_check_wait_status(wait_status, NULL);
-}
-
 static gboolean daemon_transition_refresh_cb(gpointer user_data) {
     MbGnomeWindowState *state = user_data;
 
@@ -488,7 +436,20 @@ static gboolean daemon_transition_refresh_cb(gpointer user_data) {
     state->daemon_transition_source_id = 0;
     state->daemon_transition_in_flight = false;
 
-    mb_gnome_window_refresh(state);
+    if (state->daemon_observer) {
+        GError *error = NULL;
+        if (!mb_daemon_observer_refresh(state->daemon_observer, &error)) {
+            g_printerr("[midi-ble-rt-gui] daemon observer refresh failed: %s\n",
+                       error && error->message ? error->message : "unknown error");
+            g_clear_error(&error);
+        }
+    }
+
+    update_daemon_switch_state(state);
+
+    if (state->daemon_functional)
+        mb_gnome_window_refresh(state);
+
     return G_SOURCE_REMOVE;
 }
 
@@ -653,14 +614,34 @@ static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
 }
 
 
-static gboolean daemon_observer_poll_cb(gpointer user_data) {
+static void daemon_observer_state_changed_cb(bool active,
+                                             const char *active_state,
+                                             const char *sub_state,
+                                             void *user_data) {
     MbGnomeWindowState *state = user_data;
 
     if (!state)
-        return G_SOURCE_REMOVE;
+        return;
 
-    mb_gnome_window_refresh(state);
-    return G_SOURCE_CONTINUE;
+    g_printerr("[midi-ble-rt-gui] daemon observer signal: active=%d active_state=%s sub_state=%s\n",
+               active,
+               safe(active_state, "unknown"),
+               safe(sub_state, "unknown"));
+
+    if (state->daemon_transition_in_flight && active == state->daemon_requested_active) {
+        if (state->daemon_transition_source_id) {
+            g_source_remove(state->daemon_transition_source_id);
+            state->daemon_transition_source_id = 0;
+        }
+
+        state->daemon_transition_in_flight = false;
+    }
+
+    daemon_root_observer_set_functional(state, active);
+    update_daemon_switch_state(state);
+
+    if (active)
+        mb_gnome_window_refresh(state);
 }
 
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device) {
@@ -988,31 +969,13 @@ static void refresh_task_done(GObject *source_object,
         state->snapshot = snapshot;
     }
 
-    /*
-     * Root daemon observer:
-     * functional means both the user systemd service is active and the daemon
-     * answers daemon-status through the facade snapshot.
-     */
-    bool systemd_active = user_systemd_daemon_service_active();
     bool daemon_online = state->snapshot && state->snapshot->status.online;
 
-/*
- * Root observer step:
- *
- * The daemon switch/list/search layer follows the user systemd service.
- * daemon-status is runtime communication through midi-ble-rtctl; it is useful
- * for diagnostics, but it must not keep root GUI controls disabled after the
- * service was successfully started.
- */    
-    bool new_daemon_functional = systemd_active;
-
-    g_printerr("[midi-ble-rt-gui] daemon observer: systemd_active=%d daemon_online=%d daemon_functional=%d\n",
-               systemd_active,
-               daemon_online,
-               new_daemon_functional);
+    g_printerr("[midi-ble-rt-gui] daemon snapshot: systemd_active=%d daemon_online=%d\n",
+               state->daemon_functional,
+               daemon_online);
 
     set_label(state->last_scan_label, "Catálogo atualizado agora");
-    daemon_root_observer_set_functional(state, new_daemon_functional);
     rebuild_sidebar(state);
 }
 
@@ -1771,8 +1734,7 @@ static void state_free(MbGnomeWindowState *state) {
     if (state->daemon_transition_source_id)
         g_source_remove(state->daemon_transition_source_id);
 
-    if (state->daemon_observer_source_id)
-        g_source_remove(state->daemon_observer_source_id);
+    mb_daemon_observer_free(state->daemon_observer);
 
     mb_ui_snapshot_free(state->snapshot);
     mb_ui_facade_free(state->facade);
@@ -2066,12 +2028,20 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
      */
     daemon_root_observer_set_functional(state, false);
 
-    mb_gnome_window_refresh(state);
+    state->daemon_observer = mb_daemon_observer_new();
 
-    state->daemon_observer_source_id =
-        g_timeout_add_seconds(DAEMON_OBSERVER_INTERVAL_SECONDS,
-                              daemon_observer_poll_cb,
-                              state);
+    GError *observer_error = NULL;
+    if (!mb_daemon_observer_start(state->daemon_observer,
+                                  daemon_observer_state_changed_cb,
+                                  state,
+                                  &observer_error)) {
+        g_printerr("[midi-ble-rt-gui] daemon observer start failed: %s\n",
+                   observer_error && observer_error->message ? observer_error->message : "unknown error");
+        g_clear_error(&observer_error);
+        set_label(state->daemon_switch_label, "Serviço MIDI-BLE indisponível");
+    }
+
+    mb_gnome_window_refresh(state);
 
     return GTK_WINDOW(state->window);
 }

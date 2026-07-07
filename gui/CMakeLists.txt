@@ -11,6 +11,7 @@ pkg_check_modules(GNOME_DEPS REQUIRED gtk4 libadwaita-1 gio-2.0 glib-2.0)
 add_library(midi-ble-rt-ui-facade STATIC
     facade/mb-ui-facade.c
     facade/mb-ui-model.c
+    facade/mb-daemon-observer.c
 )
 
 target_include_directories(midi-ble-rt-ui-facade PUBLIC
