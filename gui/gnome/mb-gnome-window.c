@@ -22,6 +22,7 @@ typedef struct {
     GtkWidget *service_label;
     GtkWidget *daemon_switch;
     GtkWidget *daemon_switch_label;
+    GtkWidget *daemon_spinner;
     bool daemon_transition_in_flight;
     bool daemon_requested_active;
     bool daemon_functional;
@@ -68,13 +69,14 @@ static void daemon_switch_notify_active_cb(GObject *object,
                                            GParamSpec *pspec,
                                            gpointer user_data);
 static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error);
-static void stop_daemon_from_gui(MbGnomeWindowState *state);
+static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error);
 static void update_daemon_switch_state(MbGnomeWindowState *state);
 static void daemon_schedule_transition_refresh(MbGnomeWindowState *state,
                                                guint delay_ms);
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
+static void forget_clicked_cb(GtkButton *button, gpointer user_data);
 static void forget_clicked_cb(GtkButton *button, gpointer user_data);
 static void daemon_root_observer_apply(MbGnomeWindowState *state);
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
@@ -108,11 +110,17 @@ typedef struct {
 
 typedef struct {
     MbGnomeWindowState *state;
+    bool requested_active;
+} DaemonCommandTask;
+
+typedef struct {
+    MbGnomeWindowState *state;
     unsigned timeout_seconds;
 } ScanTask;
 
 static void mb_gnome_window_refresh(MbGnomeWindowState *state);
 static void update_scan_button_state(MbGnomeWindowState *state);
+static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device);
 static void update_main_panel(MbGnomeWindowState *state);
 static void bluez_observer_state_changed_cb(bool available,
                                            bool powered_known,
@@ -398,36 +406,29 @@ static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
 
 
 
-static void stop_daemon_from_gui(MbGnomeWindowState *state) {
+
+static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
     (void)state;
 
     g_printerr("[midi-ble-rt-gui] service stop: systemctl --user stop midi-ble-rtd.service\n");
 
-    GError *error = NULL;
     GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
                                          G_SUBPROCESS_FLAGS_STDERR_MERGE,
-                                         &error,
+                                         error,
                                          "systemctl",
                                          "--user",
                                          "stop",
                                          "midi-ble-rtd.service",
                                          NULL);
 
-    if (!proc) {
-        g_printerr("[midi-ble-rt-gui] ERROR: systemctl stop failed: %s\n",
-                   error && error->message ? error->message : "unknown error");
-        g_clear_error(&error);
-        return;
-    }
+    if (!proc)
+        return false;
 
-    if (!g_subprocess_wait_check(proc, NULL, &error)) {
-        g_printerr("[midi-ble-rt-gui] ERROR: systemctl stop failed: %s\n",
-                   error && error->message ? error->message : "unknown error");
-        g_clear_error(&error);
-    }
-
+    bool ok = g_subprocess_wait_check(proc, NULL, error);
     g_object_unref(proc);
+    return ok;
 }
+
 
 
 static gboolean daemon_transition_refresh_cb(gpointer user_data) {
@@ -484,17 +485,27 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
                                     state);
 
     gtk_switch_set_active(GTK_SWITCH(state->daemon_switch), visual_active);
+    gtk_widget_set_sensitive(state->daemon_switch, !state->daemon_transition_in_flight);
 
     g_signal_handlers_unblock_by_func(state->daemon_switch,
                                       G_CALLBACK(daemon_switch_notify_active_cb),
                                       state);
 
+    if (state->daemon_spinner) {
+        gtk_widget_set_visible(state->daemon_spinner, state->daemon_transition_in_flight);
+
+        if (state->daemon_transition_in_flight)
+            gtk_spinner_start(GTK_SPINNER(state->daemon_spinner));
+        else
+            gtk_spinner_stop(GTK_SPINNER(state->daemon_spinner));
+    }
+
     if (state->daemon_switch_label) {
         if (state->daemon_transition_in_flight) {
             set_label(state->daemon_switch_label,
                       state->daemon_requested_active
-                          ? "Iniciando Serviço MIDI-BLE"
-                          : "Desligando Serviço MIDI-BLE");
+                          ? "Iniciando Serviço MIDI-BLE…"
+                          : "Desligando Serviço MIDI-BLE…");
         } else {
             set_label(state->daemon_switch_label,
                       state->daemon_functional
@@ -504,6 +515,71 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
     }
 }
 
+
+
+static void daemon_command_task_thread(GTask *task,
+                                       gpointer source_object,
+                                       gpointer task_data,
+                                       GCancellable *cancellable) {
+    (void)source_object;
+    (void)cancellable;
+
+    DaemonCommandTask *cmd = task_data;
+    GError *error = NULL;
+    bool ok = false;
+
+    if (cmd->requested_active)
+        ok = start_daemon_from_gui(cmd->state, &error);
+    else
+        ok = stop_daemon_from_gui(cmd->state, &error);
+
+    if (!ok)
+        g_task_return_error(task,
+                            error ? error
+                                  : g_error_new(G_IO_ERROR,
+                                                G_IO_ERROR_FAILED,
+                                                "falha ao alterar estado do daemon"));
+    else
+        g_task_return_boolean(task, TRUE);
+}
+
+static void daemon_command_task_done(GObject *source_object,
+                                     GAsyncResult *result,
+                                     gpointer user_data) {
+    (void)source_object;
+
+    MbGnomeWindowState *state = user_data;
+    GError *error = NULL;
+
+    if (!state)
+        return;
+
+    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
+        state->daemon_transition_in_flight = false;
+        state->daemon_requested_active = state->daemon_functional;
+        update_daemon_switch_state(state);
+
+        show_error_dialog(state,
+                          "Falha no Serviço MIDI-BLE",
+                          error && error->message ? error->message : "Erro desconhecido");
+        g_clear_error(&error);
+        return;
+    }
+
+    if (state->daemon_observer) {
+        GError *observer_error = NULL;
+
+        if (!mb_daemon_observer_refresh(state->daemon_observer, &observer_error)) {
+            g_printerr("[midi-ble-rt-gui] daemon observer refresh failed: %s\n",
+                       observer_error && observer_error->message ? observer_error->message : "unknown error");
+            g_clear_error(&observer_error);
+        }
+    }
+
+    state->daemon_transition_in_flight = false;
+    update_daemon_switch_state(state);
+    mb_gnome_window_refresh(state);
+}
 
 static void daemon_switch_notify_active_cb(GObject *object,
                                            GParamSpec *pspec,
@@ -526,28 +602,19 @@ static void daemon_switch_notify_active_cb(GObject *object,
     state->daemon_requested_active = requested_active;
     update_daemon_switch_state(state);
 
-    if (requested_active) {
-        GError *error = NULL;
+    DaemonCommandTask *cmd = g_new0(DaemonCommandTask, 1);
+    cmd->state = state;
+    cmd->requested_active = requested_active;
 
-        if (!start_daemon_from_gui(state, &error)) {
-            state->daemon_transition_in_flight = false;
-            state->daemon_requested_active = state->daemon_functional;
-            update_daemon_switch_state(state);
-
-            show_error_dialog(state,
-                              "Falha ao iniciar Serviço MIDI-BLE",
-                              error ? error->message : "Erro desconhecido");
-            g_clear_error(&error);
-            return;
-        }
-
-        daemon_schedule_transition_refresh(state, 900);
-        return;
-    }
-
-    stop_daemon_from_gui(state);
-    daemon_schedule_transition_refresh(state, 700);
+    GTask *task = g_task_new(G_OBJECT(state->window),
+                             NULL,
+                             daemon_command_task_done,
+                             state);
+    g_task_set_task_data(task, cmd, g_free);
+    g_task_run_in_thread(task, daemon_command_task_thread);
+    g_object_unref(task);
 }
+
 
 
 static void daemon_root_observer_apply(MbGnomeWindowState *state) {
@@ -559,7 +626,7 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
      *
      * The daemon controls runtime actions only.  It must never create, hide,
      * clear or unselect catalog rows.  The main list is the persisted catalog
-     * loaded from devices.d/*.ini.
+     * loaded from devices.d .ini files.
      */
     update_scan_button_state(state);
 
@@ -610,19 +677,10 @@ static void daemon_observer_state_changed_cb(bool active,
                safe(active_state, "unknown"),
                safe(sub_state, "unknown"));
 
-    if (state->daemon_transition_in_flight && active == state->daemon_requested_active) {
-        if (state->daemon_transition_source_id) {
-            g_source_remove(state->daemon_transition_source_id);
-            state->daemon_transition_source_id = 0;
-        }
-
-        state->daemon_transition_in_flight = false;
-    }
-
     daemon_root_observer_set_functional(state, active);
     update_daemon_switch_state(state);
 
-    if (active)
+    if (active && !state->daemon_transition_in_flight)
         mb_gnome_window_refresh(state);
 }
 
@@ -808,6 +866,7 @@ static void update_main_panel(MbGnomeWindowState *state) {
 
     update_action_sensitivity(state, device);
     update_daemon_switch_state(state);
+    update_action_sensitivity(state, selected_device(state));
 }
 
 
@@ -1659,18 +1718,7 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
     if (!state || state->command_in_flight)
         return;
 
-    if ((g_strcmp0(verb, "connect") == 0 ||
-         g_strcmp0(verb, "disconnect") == 0 ||
-         g_strcmp0(verb, "refresh") == 0) &&
-        !state->daemon_functional) {
-        show_error_dialog(state,
-                          "Serviço MIDI-BLE desligado",
-                          "Ligue o Serviço MIDI-BLE antes de conectar ou desconectar instrumentos.");
-        mb_gnome_window_refresh(state);
-        return;
-    }
-
-    const MbUiDevice *device = selected_device(state);
+     const MbUiDevice *device = selected_device(state);
     if (!device) {
         show_error_dialog(state, "Nenhum instrumento conhecido", "Selecione um instrumento BLE-MIDI primeiro.");
         return;
@@ -1854,6 +1902,11 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     GtkWidget *daemon_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(daemon_box, "daemon-switch-row");
     gtk_widget_set_valign(daemon_box, GTK_ALIGN_CENTER);
+
+    state->daemon_spinner = gtk_spinner_new();
+    gtk_widget_set_visible(state->daemon_spinner, FALSE);
+    gtk_widget_set_valign(state->daemon_spinner, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(daemon_box), state->daemon_spinner);
 
     state->daemon_switch_label = label_new("Serviço MIDI-BLE desativado", "muted-text");
     gtk_box_append(GTK_BOX(daemon_box), state->daemon_switch_label);
@@ -2091,7 +2144,8 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     g_signal_connect(settings, "clicked", G_CALLBACK(diagnostics_clicked_cb), state);
     g_signal_connect(state->sidebar_list, "row-selected", G_CALLBACK(row_selected_cb), state);
     g_signal_connect(state->connect_button, "clicked", G_CALLBACK(connect_clicked_cb), state);
-    g_signal_connect(state->forget_button, "clicked", G_CALLBACK(forget_clicked_cb), state);
+    if (state->forget_button)
+        g_signal_connect(state->forget_button, "clicked", G_CALLBACK(forget_clicked_cb), state);
 
     gtk_widget_set_visible(state->device_box, FALSE);
     gtk_widget_set_sensitive(state->sidebar_list, FALSE);
