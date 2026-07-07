@@ -9,6 +9,7 @@ G_BEGIN_DECLS
 typedef struct _MbBluezObserver MbBluezObserver;
 
 typedef void (*MbBluezObserverCallback)(bool available,
+                                        bool powered_known,
                                         bool powered,
                                         bool discovering,
                                         const char *adapter_path,
@@ -26,6 +27,7 @@ bool mb_bluez_observer_refresh(MbBluezObserver *observer,
                                GError **error);
 
 bool mb_bluez_observer_is_available(const MbBluezObserver *observer);
+bool mb_bluez_observer_is_powered_known(const MbBluezObserver *observer);
 bool mb_bluez_observer_is_powered(const MbBluezObserver *observer);
 bool mb_bluez_observer_is_discovering(const MbBluezObserver *observer);
 bool mb_bluez_observer_can_scan(const MbBluezObserver *observer);

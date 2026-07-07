@@ -11,16 +11,19 @@
 struct _MbBluezObserver {
     GDBusConnection *connection;
     char *adapter_path;
+
     bool available;
+    bool powered_known;
     bool powered;
     bool discovering;
+
     guint properties_signal_id;
     guint interfaces_added_signal_id;
     guint interfaces_removed_signal_id;
+
     MbBluezObserverCallback callback;
     void *user_data;
 };
-
 
 static bool variant_dict_lookup_bool(GVariant *dict,
                                      const char *key,
@@ -39,10 +42,12 @@ static bool variant_dict_lookup_bool(GVariant *dict,
         ok = true;
     } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
         GVariant *inner = g_variant_get_variant(value);
+
         if (g_variant_is_of_type(inner, G_VARIANT_TYPE_BOOLEAN)) {
             *out = g_variant_get_boolean(inner);
             ok = true;
         }
+
         g_variant_unref(inner);
     }
 
@@ -55,6 +60,7 @@ static void observer_notify(MbBluezObserver *observer) {
         return;
 
     observer->callback(observer->available,
+                       observer->powered_known,
                        observer->powered,
                        observer->discovering,
                        observer->adapter_path ? observer->adapter_path : "",
@@ -63,6 +69,7 @@ static void observer_notify(MbBluezObserver *observer) {
 
 static bool observer_set_state(MbBluezObserver *observer,
                                bool available,
+                               bool powered_known,
                                bool powered,
                                bool discovering,
                                const char *adapter_path,
@@ -72,11 +79,13 @@ static bool observer_set_state(MbBluezObserver *observer,
 
     bool changed =
         observer->available != available ||
+        observer->powered_known != powered_known ||
         observer->powered != powered ||
         observer->discovering != discovering ||
         g_strcmp0(observer->adapter_path, adapter_path) != 0;
 
     observer->available = available;
+    observer->powered_known = powered_known;
     observer->powered = powered;
     observer->discovering = discovering;
 
@@ -122,16 +131,19 @@ static bool observer_read_adapters(MbBluezObserver *observer,
     g_variant_get(reply, "(@a{oa{sa{sv}}})", &objects);
 
     bool found = false;
+    bool powered_known = false;
     bool powered = false;
     bool discovering = false;
     char *adapter_path = NULL;
 
     bool fallback_found = false;
+    bool fallback_powered_known = false;
     bool fallback_powered = false;
     bool fallback_discovering = false;
     char *fallback_adapter_path = NULL;
 
     bool hci0_found = false;
+    bool hci0_powered_known = false;
     bool hci0_powered = false;
     bool hci0_discovering = false;
     char *hci0_adapter_path = NULL;
@@ -149,38 +161,41 @@ static bool observer_read_adapters(MbBluezObserver *observer,
         if (props) {
             bool p = false;
             bool d = false;
+            bool p_known = variant_dict_lookup_bool(props, "Powered", &p);
 
-            variant_dict_lookup_bool(props, "Powered", &p);
             variant_dict_lookup_bool(props, "Discovering", &d);
 
-            g_printerr("[midi-ble-rt-gui] BlueZ adapter: path=%s powered=%d discovering=%d\n",
+            g_printerr("[midi-ble-rt-gui] BlueZ adapter: path=%s powered_known=%d powered=%d discovering_known=1 discovering=%d\n",
                        path,
+                       p_known,
                        p,
                        d);
 
             if (!fallback_found) {
                 fallback_found = true;
-                fallback_powered = p;
+                fallback_powered_known = p_known;
+                fallback_powered = p_known ? p : false;
                 fallback_discovering = d;
                 fallback_adapter_path = g_strdup(path);
             }
 
             if (g_strcmp0(path, "/org/bluez/hci0") == 0) {
                 hci0_found = true;
-                hci0_powered = p;
+                hci0_powered_known = p_known;
+                hci0_powered = p_known ? p : false;
                 hci0_discovering = d;
                 g_free(hci0_adapter_path);
                 hci0_adapter_path = g_strdup(path);
             }
 
             /*
-             * Scan is a BlueZ operation. Prefer any powered adapter over a
-             * hard-coded hci0, because bluetoothctl may select another
-             * controller as the default one.
+             * Prefer any known powered adapter.  If Powered is unknown, keep it
+             * as fallback but do not report Bluetooth as explicitly off.
              */
-            if (p && !found) {
+            if (p_known && p && !found) {
                 found = true;
-                powered = p;
+                powered_known = true;
+                powered = true;
                 discovering = d;
                 adapter_path = g_strdup(path);
             }
@@ -193,6 +208,7 @@ static bool observer_read_adapters(MbBluezObserver *observer,
 
     if (!found && hci0_found) {
         found = true;
+        powered_known = hci0_powered_known;
         powered = hci0_powered;
         discovering = hci0_discovering;
         adapter_path = g_strdup(hci0_adapter_path);
@@ -200,6 +216,7 @@ static bool observer_read_adapters(MbBluezObserver *observer,
 
     if (!found && fallback_found) {
         found = true;
+        powered_known = fallback_powered_known;
         powered = fallback_powered;
         discovering = fallback_discovering;
         adapter_path = g_strdup(fallback_adapter_path);
@@ -210,7 +227,8 @@ static bool observer_read_adapters(MbBluezObserver *observer,
 
     observer_set_state(observer,
                        found,
-                       found ? powered : false,
+                       found ? powered_known : false,
+                       found && powered_known ? powered : false,
                        found ? discovering : false,
                        found ? adapter_path : NULL,
                        notify);
@@ -248,20 +266,35 @@ static void properties_changed_cb(GDBusConnection *connection,
         return;
     }
 
-    if (observer->adapter_path && g_strcmp0(observer->adapter_path, object_path) != 0) {
+    if (observer->adapter_path &&
+        g_strcmp0(observer->adapter_path, object_path) != 0) {
         g_variant_unref(changed);
         return;
     }
 
+    bool powered_known = observer->powered_known;
     bool powered = observer->powered;
     bool discovering = observer->discovering;
 
-    g_variant_lookup(changed, "Powered", "b", &powered);
-    g_variant_lookup(changed, "Discovering", "b", &discovering);
+    bool changed_powered = false;
+    bool p = powered;
+
+    if (variant_dict_lookup_bool(changed, "Powered", &p)) {
+        powered_known = true;
+        powered = p;
+        changed_powered = true;
+    }
+
+    bool d = discovering;
+    if (variant_dict_lookup_bool(changed, "Discovering", &d))
+        discovering = d;
+
+    (void)changed_powered;
 
     observer_set_state(observer,
                        true,
-                       powered,
+                       powered_known,
+                       powered_known ? powered : false,
                        discovering,
                        object_path,
                        true);
@@ -297,11 +330,13 @@ static void interfaces_added_cb(GDBusConnection *connection,
 
     if (props) {
         GError *error = NULL;
+
         if (!observer_read_adapters(observer, true, &error)) {
             g_printerr("[midi-ble-rt-gui] BlueZ observer refresh failed: %s\n",
                        error && error->message ? error->message : "unknown error");
             g_clear_error(&error);
         }
+
         g_variant_unref(props);
     }
 
@@ -346,6 +381,7 @@ static void interfaces_removed_cb(GDBusConnection *connection,
 
     if (!observer->adapter_path || g_strcmp0(observer->adapter_path, path) == 0) {
         GError *error = NULL;
+
         if (!observer_read_adapters(observer, true, &error)) {
             g_printerr("[midi-ble-rt-gui] BlueZ observer refresh failed: %s\n",
                        error && error->message ? error->message : "unknown error");
@@ -458,6 +494,10 @@ bool mb_bluez_observer_is_available(const MbBluezObserver *observer) {
     return observer && observer->available;
 }
 
+bool mb_bluez_observer_is_powered_known(const MbBluezObserver *observer) {
+    return observer && observer->powered_known;
+}
+
 bool mb_bluez_observer_is_powered(const MbBluezObserver *observer) {
     return observer && observer->powered;
 }
@@ -467,7 +507,11 @@ bool mb_bluez_observer_is_discovering(const MbBluezObserver *observer) {
 }
 
 bool mb_bluez_observer_can_scan(const MbBluezObserver *observer) {
-    return observer && observer->available && observer->powered && !observer->discovering;
+    return observer &&
+           observer->available &&
+           observer->powered_known &&
+           observer->powered &&
+           !observer->discovering;
 }
 
 const char *mb_bluez_observer_adapter_path(const MbBluezObserver *observer) {
