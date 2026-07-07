@@ -1133,43 +1133,15 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
      */
     overlay_bluez_pairing_state(snapshot);
 
-    GError *error = NULL;
-    char *status = run_ctl(facade, "daemon-status", NULL, NULL, &error);
-    if (!status) {
-        snapshot->status.online = false;
-        snapshot->last_error = g_strdup(error ? error->message : "service status failed");
-        g_clear_error(&error);
-        return snapshot;
-    }
-
-    char **status_lines = g_strsplit(status, "\n", 0);
-    for (gsize i = 0; status_lines && status_lines[i]; i++) {
-        char *line = status_lines[i];
-        g_strstrip(line);
-        if (g_str_has_prefix(line, "OK STATUS")) {
-            parse_status_line(snapshot, line);
-            break;
-        }
-    }
-
-    g_strfreev(status_lines);
-    g_free(status);
-
-    char *list = run_ctl(facade, "daemon-list", NULL, NULL, &error);
-    if (!list) {
-        if (!snapshot->last_error)
-            snapshot->last_error = g_strdup(error ? error->message : "device list failed");
-        g_clear_error(&error);
-        return snapshot;
-    }
-
-    MbUiSnapshot *daemon_snapshot = mb_ui_snapshot_new();
-    parse_list_output(daemon_snapshot, list);
-    overlay_daemon_state_by_address(snapshot, daemon_snapshot);
-
-    mb_ui_snapshot_free(daemon_snapshot);
-    g_free(list);
-
+    /*
+     * Do not block the main catalog on the daemon control socket.
+     *
+     * The window already observes systemd for daemon availability.  The
+     * persisted catalog and BlueZ pairing/connection state are enough to render
+     * the main list.  Runtime daemon state may be overlaid later, but it must
+     * never prevent catalog rows from appearing.
+     */
+    snapshot->status.online = false;
     return snapshot;
 }
 

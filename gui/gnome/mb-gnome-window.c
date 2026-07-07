@@ -75,6 +75,7 @@ static void daemon_schedule_transition_refresh(MbGnomeWindowState *state,
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
+static void forget_clicked_cb(GtkButton *button, gpointer user_data);
 static void daemon_root_observer_apply(MbGnomeWindowState *state);
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
                                                 bool daemon_functional);
@@ -112,6 +113,7 @@ typedef struct {
 
 static void mb_gnome_window_refresh(MbGnomeWindowState *state);
 static void update_scan_button_state(MbGnomeWindowState *state);
+static void update_main_panel(MbGnomeWindowState *state);
 static void bluez_observer_state_changed_cb(bool available,
                                            bool powered_known,
                                            bool powered,
@@ -565,6 +567,12 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
         gtk_widget_set_sensitive(state->sidebar_list, TRUE);
 
     update_daemon_switch_state(state);
+
+    /*
+     * Daemon state changes must immediately update runtime actions.
+     * The catalog remains visible, but Connect/Disconnect depend on daemon.
+     */
+    update_main_panel(state);
 }
 
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
@@ -693,7 +701,7 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
     /*
      * Observer rule:
      *
-     * - Search/list availability comes from daemon_functional.
+     * - Main list availability comes from the persisted catalog.
      * - Basic panel and local actions come from list selection.
      * - Runtime connect/disconnect additionally requires daemon_functional.
      */
@@ -809,7 +817,28 @@ static bool device_is_visible_in_main_list(const MbUiDevice *device) {
 }
 
 
-static GtkWidget *device_row_new(const MbUiDevice *device) {
+static void device_row_delete_clicked_cb(GtkButton *button, gpointer user_data) {
+    MbGnomeWindowState *state = user_data;
+
+    if (!state)
+        return;
+
+    const char *device_id = g_object_get_data(G_OBJECT(button), "device-id");
+    if (!device_id || !*device_id)
+        return;
+
+    /*
+     * The row button owns the row identity.  Select that catalog item and
+     * reuse the existing confirmation flow.
+     */
+    g_free(state->selected_id);
+    state->selected_id = g_strdup(device_id);
+    update_main_panel(state);
+
+    forget_clicked_cb(button, state);
+}
+
+static GtkWidget *device_row_new(MbGnomeWindowState *state, const MbUiDevice *device) {
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
     gtk_widget_add_css_class(row, "device-row");
 
@@ -835,7 +864,27 @@ static GtkWidget *device_row_new(const MbUiDevice *device) {
     gtk_box_append(GTK_BOX(text), name);
     gtk_box_append(GTK_BOX(text), status_line);
 
+    GtkWidget *delete_button = gtk_button_new_from_icon_name("edit-delete-symbolic");
+    gtk_widget_add_css_class(delete_button, "flat");
+    gtk_widget_add_css_class(delete_button, "circular");
+    gtk_widget_add_css_class(delete_button, "destructive-action");
+    gtk_widget_set_tooltip_text(delete_button, "Excluir ou esquecer instrumento");
+    gtk_widget_set_valign(delete_button, GTK_ALIGN_CENTER);
+    gtk_widget_set_sensitive(delete_button, state && !state->command_in_flight);
+
+    if (device && device->id)
+        g_object_set_data_full(G_OBJECT(delete_button),
+                               "device-id",
+                               g_strdup(device->id),
+                               g_free);
+
+    g_signal_connect(delete_button,
+                     "clicked",
+                     G_CALLBACK(device_row_delete_clicked_cb),
+                     state);
+
     gtk_box_append(GTK_BOX(row), text);
+    gtk_box_append(GTK_BOX(row), delete_button);
     return row;
 }
 
@@ -867,7 +916,7 @@ static void rebuild_sidebar(MbGnomeWindowState *state) {
             continue;
 
         GtkWidget *row = gtk_list_box_row_new();
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), device_row_new(device));
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), device_row_new(state, device));
         g_object_set_data_full(G_OBJECT(row), "device-id", g_strdup(device->id), g_free);
         gtk_list_box_append(GTK_LIST_BOX(state->sidebar_list), row);
 
@@ -1517,7 +1566,7 @@ static void row_selected_cb(GtkListBox *box, GtkListBoxRow *row, gpointer user_d
 
     MbGnomeWindowState *state = user_data;
 
-    if (!state || !state->daemon_functional)
+    if (!state)
         return;
 
     if (!row)
@@ -1931,7 +1980,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_hexpand(state->forget_button, TRUE);
 
     gtk_box_append(GTK_BOX(actions), state->connect_button);
-    gtk_box_append(GTK_BOX(actions), state->forget_button);
     gtk_box_append(GTK_BOX(hero), actions);
 
     GtkWidget *config = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
