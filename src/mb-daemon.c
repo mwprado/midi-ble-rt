@@ -118,6 +118,7 @@ struct _ConfigDirRuntime {
 
     GDBusConnection *bus;
     GMainLoop *loop;
+    char *config_dir;
 
     /*
      * User-session D-Bus API for GUI clients.
@@ -1866,6 +1867,14 @@ static const char runtime_dbus_introspection_xml[] =
     "    <method name='ListDevices'>"
     "      <arg name='devices' type='aa{sv}' direction='out'/>"
     "    </method>"
+    "    <method name='ScanDevices'>"
+    "      <arg name='timeout_seconds' type='u' direction='in'/>"
+    "      <arg name='devices' type='aa{sv}' direction='out'/>"
+    "    </method>"
+    "    <method name='PairAndImportDevice'>"
+    "      <arg name='address' type='s' direction='in'/>"
+    "      <arg name='device' type='a{sv}' direction='out'/>"
+    "    </method>"
     "    <method name='ConnectDevice'>"
     "      <arg name='id' type='s' direction='in'/>"
     "    </method>"
@@ -1936,6 +1945,755 @@ static GVariant *runtime_dbus_device_to_variant(ConfigDeviceRuntime *dev) {
 
     return g_variant_builder_end(&dict);
 }
+
+
+#define RUNTIME_DBUS_ADAPTER_IFACE "org.bluez.Adapter1"
+#define RUNTIME_DBUS_BLE_MIDI_SERVICE_UUID "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
+
+static char *runtime_dbus_bluez_dup_string(GVariant *dict,
+                                           const char *key) {
+    if (!dict || !key)
+        return NULL;
+
+    GVariant *value = g_variant_lookup_value(dict, key, G_VARIANT_TYPE_STRING);
+    if (!value)
+        return NULL;
+
+    char *out = g_strdup(g_variant_get_string(value, NULL));
+    g_variant_unref(value);
+    return out;
+}
+
+static bool runtime_dbus_bluez_get_bool(GVariant *dict,
+                                        const char *key,
+                                        bool fallback) {
+    if (!dict || !key)
+        return fallback;
+
+    GVariant *value = g_variant_lookup_value(dict, key, G_VARIANT_TYPE_BOOLEAN);
+    if (!value)
+        return fallback;
+
+    bool out = g_variant_get_boolean(value);
+    g_variant_unref(value);
+    return out;
+}
+
+static bool runtime_dbus_bluez_get_int16(GVariant *dict,
+                                         const char *key,
+                                         int *out) {
+    if (!dict || !key || !out)
+        return false;
+
+    GVariant *value = g_variant_lookup_value(dict, key, G_VARIANT_TYPE_INT16);
+    if (!value)
+        return false;
+
+    *out = (int)g_variant_get_int16(value);
+    g_variant_unref(value);
+    return true;
+}
+
+static bool runtime_dbus_contains_casefold(const char *haystack,
+                                           const char *needle) {
+    if (!haystack || !needle || !*needle)
+        return false;
+
+    char *h = g_ascii_strdown(haystack, -1);
+    char *n = g_ascii_strdown(needle, -1);
+    bool ok = h && n && strstr(h, n) != NULL;
+
+    g_free(n);
+    g_free(h);
+    return ok;
+}
+
+static bool runtime_dbus_uuid_array_contains(GVariant *uuids,
+                                             const char *uuid) {
+    if (!uuids || !uuid || !*uuid)
+        return false;
+
+    GVariantIter iter;
+    const char *candidate = NULL;
+
+    g_variant_iter_init(&iter, uuids);
+    while (g_variant_iter_next(&iter, "&s", &candidate)) {
+        if (candidate && g_ascii_strcasecmp(candidate, uuid) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+static bool runtime_dbus_scan_has_midi_hint(const char *name,
+                                            const char *alias,
+                                            GVariant *uuids) {
+    return runtime_dbus_uuid_array_contains(uuids, RUNTIME_DBUS_BLE_MIDI_SERVICE_UUID) ||
+           runtime_dbus_contains_casefold(name, "midi") ||
+           runtime_dbus_contains_casefold(alias, "midi") ||
+           runtime_dbus_contains_casefold(name, "go:keys") ||
+           runtime_dbus_contains_casefold(alias, "go:keys") ||
+           runtime_dbus_contains_casefold(name, "go keys") ||
+           runtime_dbus_contains_casefold(alias, "go keys");
+}
+
+static const char *runtime_dbus_scan_guess_profile(const char *name,
+                                                   const char *alias,
+                                                   GVariant *uuids) {
+    if (runtime_dbus_contains_casefold(name, "go:keys") ||
+        runtime_dbus_contains_casefold(alias, "go:keys") ||
+        runtime_dbus_contains_casefold(name, "go keys") ||
+        runtime_dbus_contains_casefold(alias, "go keys"))
+        return "roland_gokeys";
+
+    if (runtime_dbus_uuid_array_contains(uuids, RUNTIME_DBUS_BLE_MIDI_SERVICE_UUID))
+        return "standard_ble_midi";
+
+    if (runtime_dbus_contains_casefold(name, "midi") ||
+        runtime_dbus_contains_casefold(alias, "midi"))
+        return "unknown_midi";
+
+    return "-";
+}
+
+static char *runtime_dbus_scan_id_from_name_address(const char *name,
+                                                    const char *address) {
+    const char *base = name && *name ? name : address;
+    if (!base || !*base)
+        base = "ble-midi-device";
+
+    char *tmp = g_ascii_strdown(base, -1);
+
+    for (char *p = tmp; p && *p; p++) {
+        if (!g_ascii_isalnum(*p))
+            *p = '-';
+    }
+
+    char **parts = g_strsplit(tmp, "-", -1);
+    GString *out = g_string_new(NULL);
+
+    for (guint i = 0; parts && parts[i]; i++) {
+        if (!*parts[i])
+            continue;
+        if (out->len > 0)
+            g_string_append_c(out, '-');
+        g_string_append(out, parts[i]);
+    }
+
+    if (out->len == 0)
+        g_string_append(out, "ble-midi-device");
+
+    g_strfreev(parts);
+    g_free(tmp);
+
+    return g_string_free(out, FALSE);
+}
+
+static bool runtime_dbus_address_is_imported(ConfigDirRuntime *rt,
+                                             const char *address) {
+    if (!rt || !address || !*address)
+        return false;
+
+    for (guint i = 0; rt->devices && i < rt->devices->len; i++) {
+        ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+
+        if (!dev || !dev->config || !dev->config->address)
+            continue;
+
+        if (g_ascii_strcasecmp(dev->config->address, address) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+static char *runtime_dbus_first_bluez_adapter_path(ConfigDirRuntime *rt) {
+    if (!rt || !rt->bus)
+        return NULL;
+
+    GVariant *objects = mb_bluez_get_managed_objects(rt->bus);
+    if (!objects)
+        return NULL;
+
+    GVariantIter iter;
+    const char *path = NULL;
+    GVariant *ifaces = NULL;
+    char *adapter_path = NULL;
+
+    g_variant_iter_init(&iter, objects);
+    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+        GVariant *props = g_variant_lookup_value(ifaces,
+                                                  RUNTIME_DBUS_ADAPTER_IFACE,
+                                                  G_VARIANT_TYPE("a{sv}"));
+        if (props) {
+            adapter_path = g_strdup(path);
+            g_variant_unref(props);
+        }
+
+        g_variant_unref(ifaces);
+
+        if (adapter_path)
+            break;
+    }
+
+    g_variant_unref(objects);
+    return adapter_path;
+}
+
+static bool runtime_dbus_call_bluez_adapter_void(ConfigDirRuntime *rt,
+                                                 const char *adapter_path,
+                                                 const char *method,
+                                                 GError **error) {
+    if (!rt || !rt->bus || !adapter_path || !*adapter_path || !method || !*method) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid BlueZ adapter call");
+        return false;
+    }
+
+    GVariant *reply = g_dbus_connection_call_sync(rt->bus,
+                                                  BLUEZ_BUS,
+                                                  adapter_path,
+                                                  RUNTIME_DBUS_ADAPTER_IFACE,
+                                                  method,
+                                                  NULL,
+                                                  NULL,
+                                                  G_DBUS_CALL_FLAGS_NONE,
+                                                  MB_DBUS_GET_MANAGED_OBJECTS_TIMEOUT_MS,
+                                                  NULL,
+                                                  error);
+    if (!reply)
+        return false;
+
+    g_variant_unref(reply);
+    return true;
+}
+
+static GVariant *runtime_dbus_scan_candidate_to_variant(ConfigDirRuntime *rt,
+                                                        const char *path,
+                                                        GVariant *props) {
+    char *address = runtime_dbus_bluez_dup_string(props, "Address");
+    char *name = runtime_dbus_bluez_dup_string(props, "Name");
+    char *alias = runtime_dbus_bluez_dup_string(props, "Alias");
+    GVariant *uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
+
+    char *id = runtime_dbus_scan_id_from_name_address(name && *name ? name : alias,
+                                                      address);
+    const char *profile = runtime_dbus_scan_guess_profile(name, alias, uuids);
+    bool imported = runtime_dbus_address_is_imported(rt, address);
+
+    bool paired = runtime_dbus_bluez_get_bool(props, "Paired", false);
+    bool trusted = runtime_dbus_bluez_get_bool(props, "Trusted", false);
+    bool connected = runtime_dbus_bluez_get_bool(props, "Connected", false);
+
+    int rssi = 0;
+    bool rssi_known = runtime_dbus_bluez_get_int16(props, "RSSI", &rssi);
+
+    GVariantBuilder dict;
+    g_variant_builder_init(&dict, G_VARIANT_TYPE("a{sv}"));
+
+    runtime_dbus_dict_add_string(&dict, "Id", id);
+    runtime_dbus_dict_add_string(&dict, "Address", address);
+    runtime_dbus_dict_add_string(&dict, "Name", name && *name ? name : alias);
+    runtime_dbus_dict_add_string(&dict, "Alias", alias);
+    runtime_dbus_dict_add_string(&dict, "BluezPath", path);
+    runtime_dbus_dict_add_string(&dict, "Profile", profile);
+    runtime_dbus_dict_add_bool(&dict, "Imported", imported);
+    runtime_dbus_dict_add_bool(&dict, "Paired", paired);
+    runtime_dbus_dict_add_bool(&dict, "Trusted", trusted);
+    runtime_dbus_dict_add_bool(&dict, "Connected", connected);
+    runtime_dbus_dict_add_bool(&dict, "RSSIKnown", rssi_known);
+    runtime_dbus_dict_add_int(&dict, "RSSI", rssi);
+    runtime_dbus_dict_add_string(&dict,
+                                 "RuntimeState",
+                                 imported ? "IMPORTED" : "DISCOVERED");
+
+    if (uuids)
+        g_variant_unref(uuids);
+    g_free(id);
+    g_free(alias);
+    g_free(name);
+    g_free(address);
+
+    return g_variant_builder_end(&dict);
+}
+
+static GVariant *runtime_dbus_scan_devices(ConfigDirRuntime *rt,
+                                           guint timeout_seconds,
+                                           GError **error) {
+    if (!rt || !rt->bus) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_CONNECTED,
+                    "BlueZ system bus is unavailable");
+        return NULL;
+    }
+
+    if (timeout_seconds < 1)
+        timeout_seconds = 1;
+    if (timeout_seconds > 30)
+        timeout_seconds = 30;
+
+    char *adapter_path = runtime_dbus_first_bluez_adapter_path(rt);
+    if (!adapter_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_FOUND,
+                    "no BlueZ adapter found");
+        return NULL;
+    }
+
+    g_print("D-Bus ScanDevices: StartDiscovery adapter=%s timeout=%u\n",
+            adapter_path,
+            timeout_seconds);
+
+    if (!runtime_dbus_call_bluez_adapter_void(rt,
+                                              adapter_path,
+                                              "StartDiscovery",
+                                              error)) {
+        g_free(adapter_path);
+        return NULL;
+    }
+
+    g_usleep((gulong)timeout_seconds * G_USEC_PER_SEC);
+
+    GError *stop_error = NULL;
+    if (!runtime_dbus_call_bluez_adapter_void(rt,
+                                              adapter_path,
+                                              "StopDiscovery",
+                                              &stop_error)) {
+        g_printerr("D-Bus ScanDevices: StopDiscovery failed: %s\n",
+                   stop_error && stop_error->message ? stop_error->message : "unknown error");
+        g_clear_error(&stop_error);
+    }
+
+    g_free(adapter_path);
+
+    GVariant *objects = mb_bluez_get_managed_objects(rt->bus);
+    if (!objects) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "BlueZ GetManagedObjects failed after discovery");
+        return NULL;
+    }
+
+    GVariantBuilder devices;
+    g_variant_builder_init(&devices, G_VARIANT_TYPE("aa{sv}"));
+
+    GVariantIter iter;
+    const char *path = NULL;
+    GVariant *ifaces = NULL;
+
+    g_variant_iter_init(&iter, objects);
+    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+        GVariant *props = g_variant_lookup_value(ifaces,
+                                                  DEVICE_IFACE,
+                                                  G_VARIANT_TYPE("a{sv}"));
+        if (!props) {
+            g_variant_unref(ifaces);
+            continue;
+        }
+
+        char *address = runtime_dbus_bluez_dup_string(props, "Address");
+        char *name = runtime_dbus_bluez_dup_string(props, "Name");
+        char *alias = runtime_dbus_bluez_dup_string(props, "Alias");
+        GVariant *uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
+
+        bool keep = address && *address &&
+                    runtime_dbus_scan_has_midi_hint(name, alias, uuids);
+
+        if (keep) {
+            g_variant_builder_add_value(&devices,
+                                        runtime_dbus_scan_candidate_to_variant(rt,
+                                                                              path,
+                                                                              props));
+        }
+
+        if (uuids)
+            g_variant_unref(uuids);
+        g_free(alias);
+        g_free(name);
+        g_free(address);
+        g_variant_unref(props);
+        g_variant_unref(ifaces);
+    }
+
+    g_variant_unref(objects);
+    return g_variant_builder_end(&devices);
+}
+
+
+
+static GVariant *runtime_dbus_get_bluez_device_props(ConfigDirRuntime *rt,
+                                                     const char *device_path,
+                                                     GError **error) {
+    if (!rt || !rt->bus || !device_path || !*device_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid BlueZ device path");
+        return NULL;
+    }
+
+    GVariant *reply = g_dbus_connection_call_sync(rt->bus,
+                                                  BLUEZ_BUS,
+                                                  device_path,
+                                                  PROPERTIES_IFACE,
+                                                  "GetAll",
+                                                  g_variant_new("(s)", DEVICE_IFACE),
+                                                  G_VARIANT_TYPE("(a{sv})"),
+                                                  G_DBUS_CALL_FLAGS_NONE,
+                                                  MB_DBUS_DEVICE_PROPERTY_GET_TIMEOUT_MS,
+                                                  NULL,
+                                                  error);
+    if (!reply)
+        return NULL;
+
+    GVariant *props = g_variant_get_child_value(reply, 0);
+    g_variant_unref(reply);
+    return props;
+}
+
+static const char *runtime_dbus_import_config_profile(const char *profile) {
+    /*
+     * devices.d currently supports concrete daemon profiles.
+     * A fuzzy discovery hint like unknown_midi must not be persisted as a
+     * runtime profile.
+     */
+    if (profile && g_strcmp0(profile, "roland_gokeys") == 0)
+        return "roland_gokeys";
+
+    return "standard_ble_midi";
+}
+
+static char *runtime_dbus_unique_import_id(ConfigDirRuntime *rt,
+                                           const char *base_id,
+                                           const char *devices_dir) {
+    const char *base = base_id && *base_id ? base_id : "ble-midi-device";
+
+    for (unsigned i = 0; i < 1000; i++) {
+        char *candidate = i == 0
+            ? g_strdup(base)
+            : g_strdup_printf("%s-%u", base, i + 1);
+
+        char *filename = g_strdup_printf("%s.ini", candidate);
+        char *path = g_build_filename(devices_dir, filename, NULL);
+
+        bool exists = g_file_test(path, G_FILE_TEST_EXISTS) ||
+                      runtime_find_device_by_id(rt, candidate) != NULL;
+
+        g_free(path);
+        g_free(filename);
+
+        if (!exists)
+            return candidate;
+
+        g_free(candidate);
+    }
+
+    return g_strdup_printf("%s-%" G_GINT64_FORMAT,
+                           base,
+                           g_get_real_time());
+}
+
+static char *runtime_dbus_sanitize_port_name(const char *name,
+                                             const char *id) {
+    if (name && *name)
+        return g_strdup(name);
+
+    if (id && *id)
+        return g_strdup(id);
+
+    return g_strdup("BLE-MIDI");
+}
+
+static bool runtime_dbus_write_import_config(ConfigDirRuntime *rt,
+                                             const char *address,
+                                             const char *name,
+                                             const char *profile,
+                                             char **out_id,
+                                             char **out_path,
+                                             GError **error) {
+    if (!rt || !rt->config_dir || !*rt->config_dir) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "daemon config directory is unavailable");
+        return false;
+    }
+
+    if (!address || !*address) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "device address is required");
+        return false;
+    }
+
+    char *devices_dir = g_build_filename(rt->config_dir, "devices.d", NULL);
+    if (g_mkdir_with_parents(devices_dir, 0700) != 0) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    g_io_error_from_errno(errno),
+                    "could not create devices directory %s: %s",
+                    devices_dir,
+                    g_strerror(errno));
+        g_free(devices_dir);
+        return false;
+    }
+
+    char *base_id = runtime_dbus_scan_id_from_name_address(name, address);
+    char *id = runtime_dbus_unique_import_id(rt, base_id, devices_dir);
+    char *filename = g_strdup_printf("%s.ini", id);
+    char *path = g_build_filename(devices_dir, filename, NULL);
+    char *alsa_port_name = runtime_dbus_sanitize_port_name(name, id);
+
+    const char *persisted_profile = runtime_dbus_import_config_profile(profile);
+
+    char *content = g_strdup_printf(
+        "[device]\n"
+        "id = %s\n"
+        "address = %s\n"
+        "name = %s\n"
+        "profile = %s\n"
+        "alsa_port_name = %s\n"
+        "enabled = true\n"
+        "connect_on_start = true\n"
+        "\n"
+        "[policy]\n"
+        "pair = false\n"
+        "trust = true\n"
+        "reconnect_on_link_loss = true\n"
+        "\n"
+        "[midi]\n"
+        "enable_tx = true\n",
+        id,
+        address,
+        name && *name ? name : id,
+        persisted_profile,
+        alsa_port_name);
+
+    bool ok = g_file_set_contents(path, content, -1, error);
+
+    if (ok) {
+        if (out_id)
+            *out_id = g_strdup(id);
+        if (out_path)
+            *out_path = g_strdup(path);
+    }
+
+    g_free(content);
+    g_free(alsa_port_name);
+    g_free(path);
+    g_free(filename);
+    g_free(id);
+    g_free(base_id);
+    g_free(devices_dir);
+
+    return ok;
+}
+
+static GVariant *runtime_dbus_pair_import_result_to_variant(const char *id,
+                                                            const char *address,
+                                                            const char *name,
+                                                            const char *device_path,
+                                                            const char *profile,
+                                                            bool paired,
+                                                            bool trusted,
+                                                            bool connected,
+                                                            const char *config_path,
+                                                            const char *import_status) {
+    GVariantBuilder dict;
+    g_variant_builder_init(&dict, G_VARIANT_TYPE("a{sv}"));
+
+    runtime_dbus_dict_add_string(&dict, "Id", id);
+    runtime_dbus_dict_add_string(&dict, "Address", address);
+    runtime_dbus_dict_add_string(&dict, "Name", name);
+    runtime_dbus_dict_add_string(&dict, "BluezPath", device_path);
+    runtime_dbus_dict_add_string(&dict, "Profile", runtime_dbus_import_config_profile(profile));
+    runtime_dbus_dict_add_bool(&dict, "Imported", true);
+    runtime_dbus_dict_add_bool(&dict, "Paired", paired);
+    runtime_dbus_dict_add_bool(&dict, "Trusted", trusted);
+    runtime_dbus_dict_add_bool(&dict, "Connected", connected);
+    runtime_dbus_dict_add_string(&dict, "ConfigPath", config_path);
+    runtime_dbus_dict_add_string(&dict, "ImportStatus", import_status);
+    runtime_dbus_dict_add_string(&dict, "RuntimeState", "IMPORTED");
+
+    return g_variant_builder_end(&dict);
+}
+
+static GVariant *runtime_dbus_pair_and_import_device(ConfigDirRuntime *rt,
+                                                     const char *address,
+                                                     GError **error) {
+    if (!rt || !rt->bus) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_CONNECTED,
+                    "BlueZ system bus is unavailable");
+        return NULL;
+    }
+
+    if (!address || !*address) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "device address is required");
+        return NULL;
+    }
+
+    char *device_path = mb_bluez_find_device_path_by_address(rt->bus, address);
+    if (!device_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_FOUND,
+                    "BlueZ device not found for address: %s",
+                    address);
+        return NULL;
+    }
+
+    GVariant *props = runtime_dbus_get_bluez_device_props(rt, device_path, error);
+    if (!props) {
+        g_free(device_path);
+        return NULL;
+    }
+
+    char *name = runtime_dbus_bluez_dup_string(props, "Name");
+    char *alias = runtime_dbus_bluez_dup_string(props, "Alias");
+    GVariant *uuids = g_variant_lookup_value(props, "UUIDs", G_VARIANT_TYPE("as"));
+
+    const char *visible_name = name && *name ? name : alias;
+    const char *guessed_profile = runtime_dbus_scan_guess_profile(name, alias, uuids);
+    const char *profile = runtime_dbus_import_config_profile(guessed_profile);
+
+    bool paired = runtime_dbus_bluez_get_bool(props, "Paired", false);
+    bool trusted = runtime_dbus_bluez_get_bool(props, "Trusted", false);
+    bool connected = runtime_dbus_bluez_get_bool(props, "Connected", false);
+
+    if (runtime_dbus_address_is_imported(rt, address)) {
+        char *id = runtime_dbus_scan_id_from_name_address(visible_name, address);
+
+        GVariant *result =
+            runtime_dbus_pair_import_result_to_variant(id,
+                                                       address,
+                                                       visible_name,
+                                                       device_path,
+                                                       profile,
+                                                       paired,
+                                                       trusted,
+                                                       connected,
+                                                       "",
+                                                       "already_imported");
+
+        if (uuids)
+            g_variant_unref(uuids);
+        g_free(id);
+        g_free(alias);
+        g_free(name);
+        g_variant_unref(props);
+        g_free(device_path);
+        return result;
+    }
+
+    if (!paired) {
+        g_print("D-Bus PairAndImportDevice: pairing %s\n", address);
+        if (!mb_bluez_pair_device(rt->bus, device_path)) {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_FAILED,
+                        "BlueZ Pair() failed for %s",
+                        address);
+            if (uuids)
+                g_variant_unref(uuids);
+            g_free(alias);
+            g_free(name);
+            g_variant_unref(props);
+            g_free(device_path);
+            return NULL;
+        }
+        paired = true;
+    }
+
+    if (!trusted) {
+        g_print("D-Bus PairAndImportDevice: setting Trusted=true for %s\n", address);
+        if (!mb_bluez_set_device_trusted(rt->bus, device_path)) {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        G_IO_ERROR_FAILED,
+                        "BlueZ Trusted=true failed for %s",
+                        address);
+            if (uuids)
+                g_variant_unref(uuids);
+            g_free(alias);
+            g_free(name);
+            g_variant_unref(props);
+            g_free(device_path);
+            return NULL;
+        }
+        trusted = true;
+    }
+
+    char *import_id = NULL;
+    char *config_path = NULL;
+    if (!runtime_dbus_write_import_config(rt,
+                                          address,
+                                          visible_name,
+                                          profile,
+                                          &import_id,
+                                          &config_path,
+                                          error)) {
+        if (uuids)
+            g_variant_unref(uuids);
+        g_free(alias);
+        g_free(name);
+        g_variant_unref(props);
+        g_free(device_path);
+        return NULL;
+    }
+
+    g_print("D-Bus PairAndImportDevice: imported %s as %s (%s)\n",
+            address,
+            import_id,
+            config_path);
+
+    GVariant *result =
+        runtime_dbus_pair_import_result_to_variant(import_id,
+                                                   address,
+                                                   visible_name,
+                                                   device_path,
+                                                   profile,
+                                                   paired,
+                                                   trusted,
+                                                   connected,
+                                                   config_path,
+                                                   "imported_restart_required");
+
+    /*
+     * Full dynamic runtime insertion will come in a later patch.  For now the
+     * daemon tells clients that the config exists but this running process has
+     * not created the ALSA/session runtime for it yet.
+     */
+    g_dbus_connection_emit_signal(rt->dbus_bus,
+                                  NULL,
+                                  "/org/midi_ble_rt/Daemon",
+                                  "org.midi_ble_rt.Daemon1",
+                                  "DeviceChanged",
+                                  g_variant_new("(@a{sv})", g_variant_ref(result)),
+                                  NULL);
+
+    if (uuids)
+        g_variant_unref(uuids);
+    g_free(config_path);
+    g_free(import_id);
+    g_free(alias);
+    g_free(name);
+    g_variant_unref(props);
+    g_free(device_path);
+
+    return result;
+}
+
 
 static void runtime_dbus_emit_device_changed(ConfigDeviceRuntime *dev) {
     if (!dev || !dev->owner || !dev->owner->dbus_bus || !dev->config)
@@ -2025,6 +2783,52 @@ static void runtime_dbus_handle_method_call(GDBusConnection *connection,
         g_dbus_method_invocation_return_value(invocation,
                                               g_variant_new("(@aa{sv})",
                                                             g_variant_builder_end(&devices)));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "ScanDevices") == 0) {
+        guint timeout_seconds = 0;
+        g_variant_get(parameters, "(u)", &timeout_seconds);
+
+        GError *error = NULL;
+        GVariant *devices = runtime_dbus_scan_devices(rt, timeout_seconds, &error);
+        if (!devices) {
+            g_dbus_method_invocation_return_error(invocation,
+                                                  error ? error->domain : G_IO_ERROR,
+                                                  error ? error->code : G_IO_ERROR_FAILED,
+                                                  "%s",
+                                                  error && error->message
+                                                      ? error->message
+                                                      : "ScanDevices failed");
+            g_clear_error(&error);
+            return;
+        }
+
+        g_dbus_method_invocation_return_value(invocation,
+                                              g_variant_new("(@aa{sv})", devices));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "PairAndImportDevice") == 0) {
+        const char *address = NULL;
+        g_variant_get(parameters, "(&s)", &address);
+
+        GError *error = NULL;
+        GVariant *device = runtime_dbus_pair_and_import_device(rt, address, &error);
+        if (!device) {
+            g_dbus_method_invocation_return_error(invocation,
+                                                  error ? error->domain : G_IO_ERROR,
+                                                  error ? error->code : G_IO_ERROR_FAILED,
+                                                  "%s",
+                                                  error && error->message
+                                                      ? error->message
+                                                      : "PairAndImportDevice failed");
+            g_clear_error(&error);
+            return;
+        }
+
+        g_dbus_method_invocation_return_value(invocation,
+                                              g_variant_new("(@a{sv})", device));
         return;
     }
 
@@ -2721,6 +3525,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
     mb_config_clear(&rt->cfg);
     if (rt->loop)
         g_main_loop_unref(rt->loop);
+    g_clear_pointer(&rt->config_dir, g_free);
     if (rt->bus)
         g_object_unref(rt->bus);
 
@@ -2736,6 +3541,7 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
 static int run_config_directory_mode(const char *config_dir) {
     ConfigDirRuntime rt;
     memset(&rt, 0, sizeof(rt));
+    rt.config_dir = g_strdup(config_dir);
     rt.control_socket_fd = -1;
     g_mutex_init(&rt.alsa_lock);
     g_mutex_init(&rt.lifecycle_lock);
