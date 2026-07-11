@@ -1875,6 +1875,10 @@ static const char runtime_dbus_introspection_xml[] =
     "      <arg name='address' type='s' direction='in'/>"
     "      <arg name='device' type='a{sv}' direction='out'/>"
     "    </method>"
+    "    <method name='ForgetDevice'>"
+    "      <arg name='id' type='s' direction='in'/>"
+    "      <arg name='remove_bluez' type='b' direction='in'/>"
+    "    </method>"
     "    <method name='ConnectDevice'>"
     "      <arg name='id' type='s' direction='in'/>"
     "    </method>"
@@ -1890,6 +1894,9 @@ static const char runtime_dbus_introspection_xml[] =
     "    <signal name='DeviceStateChanged'>"
     "      <arg name='id' type='s'/>"
     "      <arg name='state' type='s'/>"
+    "    </signal>"
+    "    <signal name='DeviceRemoved'>"
+    "      <arg name='id' type='s'/>"
     "    </signal>"
     "  </interface>"
     "</node>";
@@ -2747,6 +2754,208 @@ static bool runtime_dbus_enqueue_device_command(ConfigDirRuntime *rt,
     return true;
 }
 
+
+static void runtime_dbus_emit_device_removed(ConfigDirRuntime *rt,
+                                             const char *id) {
+    if (!rt || !rt->dbus_bus)
+        return;
+
+    g_dbus_connection_emit_signal(rt->dbus_bus,
+                                  NULL,
+                                  "/org/midi_ble_rt/Daemon",
+                                  "org.midi_ble_rt.Daemon1",
+                                  "DeviceRemoved",
+                                  g_variant_new("(s)", printable_string(id, "")),
+                                  NULL);
+}
+
+static bool runtime_dbus_config_file_matches_device(const char *path,
+                                                    const char *id,
+                                                    const char *address) {
+    if (!path || !*path)
+        return false;
+
+    GKeyFile *kf = g_key_file_new();
+    GError *error = NULL;
+
+    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &error)) {
+        g_clear_error(&error);
+        g_key_file_unref(kf);
+        return false;
+    }
+
+    char *file_id = g_key_file_get_string(kf, "device", "id", NULL);
+    char *file_address = g_key_file_get_string(kf, "device", "address", NULL);
+
+    bool match = false;
+
+    if (id && *id) {
+        if (file_id && g_strcmp0(file_id, id) == 0)
+            match = true;
+        if (file_address && g_ascii_strcasecmp(file_address, id) == 0)
+            match = true;
+    }
+
+    if (!match && address && *address && file_address)
+        match = g_ascii_strcasecmp(file_address, address) == 0;
+
+    g_free(file_address);
+    g_free(file_id);
+    g_key_file_unref(kf);
+    return match;
+}
+
+static char *runtime_dbus_find_device_config_path(ConfigDirRuntime *rt,
+                                                  const char *id,
+                                                  const char *address) {
+    if (!rt || !rt->config_dir || !*rt->config_dir)
+        return NULL;
+
+    char *devices_dir = g_build_filename(rt->config_dir, "devices.d", NULL);
+    GError *error = NULL;
+    GDir *dir = g_dir_open(devices_dir, 0, &error);
+
+    if (!dir) {
+        g_clear_error(&error);
+        g_free(devices_dir);
+        return NULL;
+    }
+
+    const char *name = NULL;
+    char *match = NULL;
+
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        if (!g_str_has_suffix(name, ".ini"))
+            continue;
+
+        char *path = g_build_filename(devices_dir, name, NULL);
+
+        if (runtime_dbus_config_file_matches_device(path, id, address)) {
+            match = path;
+            break;
+        }
+
+        g_free(path);
+    }
+
+    g_dir_close(dir);
+    g_free(devices_dir);
+    return match;
+}
+
+static bool runtime_dbus_bluez_remove_device(ConfigDirRuntime *rt,
+                                             const char *device_path,
+                                             GError **error) {
+    if (!rt || !rt->bus || !device_path || !*device_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid BlueZ RemoveDevice request");
+        return false;
+    }
+
+    char *adapter_path = g_path_get_dirname(device_path);
+
+    GVariant *reply = g_dbus_connection_call_sync(rt->bus,
+                                                  BLUEZ_BUS,
+                                                  adapter_path,
+                                                  RUNTIME_DBUS_ADAPTER_IFACE,
+                                                  "RemoveDevice",
+                                                  g_variant_new("(o)", device_path),
+                                                  NULL,
+                                                  G_DBUS_CALL_FLAGS_NONE,
+                                                  MB_DBUS_DEVICE_PROPERTY_GET_TIMEOUT_MS,
+                                                  NULL,
+                                                  error);
+
+    g_free(adapter_path);
+
+    if (!reply)
+        return false;
+
+    g_variant_unref(reply);
+    return true;
+}
+
+static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
+                                       const char *id,
+                                       bool remove_bluez,
+                                       GError **error) {
+    if (!rt || !id || !*id) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "device id or address is required");
+        return false;
+    }
+
+    ConfigDeviceRuntime *dev = runtime_find_device_by_id(rt, id);
+    const char *resolved_id = dev && dev->config ? dev->config->id : id;
+    const char *resolved_address = dev && dev->config ? dev->config->address : NULL;
+
+    if (dev) {
+        /*
+         * Do not free the runtime object in this first D-Bus removal patch.
+         * Stop/disconnect it and remove the persistent config.  Full in-memory
+         * deletion is a separate, riskier patch because ALSA/routing callbacks
+         * may still reference the device object.
+         */
+        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCONNECT, "dbus forget");
+    }
+
+    char *config_path = runtime_dbus_find_device_config_path(rt,
+                                                            id,
+                                                            resolved_address);
+    if (config_path) {
+        if (g_unlink(config_path) != 0) {
+            g_set_error(error,
+                        G_IO_ERROR,
+                        g_io_error_from_errno(errno),
+                        "could not remove config %s: %s",
+                        config_path,
+                        g_strerror(errno));
+            g_free(config_path);
+            return false;
+        }
+
+        g_print("D-Bus ForgetDevice: removed config %s\n", config_path);
+        g_free(config_path);
+    } else {
+        g_print("D-Bus ForgetDevice: no config file found for %s\n", id);
+    }
+
+    if (remove_bluez) {
+        char *device_path = NULL;
+
+        if (resolved_address && *resolved_address)
+            device_path = mb_bluez_find_device_path_by_address(rt->bus,
+                                                               resolved_address);
+        if (!device_path && id && *id)
+            device_path = mb_bluez_find_device_path_by_address(rt->bus, id);
+
+        if (device_path) {
+            GError *remove_error = NULL;
+
+            if (!runtime_dbus_bluez_remove_device(rt, device_path, &remove_error)) {
+                g_printerr("D-Bus ForgetDevice: BlueZ RemoveDevice failed for %s: %s\n",
+                           id,
+                           remove_error && remove_error->message
+                               ? remove_error->message
+                               : "unknown error");
+                g_clear_error(&remove_error);
+            } else {
+                g_print("D-Bus ForgetDevice: removed BlueZ device %s\n", device_path);
+            }
+
+            g_free(device_path);
+        }
+    }
+
+    runtime_dbus_emit_device_removed(rt, resolved_id);
+    return true;
+}
+
+
 static void runtime_dbus_handle_method_call(GDBusConnection *connection,
                                             const char *sender,
                                             const char *object_path,
@@ -2829,6 +3038,28 @@ static void runtime_dbus_handle_method_call(GDBusConnection *connection,
 
         g_dbus_method_invocation_return_value(invocation,
                                               g_variant_new("(@a{sv})", device));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "ForgetDevice") == 0) {
+        const char *id = NULL;
+        gboolean remove_bluez = FALSE;
+        g_variant_get(parameters, "(&sb)", &id, &remove_bluez);
+
+        GError *error = NULL;
+        if (!runtime_dbus_forget_device(rt, id, remove_bluez, &error)) {
+            g_dbus_method_invocation_return_error(invocation,
+                                                  error ? error->domain : G_IO_ERROR,
+                                                  error ? error->code : G_IO_ERROR_FAILED,
+                                                  "%s",
+                                                  error && error->message
+                                                      ? error->message
+                                                      : "ForgetDevice failed");
+            g_clear_error(&error);
+            return;
+        }
+
+        g_dbus_method_invocation_return_value(invocation, NULL);
         return;
     }
 

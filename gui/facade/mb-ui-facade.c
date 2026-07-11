@@ -13,6 +13,19 @@ struct _MbUiFacade {
     GPtrArray *scan_devices;
 };
 
+static bool facade_load_scan_devices_from_daemon_dbus(MbUiFacade *facade,
+                                                      unsigned timeout_seconds,
+                                                      GError **error);
+
+static bool facade_pair_and_import_scan_device_via_daemon_dbus(MbUiFacade *facade,
+                                                               const char *device_id,
+                                                               GError **error);
+
+static bool facade_forget_device_via_daemon_dbus(MbUiFacade *facade,
+                                                 const char *device_id,
+                                                 bool remove_bluez,
+                                                 GError **error);
+
 void mb_ui_device_config_defaults(MbUiDeviceConfig *config) {
     if (!config)
         return;
@@ -25,23 +38,9 @@ void mb_ui_device_config_defaults(MbUiDeviceConfig *config) {
 }
 
 
-static void ui_log_backend_error(const char *context, const GError *error) {
-    g_printerr("[midi-ble-rt-gui] %s failed: %s\n",
-               context ? context : "backend command",
-               error && error->message ? error->message : "unknown error");
-}
-
-static void ui_log_backend_step(const char *context) {
-    g_printerr("[midi-ble-rt-gui] %s\n", context ? context : "backend step");
-}
-
 static const char *safe_str(const char *s, const char *fallback) {
     return s && *s ? s : fallback;
 }
-
-static bool facade_load_scan_devices_from_daemon_dbus(MbUiFacade *facade,
-                                                      unsigned timeout_seconds,
-                                                      GError **error);
 
 
 static char *scan_device_id_from_name_address(const char *name, const char *address) {
@@ -1083,43 +1082,6 @@ static bool try_bluez_forget_selector(MbUiFacade *facade,
     return false;
 }
 
-static bool bluez_forget_device(MbUiFacade *facade,
-                                const MbUiDevice *device,
-                                GError **error) {
-    GError *last_error = NULL;
-
-    /*
-     * Prefer the Bluetooth address because midi-ble-rtctl documents address
-     * as the stable selector. Fall back to session id and visible name because
-     * the GUI snapshot may come from daemon state while BlueZ lookup uses its
-     * own object cache.
-     */
-    if (try_bluez_forget_selector(facade, device->address, &last_error)) {
-        g_clear_error(&last_error);
-        return true;
-    }
-
-    if (try_bluez_forget_selector(facade, device->id, &last_error)) {
-        g_clear_error(&last_error);
-        return true;
-    }
-
-    if (try_bluez_forget_selector(facade, device->name, &last_error)) {
-        g_clear_error(&last_error);
-        return true;
-    }
-
-    if (last_error)
-        g_propagate_prefixed_error(error, last_error, "BlueZ forget failed: ");
-    else
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_FOUND,
-                    "BlueZ forget failed: no usable selector");
-
-    return false;
-}
-
 static bool key_file_matches_device(const char *path, const MbUiDevice *device) {
     if (!path || !device)
         return false;
@@ -1148,172 +1110,186 @@ static bool key_file_matches_device(const char *path, const MbUiDevice *device) 
     return match;
 }
 
-static bool remove_matching_device_configs(const MbUiDevice *device, GError **error) {
-    char *dir = devices_config_dir();
-
-    if (!g_file_test(dir, G_FILE_TEST_IS_DIR)) {
-        g_free(dir);
-        return true;
-    }
-
-    GDir *gdir = g_dir_open(dir, 0, error);
-    if (!gdir) {
-        g_free(dir);
-        return false;
-    }
-
-    bool ok = true;
-    const char *name = NULL;
-
-    while ((name = g_dir_read_name(gdir)) != NULL) {
-        if (!g_str_has_suffix(name, ".ini"))
-            continue;
-
-        char *path = g_build_filename(dir, name, NULL);
-        if (key_file_matches_device(path, device)) {
-            if (g_unlink(path) != 0) {
-                g_set_error(error,
-                            G_IO_ERROR,
-                            g_io_error_from_errno(errno),
-                            "failed to remove device configuration: %s",
-                            path);
-                ok = false;
-                g_free(path);
-                break;
-            }
-        }
-        g_free(path);
-    }
-
-    g_dir_close(gdir);
-    g_free(dir);
-    return ok;
+bool mb_ui_facade_forget_device(MbUiFacade *facade,
+                                 const char *device_id,
+                                 GError **error) {
+    return facade_forget_device_via_daemon_dbus(facade,
+                                                device_id,
+                                                true,
+                                                error);
 }
 
-bool mb_ui_facade_forget_device(MbUiFacade *facade,
-                                const char *device_id,
-                                GError **error) {
+
+static bool facade_forget_device_via_daemon_dbus(MbUiFacade *facade,
+                                                 const char *device_id,
+                                                 bool remove_bluez,
+                                                 GError **error) {
+    (void)facade;
+
     if (!device_id || !*device_id) {
         g_set_error(error,
                     G_IO_ERROR,
                     G_IO_ERROR_INVALID_ARGUMENT,
-                    "no device selected");
+                    "device id is required");
         return false;
     }
 
-    MbUiSnapshot *snapshot = mb_ui_facade_get_snapshot(facade);
-    const MbUiDevice *device = mb_ui_snapshot_find_device(snapshot, device_id);
-
-    if (!device) {
-        mb_ui_snapshot_free(snapshot);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_FOUND,
-                    "device is not visible in current service snapshot");
+    GVariant *reply = facade_daemon_dbus_call_sync("ForgetDevice",
+                                                   g_variant_new("(sb)",
+                                                                 device_id,
+                                                                 remove_bluez),
+                                                   NULL,
+                                                   error);
+    if (!reply)
         return false;
-    }
 
-    char *id_copy = g_strdup(device->id);
-
-    /*
-     * Important order:
-     *
-     * 1. Ask BlueZ to forget while the object is still most likely present.
-     *    RemoveDevice itself may disconnect the device.
-     * 2. Ask the daemon to disconnect as best effort.
-     * 3. Remove local midi-ble-rt device config.
-     * 4. Ask daemon to recheck as best effort.
-     *
-     * The GUI must mirror backend/BlueZ state, not hide devices locally.
-     */
-
-    ui_log_backend_step("forget: BlueZ RemoveDevice via midi-ble-rtctl forget --yes");
-
-    if (!bluez_forget_device(facade, device, error)) {
-        g_free(id_copy);
-        mb_ui_snapshot_free(snapshot);
-        return false;
-    }
-
-    ui_log_backend_step("forget: daemon-disconnect");
-
-    GError *disconnect_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-disconnect", id_copy, NULL, &disconnect_error);
-    g_free(ignored);
-    if (disconnect_error) {
-        ui_log_backend_error("forget: daemon-disconnect", disconnect_error);
-        g_clear_error(&disconnect_error);
-    }
-
-    ui_log_backend_step("forget: remove local device configuration");
-
-    if (!remove_matching_device_configs(device, error)) {
-        g_free(id_copy);
-        mb_ui_snapshot_free(snapshot);
-        return false;
-    }
-
-    ui_log_backend_step("forget: daemon-recheck");
-
-    GError *recheck_error = NULL;
-    ignored = run_ctl(facade, "daemon-recheck", id_copy, NULL, &recheck_error);
-    g_free(ignored);
-    if (recheck_error) {
-        ui_log_backend_error("forget: daemon-recheck", recheck_error);
-        g_clear_error(&recheck_error);
-    }
-
-    g_free(id_copy);
-    mb_ui_snapshot_free(snapshot);
+    g_variant_unref(reply);
     return true;
 }
-
 
 bool mb_ui_facade_remove_imported_device(MbUiFacade *facade,
-                                        const char *device_id,
-                                        GError **error) {
-    if (!device_id || !*device_id) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "No device selected");
-        return false;
-    }
-
-    char *out = run_ctl(facade, "remove-instrument", device_id, "--yes", error);
-    if (!out)
-        return false;
-
-    g_printerr("[midi-ble-rt-gui] remove imported device output:\n%s", out);
-    g_free(out);
-    return true;
+                                         const char *device_id,
+                                         GError **error) {
+    return facade_forget_device_via_daemon_dbus(facade,
+                                                device_id,
+                                                false,
+                                                error);
 }
+
 
 bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
                                         const char *device_id,
                                         GError **error) {
-    (void)facade;
-    (void)device_id;
+    return facade_pair_and_import_scan_device_via_daemon_dbus(facade,
+                                                              device_id,
+                                                              error);
+}
+
+
+static bool facade_scan_id_matches(const MbUiDevice *device,
+                                   const char *id_or_address) {
+    if (!device || !id_or_address || !*id_or_address)
+        return false;
+
+    return g_strcmp0(device->id, id_or_address) == 0 ||
+           g_ascii_strcasecmp(safe_str(device->address, ""), id_or_address) == 0;
+}
+
+static const MbUiDevice *facade_find_cached_scan_device(MbUiFacade *facade,
+                                                        const char *id_or_address) {
+    if (!facade || !facade->scan_devices || !id_or_address || !*id_or_address)
+        return NULL;
+
+    for (guint i = 0; i < facade->scan_devices->len; i++) {
+        const MbUiDevice *device = g_ptr_array_index(facade->scan_devices, i);
+        if (facade_scan_id_matches(device, id_or_address))
+            return device;
+    }
+
+    return NULL;
+}
+
+static char *facade_dup_scan_device_address(MbUiFacade *facade,
+                                            const char *device_id,
+                                            GError **error) {
+    const MbUiDevice *device = facade_find_cached_scan_device(facade, device_id);
+
+    if (device && device->address && *device->address)
+        return g_strdup(device->address);
+
+    /*
+     * Allow direct D-Bus tests from callers that pass a Bluetooth address
+     * instead of a scan-row id.
+     */
+    if (device_id && strlen(device_id) == 17) {
+        bool looks_like_address = true;
+
+        for (int i = 0; i < 17; i++) {
+            if ((i + 1) % 3 == 0) {
+                if (device_id[i] != ':') {
+                    looks_like_address = false;
+                    break;
+                }
+            } else if (!g_ascii_isxdigit(device_id[i])) {
+                looks_like_address = false;
+                break;
+            }
+        }
+
+        if (looks_like_address)
+            return g_strdup(device_id);
+    }
 
     g_set_error(error,
                 G_IO_ERROR,
-                G_IO_ERROR_NOT_SUPPORTED,
-                "import via GUI requires daemon D-Bus ImportDevice support");
-    return false;
+                G_IO_ERROR_NOT_FOUND,
+                "scanned device not found or has no Bluetooth address: %s",
+                device_id && *device_id ? device_id : "-");
+    return NULL;
 }
 
+static void facade_replace_cached_scan_device(MbUiFacade *facade,
+                                              MbUiDevice *replacement) {
+    if (!facade || !replacement)
+        return;
+
+    if (!facade->scan_devices)
+        facade->scan_devices = g_ptr_array_new_with_free_func((GDestroyNotify)mb_ui_device_free);
+
+    for (guint i = 0; i < facade->scan_devices->len; i++) {
+        const MbUiDevice *device = g_ptr_array_index(facade->scan_devices, i);
+
+        bool same_id = device && replacement->id &&
+                       g_strcmp0(device->id, replacement->id) == 0;
+        bool same_address = device && replacement->address &&
+                            g_ascii_strcasecmp(safe_str(device->address, ""),
+                                               replacement->address) == 0;
+
+        if (same_id || same_address) {
+            g_ptr_array_remove_index(facade->scan_devices, i);
+            break;
+        }
+    }
+
+    g_ptr_array_add(facade->scan_devices, replacement);
+}
+
+static bool facade_pair_and_import_scan_device_via_daemon_dbus(MbUiFacade *facade,
+                                                               const char *device_id,
+                                                               GError **error) {
+    char *address = facade_dup_scan_device_address(facade, device_id, error);
+    if (!address)
+        return false;
+
+    GVariant *reply = facade_daemon_dbus_call_sync("PairAndImportDevice",
+                                                   g_variant_new("(s)", address),
+                                                   G_VARIANT_TYPE("(a{sv})"),
+                                                   error);
+    g_free(address);
+
+    if (!reply)
+        return false;
+
+    GVariant *dict = NULL;
+    g_variant_get(reply, "(@a{sv})", &dict);
+
+    MbUiDevice *device = facade_scan_device_from_daemon_dbus_dict(dict);
+    if (device) {
+        device->imported = true;
+        facade_replace_cached_scan_device(facade, device);
+    }
+
+    g_variant_unref(dict);
+    g_variant_unref(reply);
+    return true;
+}
 
 bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,
                                       GError **error) {
-    (void)facade;
-    (void)device_id;
-
-    g_set_error(error,
-                G_IO_ERROR,
-                G_IO_ERROR_NOT_SUPPORTED,
-                "pair/import via GUI requires daemon D-Bus PairAndImportDevice support");
-    return false;
+    return facade_pair_and_import_scan_device_via_daemon_dbus(facade,
+                                                              device_id,
+                                                              error);
 }
 
 
