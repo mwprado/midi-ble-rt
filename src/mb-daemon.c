@@ -86,6 +86,9 @@ typedef struct {
      */
     int alsa_port;
     bool removed;
+
+    bool dbus_last_state_valid;
+    MbSessionState dbus_last_state;
     snd_midi_event_t *alsa_midi_encoder;
     snd_midi_event_t *alsa_midi_decoder;
 
@@ -2715,8 +2718,16 @@ static void runtime_dbus_emit_device_changed(ConfigDeviceRuntime *dev) {
         return;
 
     ConfigDirRuntime *rt = dev->owner;
+    MbSessionState state = device_session_state(dev);
+
+    if (dev->dbus_last_state_valid && dev->dbus_last_state == state)
+        return;
+
+    dev->dbus_last_state_valid = true;
+    dev->dbus_last_state = state;
+
     const char *id = printable_string(dev->config->id, "");
-    const char *state = mb_session_state_name(device_session_state(dev));
+    const char *state_name = mb_session_state_name(state);
 
     g_dbus_connection_emit_signal(rt->dbus_bus,
                                   NULL,
@@ -2732,9 +2743,10 @@ static void runtime_dbus_emit_device_changed(ConfigDeviceRuntime *dev) {
                                   "/org/midi_ble_rt/Daemon",
                                   "org.midi_ble_rt.Daemon1",
                                   "DeviceStateChanged",
-                                  g_variant_new("(ss)", id, state),
+                                  g_variant_new("(ss)", id, state_name),
                                   NULL);
 }
+
 
 static void runtime_dbus_return_device_not_found(GDBusMethodInvocation *invocation,
                                                  const char *id) {
