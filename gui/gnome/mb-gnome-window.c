@@ -90,29 +90,44 @@ static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
                                                 bool daemon_functional);
 
 typedef struct {
+    gint ref_count;
     MbGnomeWindowState *state;
+    AdwApplicationWindow *owner_window;
     GtkWidget *window;
     GtkWidget *list;
     GtkWidget *status_label;
     MbUiSnapshot *snapshot;
     char *selected_device_id;
+    GCancellable *cancellable;
     bool busy;
+    bool destroyed;
 } ScanPairDialog;
 
-static void scan_pair_dialog_free(ScanPairDialog *dialog) {
-    if (!dialog)
+static ScanPairDialog *scan_pair_dialog_ref(ScanPairDialog *dialog) {
+    if (dialog)
+        g_atomic_int_inc(&dialog->ref_count);
+
+    return dialog;
+}
+
+static void scan_pair_dialog_unref(ScanPairDialog *dialog) {
+    if (!dialog || !g_atomic_int_dec_and_test(&dialog->ref_count))
         return;
 
     if (dialog->snapshot)
         mb_ui_snapshot_free(dialog->snapshot);
 
     g_clear_pointer(&dialog->selected_device_id, g_free);
+    g_clear_object(&dialog->cancellable);
+    g_clear_object(&dialog->owner_window);
     g_free(dialog);
 }
+
 typedef struct {
     MbGnomeWindowState *state;
     char *verb;
     char *device_id;
+    MbUiDeviceConfig config;
 } DeviceCommandTask;
 
 typedef struct {
@@ -1406,6 +1421,14 @@ typedef struct {
     bool refresh_main_after_done;
 } ScanPairTask;
 
+static void scan_pair_task_free(ScanPairTask *scan) {
+    if (!scan)
+        return;
+
+    scan_pair_dialog_unref(scan->dialog);
+    g_free(scan);
+}
+
 static void scan_pair_task_thread(GTask *task,
                                   gpointer source_object,
                                   gpointer task_data,
@@ -1416,12 +1439,24 @@ static void scan_pair_task_thread(GTask *task,
     ScanPairTask *scan = task_data;
     GError *error = NULL;
 
+    if (g_task_return_error_if_cancelled(task))
+        return;
+
     if (!mb_ui_facade_scan_devices(scan->dialog->state->facade,
                                    scan->timeout_seconds,
                                    &error)) {
-        g_task_return_error(task, error);
+        if (error)
+            g_task_return_error(task, error);
+        else
+            g_task_return_new_error(task,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "scan failed without an error");
         return;
     }
+
+    if (g_task_return_error_if_cancelled(task))
+        return;
 
     g_task_return_boolean(task, TRUE);
 }
@@ -1430,16 +1465,29 @@ static void scan_pair_task_done(GObject *source,
                                 GAsyncResult *result,
                                 gpointer user_data) {
     (void)source;
+    (void)user_data;
 
-    ScanPairDialog *dialog = user_data;
     ScanPairTask *scan = g_task_get_task_data(G_TASK(result));
+    ScanPairDialog *dialog = scan ? scan->dialog : NULL;
     GError *error = NULL;
+    bool ok = g_task_propagate_boolean(G_TASK(result), &error);
 
-    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
+    if (!dialog || dialog->destroyed) {
+        g_clear_error(&error);
+        return;
+    }
+
+    if (!ok) {
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_clear_error(&error);
+            scan_pair_dialog_set_busy(dialog, false);
+            return;
+        }
+
         g_printerr("[midi-ble-rt-gui] ERROR: scan dialog failed: %s\n",
                    error && error->message ? error->message : "Erro desconhecido");
 
-        if (scan && scan->refresh_main_after_done) {
+        if (scan->refresh_main_after_done) {
             scan_pair_dialog_set_status(dialog, "Instrumento importado pelo serviço.", false);
         } else {
             scan_pair_dialog_set_status(dialog, "Não foi possível procurar instrumentos", true);
@@ -1456,7 +1504,7 @@ static void scan_pair_task_done(GObject *source,
     dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
 
     if (dialog->status_label) {
-        if (scan && scan->refresh_main_after_done)
+        if (scan->refresh_main_after_done)
             set_label(dialog->status_label, "Instrumento importado pelo serviço.");
         else
             set_label(dialog->status_label, "Escolha um instrumento");
@@ -1464,12 +1512,11 @@ static void scan_pair_task_done(GObject *source,
 
     scan_pair_dialog_set_busy(dialog, false);
     scan_pair_dialog_rebuild_list(dialog);
-
 }
 
 
 static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
-    if (!dialog || dialog->busy)
+    if (!dialog || dialog->busy || dialog->destroyed)
         return;
 
     scan_pair_dialog_set_busy(dialog, true);
@@ -1478,12 +1525,17 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
         set_label(dialog->status_label, "Procurando instrumentos…");
 
     ScanPairTask *scan = g_new0(ScanPairTask, 1);
-    scan->dialog = dialog;
+    scan->dialog = scan_pair_dialog_ref(dialog);
     scan->timeout_seconds = 10;
     scan->refresh_main_after_done = false;
 
-    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, scan_pair_task_done, dialog);
-    g_task_set_task_data(task, scan, g_free);
+    GTask *task = g_task_new(NULL,
+                             dialog->cancellable,
+                             scan_pair_task_done,
+                             NULL);
+    g_task_set_task_data(task,
+                         scan,
+                         (GDestroyNotify)scan_pair_task_free);
     g_task_run_in_thread(task, scan_pair_task_thread);
     g_object_unref(task);
 }
@@ -1492,12 +1544,14 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
 typedef struct {
     ScanPairDialog *dialog;
     char *device_id;
+    bool paired;
 } ImportTask;
 
 static void import_task_free(ImportTask *task) {
     if (!task)
         return;
 
+    scan_pair_dialog_unref(task->dialog);
     g_free(task->device_id);
     g_free(task);
 }
@@ -1511,13 +1565,9 @@ static void import_task_thread(GTask *task,
 
     ImportTask *import = task_data;
     GError *error = NULL;
-    bool paired = false;
 
-    if (import && import->dialog && import->dialog->snapshot && import->dialog->snapshot->devices) {
-        const MbUiDevice *device = mb_ui_snapshot_find_device(import->dialog->snapshot,
-                                                              import->device_id);
-        paired = device && device->paired;
-    }
+    if (g_task_return_error_if_cancelled(task))
+        return;
 
     /*
      * One visible button, two internal paths:
@@ -1525,7 +1575,7 @@ static void import_task_thread(GTask *task,
      * - not paired: pair/trust/configure if needed
      */
     bool ok = false;
-    if (paired) {
+    if (import->paired) {
         ok = mb_ui_facade_import_scanned_device(import->dialog->state->facade,
                                                 import->device_id,
                                                 &error);
@@ -1536,9 +1586,18 @@ static void import_task_thread(GTask *task,
     }
 
     if (!ok) {
-        g_task_return_error(task, error);
+        if (error)
+            g_task_return_error(task, error);
+        else
+            g_task_return_new_error(task,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "import failed without an error");
         return;
     }
+
+    if (g_task_return_error_if_cancelled(task))
+        return;
 
     g_task_return_boolean(task, TRUE);
 }
@@ -1547,11 +1606,25 @@ static void import_task_done(GObject *source,
                              GAsyncResult *result,
                              gpointer user_data) {
     (void)source;
+    (void)user_data;
 
-    ScanPairDialog *dialog = user_data;
+    ImportTask *import = g_task_get_task_data(G_TASK(result));
+    ScanPairDialog *dialog = import ? import->dialog : NULL;
     GError *error = NULL;
+    bool ok = g_task_propagate_boolean(G_TASK(result), &error);
 
-    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
+    if (!dialog || dialog->destroyed) {
+        g_clear_error(&error);
+        return;
+    }
+
+    if (!ok) {
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_clear_error(&error);
+            scan_pair_dialog_set_busy(dialog, false);
+            return;
+        }
+
         g_printerr("[midi-ble-rt-gui] ERROR: import failed: %s\n",
                    error && error->message ? error->message : "Erro desconhecido");
 
@@ -1575,30 +1648,42 @@ static void import_task_done(GObject *source,
     scan_pair_dialog_set_status(dialog,
                                 "Instrumento importado pelo serviço.",
                                 false);
-
 }
 
 static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
                                                      gpointer user_data) {
     ScanPairDialog *dialog = user_data;
 
-    if (!dialog || dialog->busy)
+    if (!dialog || dialog->busy || dialog->destroyed)
         return;
 
     const char *device_id = g_object_get_data(G_OBJECT(button), "device-id");
     if (!device_id || !*device_id)
         return;
 
+    bool paired = false;
+    if (dialog->snapshot && dialog->snapshot->devices) {
+        const MbUiDevice *device =
+            mb_ui_snapshot_find_device(dialog->snapshot, device_id);
+        paired = device && device->paired;
+    }
+
     scan_pair_dialog_set_busy(dialog, true);
 
     scan_pair_dialog_set_status(dialog, "Preparando instrumento…", false);
 
     ImportTask *import = g_new0(ImportTask, 1);
-    import->dialog = dialog;
+    import->dialog = scan_pair_dialog_ref(dialog);
     import->device_id = g_strdup(device_id);
+    import->paired = paired;
 
-    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, import_task_done, dialog);
-    g_task_set_task_data(task, import, (GDestroyNotify)import_task_free);
+    GTask *task = g_task_new(NULL,
+                             dialog->cancellable,
+                             import_task_done,
+                             NULL);
+    g_task_set_task_data(task,
+                         import,
+                         (GDestroyNotify)import_task_free);
     g_task_run_in_thread(task, import_task_thread);
     g_object_unref(task);
 }
@@ -1609,7 +1694,24 @@ static void scan_pair_dialog_destroy_cb(GtkWidget *widget,
     (void)widget;
 
     ScanPairDialog *dialog = user_data;
-    scan_pair_dialog_free(dialog);
+    if (!dialog || dialog->destroyed)
+        return;
+
+    dialog->destroyed = true;
+
+    if (dialog->cancellable)
+        g_cancellable_cancel(dialog->cancellable);
+
+    /*
+     * Child widgets are destroyed with the window.  Asynchronous task
+     * callbacks may still run later, so make those pointers unusable before
+     * releasing the dialog's window-owned reference.
+     */
+    dialog->window = NULL;
+    dialog->list = NULL;
+    dialog->status_label = NULL;
+
+    scan_pair_dialog_unref(dialog);
 }
 
 static void show_scan_pair_dialog(MbGnomeWindowState *state) {
@@ -1617,7 +1719,10 @@ static void show_scan_pair_dialog(MbGnomeWindowState *state) {
         return;
 
     ScanPairDialog *dialog = g_new0(ScanPairDialog, 1);
+    g_atomic_int_set(&dialog->ref_count, 1);
     dialog->state = state;
+    dialog->owner_window = g_object_ref(state->window);
+    dialog->cancellable = g_cancellable_new();
 
     dialog->window = gtk_window_new();
     gtk_window_set_title(GTK_WINDOW(dialog->window), "Adicionar instrumento");
@@ -1759,12 +1864,10 @@ static void device_command_task_thread(GTask *task,
     bool ok = false;
 
     if (g_strcmp0(cmd->verb, "connect") == 0) {
-        MbUiDeviceConfig config;
-        mb_ui_device_config_defaults(&config);
-        config.connect_on_start = gtk_switch_get_active(GTK_SWITCH(cmd->state->auto_reconnect_switch));
-        config.reconnect_on_link_loss = gtk_switch_get_active(GTK_SWITCH(cmd->state->auto_reconnect_switch));
-        config.enable_tx = true;
-        ok = mb_ui_facade_connect_with_config(cmd->state->facade, cmd->device_id, &config, &error);
+        ok = mb_ui_facade_connect_with_config(cmd->state->facade,
+                                              cmd->device_id,
+                                              &cmd->config,
+                                              &error);
     } else if (g_strcmp0(cmd->verb, "disconnect") == 0) {
         ok = mb_ui_facade_disconnect(cmd->state->facade, cmd->device_id, &error);
     } else if (g_strcmp0(cmd->verb, "refresh") == 0) {
@@ -1817,7 +1920,7 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
     if (!state || state->command_in_flight)
         return;
 
-     const MbUiDevice *device = selected_device(state);
+    const MbUiDevice *device = selected_device(state);
     if (!device) {
         show_error_dialog(state, "Nenhum instrumento conhecido", "Selecione um instrumento BLE-MIDI primeiro.");
         return;
@@ -1827,6 +1930,20 @@ static void device_command(MbGnomeWindowState *state, const char *verb) {
     cmd->state = state;
     cmd->verb = g_strdup(verb);
     cmd->device_id = g_strdup(device->id);
+    mb_ui_device_config_defaults(&cmd->config);
+
+    /*
+     * GTK widgets belong to the main thread.  Capture their values before
+     * starting the worker instead of reading a GtkSwitch from the GTask thread.
+     */
+    if (g_strcmp0(verb, "connect") == 0 &&
+        GTK_IS_SWITCH(state->auto_reconnect_switch)) {
+        bool auto_reconnect =
+            gtk_switch_get_active(GTK_SWITCH(state->auto_reconnect_switch));
+
+        cmd->config.connect_on_start = auto_reconnect;
+        cmd->config.reconnect_on_link_loss = auto_reconnect;
+    }
 
     state->command_in_flight = true;
     update_action_sensitivity(state, device);
