@@ -323,6 +323,10 @@ static char *config_device_path(const MbDeviceConfig *device) {
     return g_strdup_printf("config:%s", printable_string(device->address, "device"));
 }
 
+static bool runtime_device_is_active(const ConfigDeviceRuntime *dev) {
+    return dev && !dev->removed && dev->config;
+}
+
 static const char *device_label(const ConfigDeviceRuntime *dev) {
     if (!dev || !dev->config)
         return "device";
@@ -560,7 +564,7 @@ static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev)
+        if (!runtime_device_is_active(dev))
             continue;
 
         runtime_device_stats_ensure_window(dev, now_ns);
@@ -578,6 +582,9 @@ static void runtime_stats_export_snapshot(ConfigDirRuntime *rt) {
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!runtime_device_is_active(dev))
+            continue;
+
         runtime_device_stats_reset_window(dev, now_ns);
     }
 
@@ -3483,7 +3490,7 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
 
         for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
             ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-            if (!dev)
+            if (!runtime_device_is_active(dev))
                 continue;
 
             if (device_session_is(dev, MB_SESSION_STREAMING))
@@ -3522,7 +3529,7 @@ static void runtime_control_handle_request(ConfigDirRuntime *rt,
 
         for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
             ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-            if (!dev || !dev->config)
+            if (!runtime_device_is_active(dev))
                 continue;
 
             char *row = g_strdup_printf("%s\t%s\t%s\t%s\t%d\n",
@@ -3896,7 +3903,8 @@ static gboolean runtime_reconnect_cb(gpointer user_data) {
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (dev && device_session_is(dev, MB_SESSION_RECONNECTING))
+        if (runtime_device_is_active(dev) &&
+            device_session_is(dev, MB_SESSION_RECONNECTING))
             lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_CONNECT, "reconnect timer");
     }
 
@@ -3906,7 +3914,7 @@ static gboolean runtime_reconnect_cb(gpointer user_data) {
 static void runtime_start_configured_devices(ConfigDirRuntime *rt) {
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev->config->connect_on_start)
+        if (!runtime_device_is_active(dev) || !dev->config->connect_on_start)
             continue;
 
         lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCOVER, "startup");
@@ -3917,7 +3925,8 @@ static void runtime_start_configured_devices(ConfigDirRuntime *rt) {
 static bool runtime_has_streaming_device(ConfigDirRuntime *rt) {
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (dev && device_session_is(dev, MB_SESSION_STREAMING))
+        if (runtime_device_is_active(dev) &&
+            device_session_is(dev, MB_SESSION_STREAMING))
             return true;
     }
     return false;
@@ -3938,6 +3947,9 @@ static void print_config_dir_devices(ConfigDirRuntime *rt, const char *config_di
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+        if (!runtime_device_is_active(dev))
+            continue;
+
         char *session_path = device_dup_device_path(dev);
         MbSessionState state = device_session_state(dev);
         g_print("\n");
