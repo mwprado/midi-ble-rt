@@ -85,6 +85,7 @@ typedef struct {
      * device runtime or the whole daemon.
      */
     int alsa_port;
+    bool removed;
     snd_midi_event_t *alsa_midi_encoder;
     snd_midi_event_t *alsa_midi_decoder;
 
@@ -1824,7 +1825,7 @@ static ConfigDeviceRuntime *runtime_find_device_by_id(ConfigDirRuntime *rt,
 
     for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
         ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
-        if (!dev || !dev->config)
+        if (!dev || dev->removed || !dev->config)
             continue;
 
         if (g_strcmp0(dev->config->id, id) == 0 ||
@@ -3133,6 +3134,12 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
         }
     }
 
+    if (dev && !dev->removed) {
+        dev->removed = true;
+        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCONNECT, "dbus forget");
+        runtime_dbus_emit_device_changed(dev);
+    }
+
     runtime_dbus_emit_device_removed(rt, resolved_id);
 
     g_free(resolved_address);
@@ -3172,6 +3179,9 @@ static void runtime_dbus_handle_method_call(GDBusConnection *connection,
 
         for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
             ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+            if (!dev || dev->removed)
+                continue;
+
             g_variant_builder_add_value(&devices,
                                         runtime_dbus_device_to_variant(dev));
         }
