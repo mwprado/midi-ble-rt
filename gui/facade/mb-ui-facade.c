@@ -551,6 +551,181 @@ static char *facade_variant_dict_dup_string(GVariant *dict,
     return out;
 }
 
+
+static int facade_variant_dict_get_int32(GVariant *dict,
+                                         const char *key,
+                                         int fallback) {
+    if (!dict || !key)
+        return fallback;
+
+    GVariant *value = g_variant_lookup_value(dict, key, NULL);
+    if (!value)
+        return fallback;
+
+    int out = fallback;
+
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_INT32)) {
+        out = g_variant_get_int32(value);
+    } else if (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
+        GVariant *inner = g_variant_get_variant(value);
+        if (g_variant_is_of_type(inner, G_VARIANT_TYPE_INT32))
+            out = g_variant_get_int32(inner);
+        g_variant_unref(inner);
+    }
+
+    g_variant_unref(value);
+    return out;
+}
+
+static MbUiDevice *facade_device_from_daemon_dbus_dict(GVariant *dict) {
+    if (!dict)
+        return NULL;
+
+    char *id = facade_variant_dict_dup_string(dict, "Id");
+    char *address = facade_variant_dict_dup_string(dict, "Address");
+    char *name = facade_variant_dict_dup_string(dict, "Name");
+    char *state = facade_variant_dict_dup_string(dict, "RuntimeState");
+    char *profile = facade_variant_dict_dup_string(dict, "Profile");
+    char *alsa_port_name = facade_variant_dict_dup_string(dict, "AlsaPortName");
+
+    bool enabled = false;
+    bool connect_on_start = false;
+    bool reconnect_on_link_loss = false;
+    bool enable_tx = false;
+    bool streaming = false;
+
+    facade_variant_dict_lookup_bool(dict, "Enabled", &enabled);
+    facade_variant_dict_lookup_bool(dict, "ConnectOnStart", &connect_on_start);
+    facade_variant_dict_lookup_bool(dict, "ReconnectOnLinkLoss", &reconnect_on_link_loss);
+    facade_variant_dict_lookup_bool(dict, "EnableTx", &enable_tx);
+    facade_variant_dict_lookup_bool(dict, "Streaming", &streaming);
+
+    int alsa_port = facade_variant_dict_get_int32(dict, "AlsaPort", -1);
+
+    MbUiDevice *device = mb_ui_device_new(id,
+                                          address,
+                                          name,
+                                          state && *state ? state : "UNKNOWN",
+                                          alsa_port);
+
+    device->imported = true;
+    device->profile = g_strdup(profile);
+    device->alsa_port_name = g_strdup(alsa_port_name);
+
+    device->enabled = g_strdup(enabled ? "yes" : "no");
+    device->connect_on_start = g_strdup(connect_on_start ? "yes" : "no");
+    device->policy_reconnect_on_link_loss = g_strdup(reconnect_on_link_loss ? "yes" : "no");
+    device->midi_enable_tx = g_strdup(enable_tx ? "yes" : "no");
+
+    /*
+     * These fields are runtime-facing.  The daemon D-Bus API is now the source
+     * of truth for the main GUI; BlueZ is no longer queried directly here.
+     */
+    device->connected = streaming;
+    device->gatt_resolved = streaming;
+
+    g_free(alsa_port_name);
+    g_free(profile);
+    g_free(state);
+    g_free(name);
+    g_free(address);
+    g_free(id);
+
+    return device;
+}
+
+static GVariant *facade_daemon_dbus_call_sync(const char *method,
+                                              GVariant *parameters,
+                                              const GVariantType *reply_type,
+                                              GError **error) {
+    GDBusConnection *connection = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, error);
+    if (!connection)
+        return NULL;
+
+    GVariant *reply = g_dbus_connection_call_sync(connection,
+                                                  "org.midi_ble_rt.Daemon",
+                                                  "/org/midi_ble_rt/Daemon",
+                                                  "org.midi_ble_rt.Daemon1",
+                                                  method,
+                                                  parameters,
+                                                  reply_type,
+                                                  G_DBUS_CALL_FLAGS_NONE,
+                                                  -1,
+                                                  NULL,
+                                                  error);
+    g_object_unref(connection);
+    return reply;
+}
+
+static bool facade_daemon_dbus_device_command(const char *method,
+                                              const char *device_id,
+                                              GError **error) {
+    if (!device_id || !*device_id) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "no device selected");
+        return false;
+    }
+
+    GVariant *reply = facade_daemon_dbus_call_sync(method,
+                                                   g_variant_new("(s)", device_id),
+                                                   NULL,
+                                                   error);
+    if (!reply)
+        return false;
+
+    g_variant_unref(reply);
+    return true;
+}
+
+static bool facade_load_snapshot_from_daemon_dbus(MbUiSnapshot *snapshot,
+                                                  GError **error) {
+    if (!snapshot || !snapshot->devices) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid UI snapshot");
+        return false;
+    }
+
+    GVariant *reply = facade_daemon_dbus_call_sync("ListDevices",
+                                                   NULL,
+                                                   G_VARIANT_TYPE("(aa{sv})"),
+                                                   error);
+    if (!reply)
+        return false;
+
+    GVariant *devices = NULL;
+    g_variant_get(reply, "(@aa{sv})", &devices);
+
+    GVariantIter iter;
+    GVariant *dict = NULL;
+
+    g_variant_iter_init(&iter, devices);
+    while (g_variant_iter_next(&iter, "@a{sv}", &dict)) {
+        MbUiDevice *device = facade_device_from_daemon_dbus_dict(dict);
+        if (device)
+            g_ptr_array_add(snapshot->devices, device);
+        g_variant_unref(dict);
+    }
+
+    g_variant_unref(devices);
+    g_variant_unref(reply);
+
+    snapshot->status.online = true;
+    snapshot->status.devices = snapshot->devices ? snapshot->devices->len : 0;
+
+    for (guint i = 0; snapshot->devices && i < snapshot->devices->len; i++) {
+        const MbUiDevice *device = g_ptr_array_index(snapshot->devices, i);
+        if (device && device->state && g_strcmp0(device->state, "STREAMING") == 0)
+            snapshot->status.streaming++;
+    }
+
+    return true;
+}
+
+
 static void overlay_bluez_pairing_state(MbUiSnapshot *catalog) {
     if (!catalog || !catalog->devices || catalog->devices->len == 0)
         return;
@@ -1013,34 +1188,25 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
     (void)facade;
 
     MbUiSnapshot *snapshot = mb_ui_snapshot_new();
+    GError *error = NULL;
 
     /*
-     * Main window invariant:
+     * Mature GUI architecture:
      *
-     * The sidebar is the persisted instrument catalog.
-     * Rows come only from valid .ini files under devices.d.
-     *
-     * BlueZ and daemon state are overlays.  They may update paired,
-     * connected, ALSA port and runtime state, but they must never create,
-     * hide or clear catalog rows.
+     * The daemon is the authority for catalog, BlueZ and runtime state.
+     * The GUI facade must not rebuild daemon state from .ini files, BlueZ or
+     * the legacy local control socket.
      */
-    load_imported_device_configs(snapshot);
+    if (!facade_load_snapshot_from_daemon_dbus(snapshot, &error)) {
+        snapshot->status.online = false;
+        snapshot->last_error = g_strdup(error && error->message
+                                        ? error->message
+                                        : "daemon D-Bus API unavailable");
+        g_printerr("[midi-ble-rt-gui] daemon D-Bus snapshot failed: %s\n",
+                   snapshot->last_error ? snapshot->last_error : "unknown error");
+        g_clear_error(&error);
+    }
 
-    /*
-     * Opening the window must not start discovery.  This reads BlueZ Device1
-     * objects already known by bluetoothd and updates paired/connected state.
-     */
-    overlay_bluez_pairing_state(snapshot);
-
-    /*
-     * Do not block the main catalog on the daemon control socket.
-     *
-     * The window already observes systemd for daemon availability.  The
-     * persisted catalog and BlueZ pairing/connection state are enough to render
-     * the main list.  Runtime daemon state may be overlaid later, but it must
-     * never prevent catalog rows from appearing.
-     */
-    snapshot->status.online = false;
     return snapshot;
 }
 
@@ -1173,12 +1339,13 @@ MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
 
 
 bool mb_ui_facade_scan(MbUiFacade *facade, GError **error) {
-    char *out = run_ctl(facade, "daemon-list", NULL, NULL, error);
-    if (!out)
-        return false;
+    (void)facade;
 
-    g_free(out);
-    return true;
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_NOT_SUPPORTED,
+                "scan/import via GUI requires daemon D-Bus ScanDevices/ImportDevice support");
+    return false;
 }
 
 bool mb_ui_facade_save_device_config(MbUiFacade *facade,
@@ -1237,51 +1404,31 @@ static bool run_device_command(MbUiFacade *facade,
                                const char *command,
                                const char *device_id,
                                GError **error) {
-    if (!device_id || !*device_id) {
+    (void)facade;
+
+    const char *method = NULL;
+
+    if (g_strcmp0(command, "daemon-connect") == 0)
+        method = "ConnectDevice";
+    else if (g_strcmp0(command, "daemon-disconnect") == 0)
+        method = "DisconnectDevice";
+    else if (g_strcmp0(command, "daemon-recheck") == 0)
+        method = "RecheckDevice";
+    else {
         g_set_error(error,
                     G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "no device selected");
+                    G_IO_ERROR_NOT_SUPPORTED,
+                    "legacy GUI command removed: %s",
+                    command ? command : "-");
         return false;
     }
 
-    char *out = run_ctl(facade, command, device_id, NULL, error);
-    if (!out)
-        return false;
-
-    bool ok = g_str_has_prefix(out, "OK ");
-    if (!ok) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "%s failed: %s",
-                    command,
-                    out);
-    }
-
-    g_free(out);
-    return ok;
+    return facade_daemon_dbus_device_command(method, device_id, error);
 }
 
 bool mb_ui_facade_connect(MbUiFacade *facade,
                           const char *device_id,
                           GError **error) {
-    MbUiSnapshot *snapshot = mb_ui_facade_get_scan_snapshot(facade);
-    const MbUiDevice *device = mb_ui_snapshot_find_device(snapshot, device_id);
-
-    if (device) {
-        if (!mb_ui_facade_save_device_config(facade, device, error)) {
-            mb_ui_snapshot_free(snapshot);
-            return false;
-        }
-
-        GError *recheck_error = NULL;
-        char *ignored = run_ctl(facade, "daemon-recheck", device->id, NULL, &recheck_error);
-        g_free(ignored);
-        g_clear_error(&recheck_error);
-    }
-
-    mb_ui_snapshot_free(snapshot);
     return run_device_command(facade, "daemon-connect", device_id, error);
 }
 
@@ -1470,134 +1617,14 @@ bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
                                       const char *device_id,
                                       const MbUiDeviceConfig *config,
                                       GError **error) {
-    if (!facade || !device_id || !*device_id) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid connect request");
-        return false;
-    }
-
-    MbUiSnapshot *snapshot = mb_ui_facade_get_snapshot(facade);
-    const MbUiDevice *device = mb_ui_snapshot_find_device(snapshot, device_id);
-
-    if (!device) {
-        mb_ui_snapshot_free(snapshot);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_FOUND,
-                    "device is not visible in current snapshot");
-        return false;
-    }
-
-    if (!snapshot->status.online) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_CONNECTED,
-                    "Serviço MIDI-BLE inativo. Inicie midi-ble-rtd com runtime de diretório de configuração antes de conectar.");
-        mb_ui_snapshot_free(snapshot);
-        return false;
-    }
-
-    char *id_copy = g_strdup(device->id);
-    char *address_copy = g_strdup(device->address && *device->address ? device->address : device->id);
-    char *name_copy = g_strdup(device->name);
-    bool was_daemon_session = mb_ui_device_is_daemon_session_for_gui(device);
-    const char *profile = mb_ui_profile_for_device_for_gui(device);
+    (void)config;
 
     /*
-     * Dispositivo vindo do scan cache ainda não é sessão do daemon.
-     * Primeiro preparar no BlueZ e escrever configuração via ctl.
+     * The GUI no longer writes or infers daemon configuration here.
+     * Connect is a daemon D-Bus command; profile, BlueZ and config policy live
+     * in midi-ble-rtd.
      */
-    if (!was_daemon_session) {
-        char *argv[] = {
-            facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-            "connect",
-            address_copy,
-            "--profile",
-            (char *)profile,
-            "--write-config",
-            NULL,
-        };
-
-        if (!run_ctl_argv_checked(facade, "connect scanned device", argv, error)) {
-            g_free(id_copy);
-            g_free(address_copy);
-            g_free(name_copy);
-            mb_ui_snapshot_free(snapshot);
-            return false;
-        }
-    } else {
-        if (!save_device_config_with_options(facade, device, config, error)) {
-            g_free(id_copy);
-            g_free(address_copy);
-            g_free(name_copy);
-            mb_ui_snapshot_free(snapshot);
-            return false;
-        }
-    }
-
-    /*
-     * Recarrega configuração no daemon. Pode ser assíncrono do lado do daemon,
-     * mas o comando deve pelo menos disparar o recheck.
-     */
-    GError *recheck_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-recheck", id_copy, NULL, &recheck_error);
-    g_free(ignored);
-    if (recheck_error) {
-        ui_log_backend_error("connect: daemon-recheck by original id", recheck_error);
-        g_clear_error(&recheck_error);
-    }
-
-    /*
-     * Agora procurar a sessão real por endereço. O id de scan pode ser
-     * "go-keys-midi-1", enquanto a config/daemon pode criar "roland-gokeys"
-     * ou outro id normalizado.
-     */
-    char *daemon_session_id = NULL;
-
-    MbUiSnapshot *after_recheck = mb_ui_facade_get_snapshot(facade);
-    daemon_session_id = mb_ui_find_daemon_session_id_by_address_for_gui(after_recheck, address_copy);
-    mb_ui_snapshot_free(after_recheck);
-
-    if (!daemon_session_id) {
-        /*
-         * Fallbacks diagnósticos. Se estes falharem, o log dirá exatamente
-         * qual id foi tentado.
-         */
-        daemon_session_id = g_strdup(id_copy);
-    }
-
-    g_printerr("[midi-ble-rt-gui] connect: daemon-connect session id: %s address=%s name=%s\n",
-               daemon_session_id,
-               address_copy ? address_copy : "-",
-               name_copy ? name_copy : "-");
-
-    GError *connect_error = NULL;
-    bool ok = run_device_command(facade, "daemon-connect", daemon_session_id, &connect_error);
-
-    if (!ok) {
-        ui_log_backend_error("connect: daemon-connect", connect_error);
-
-        if (connect_error)
-            g_propagate_error(error, connect_error);
-        else
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "daemon-connect failed");
-
-        g_free(daemon_session_id);
-        g_free(id_copy);
-        g_free(address_copy);
-        g_free(name_copy);
-        mb_ui_snapshot_free(snapshot);
-        return false;
-    }
-
-    g_free(daemon_session_id);
-    g_free(id_copy);
-    g_free(address_copy);
-    g_free(name_copy);
-    mb_ui_snapshot_free(snapshot);
-    return true;
+    return run_device_command(facade, "daemon-connect", device_id, error);
 }
 
 
