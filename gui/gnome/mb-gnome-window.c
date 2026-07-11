@@ -1274,6 +1274,7 @@ static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
 typedef struct {
     ScanPairDialog *dialog;
     int timeout_seconds;
+    bool refresh_main_after_done;
 } ScanPairTask;
 
 static void scan_pair_task_thread(GTask *task,
@@ -1302,13 +1303,20 @@ static void scan_pair_task_done(GObject *source,
     (void)source;
 
     ScanPairDialog *dialog = user_data;
+    ScanPairTask *scan = g_task_get_task_data(G_TASK(result));
     GError *error = NULL;
 
     if (!g_task_propagate_boolean(G_TASK(result), &error)) {
         g_printerr("[midi-ble-rt-gui] ERROR: scan dialog failed: %s\n",
                    error && error->message ? error->message : "Erro desconhecido");
 
-        scan_pair_dialog_set_status(dialog, "Não foi possível procurar instrumentos", true);
+        if (scan && scan->refresh_main_after_done) {
+            scan_pair_dialog_set_status(dialog, "Instrumento pronto", false);
+            if (dialog->state)
+                mb_gnome_window_refresh(dialog->state);
+        } else {
+            scan_pair_dialog_set_status(dialog, "Não foi possível procurar instrumentos", true);
+        }
 
         g_clear_error(&error);
         scan_pair_dialog_set_busy(dialog, false);
@@ -1320,11 +1328,18 @@ static void scan_pair_task_done(GObject *source,
 
     dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
 
-    if (dialog->status_label)
-        set_label(dialog->status_label, "Escolha um instrumento");
+    if (dialog->status_label) {
+        if (scan && scan->refresh_main_after_done)
+            set_label(dialog->status_label, "Instrumento pronto");
+        else
+            set_label(dialog->status_label, "Escolha um instrumento");
+    }
 
     scan_pair_dialog_set_busy(dialog, false);
     scan_pair_dialog_rebuild_list(dialog);
+
+    if (scan && scan->refresh_main_after_done && dialog->state)
+        mb_gnome_window_refresh(dialog->state);
 }
 
 
@@ -1332,19 +1347,18 @@ static void scan_pair_dialog_refresh_snapshot(ScanPairDialog *dialog) {
     if (!dialog || !dialog->state || !dialog->state->facade)
         return;
 
-    GError *scan_error = NULL;
+    if (dialog->status_label)
+        set_label(dialog->status_label, "Atualizando lista…");
 
-    if (!mb_ui_facade_scan_devices(dialog->state->facade, 2, &scan_error)) {
-        g_printerr("[midi-ble-rt-gui] discovery refresh skipped/failed: %s\n",
-                   scan_error && scan_error->message ? scan_error->message : "unknown error");
-        g_clear_error(&scan_error);
-    }
+    ScanPairTask *scan = g_new0(ScanPairTask, 1);
+    scan->dialog = dialog;
+    scan->timeout_seconds = 2;
+    scan->refresh_main_after_done = true;
 
-    if (dialog->snapshot)
-        mb_ui_snapshot_free(dialog->snapshot);
-
-    dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
-    scan_pair_dialog_rebuild_list(dialog);
+    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, scan_pair_task_done, dialog);
+    g_task_set_task_data(task, scan, g_free);
+    g_task_run_in_thread(task, scan_pair_task_thread);
+    g_object_unref(task);
 }
 
 static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
@@ -1359,6 +1373,7 @@ static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     ScanPairTask *scan = g_new0(ScanPairTask, 1);
     scan->dialog = dialog;
     scan->timeout_seconds = 10;
+    scan->refresh_main_after_done = false;
 
     GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, scan_pair_task_done, dialog);
     g_task_set_task_data(task, scan, g_free);
@@ -1445,8 +1460,6 @@ static void import_task_done(GObject *source,
     scan_pair_dialog_set_status(dialog, "Instrumento pronto", false);
 
     scan_pair_dialog_refresh_snapshot(dialog);
-    scan_pair_dialog_set_busy(dialog, false);
-    mb_gnome_window_refresh(dialog->state);
 }
 
 static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
