@@ -70,6 +70,7 @@ typedef struct {
     GDBusConnection *daemon_dbus_bus;
     guint daemon_dbus_device_changed_sub_id;
     guint daemon_dbus_state_changed_sub_id;
+    guint daemon_dbus_device_removed_sub_id;
 } MbGnomeWindowState;
 static void show_scan_pair_dialog(MbGnomeWindowState *state);
 static void daemon_switch_notify_active_cb(GObject *object,
@@ -411,8 +412,6 @@ static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
 }
 
 
-
-
 static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
     (void)state;
 
@@ -434,7 +433,6 @@ static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
     g_object_unref(proc);
     return ok;
 }
-
 
 
 static void update_daemon_switch_state(MbGnomeWindowState *state) {
@@ -479,7 +477,6 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
         }
     }
 }
-
 
 
 static void daemon_command_task_thread(GTask *task,
@@ -579,7 +576,6 @@ static void daemon_switch_notify_active_cb(GObject *object,
     g_task_run_in_thread(task, daemon_command_task_thread);
     g_object_unref(task);
 }
-
 
 
 static void daemon_root_observer_apply(MbGnomeWindowState *state) {
@@ -769,6 +765,18 @@ static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
                                            state,
                                            NULL);
 
+    state->daemon_dbus_device_removed_sub_id =
+        g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
+                                           "org.midi_ble_rt.Daemon",
+                                           "org.midi_ble_rt.Daemon1",
+                                           "DeviceRemoved",
+                                           "/org/midi_ble_rt/Daemon",
+                                           NULL,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           daemon_dbus_signal_cb,
+                                           state,
+                                           NULL);
+
     g_printerr("[midi-ble-rt-gui] daemon D-Bus observer started: DeviceChanged=%u DeviceStateChanged=%u\n",
                state->daemon_dbus_device_changed_sub_id,
                state->daemon_dbus_state_changed_sub_id);
@@ -895,7 +903,6 @@ static void update_main_panel(MbGnomeWindowState *state) {
     update_daemon_switch_state(state);
     update_action_sensitivity(state, selected_device(state));
 }
-
 
 
 static bool device_is_visible_in_main_list(const MbUiDevice *device) {
@@ -1298,7 +1305,6 @@ static GtkWidget *scan_pair_device_row_new(ScanPairDialog *dialog,
 }
 
 
-
 static void scan_pair_dialog_rebuild_list(ScanPairDialog *dialog) {
     if (!dialog || !dialog->list)
         return;
@@ -1412,24 +1418,6 @@ static void scan_pair_task_done(GObject *source,
         mb_gnome_window_refresh(dialog->state);
 }
 
-
-static void scan_pair_dialog_refresh_snapshot(ScanPairDialog *dialog) {
-    if (!dialog || !dialog->state || !dialog->state->facade)
-        return;
-
-    if (dialog->status_label)
-        set_label(dialog->status_label, "Atualizando lista…");
-
-    ScanPairTask *scan = g_new0(ScanPairTask, 1);
-    scan->dialog = dialog;
-    scan->timeout_seconds = 2;
-    scan->refresh_main_after_done = true;
-
-    GTask *task = g_task_new(G_OBJECT(dialog->window), NULL, scan_pair_task_done, dialog);
-    g_task_set_task_data(task, scan, g_free);
-    g_task_run_in_thread(task, scan_pair_task_thread);
-    g_object_unref(task);
-}
 
 static void scan_pair_dialog_start_scan(ScanPairDialog *dialog) {
     if (!dialog || dialog->busy)
