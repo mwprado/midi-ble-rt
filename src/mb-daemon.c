@@ -3042,6 +3042,65 @@ static bool runtime_remove_device_from_memory(ConfigDirRuntime *rt,
 }
 
 
+
+static void runtime_dbus_deactivate_forgotten_device(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner)
+        return;
+
+    ConfigDirRuntime *rt = dev->owner;
+
+    /*
+     * Administrative removal:
+     * keep the ConfigDeviceRuntime object allocated, but stop exposing it to
+     * ALSA/GATT routing.  This avoids use-after-free risks from pending GLib,
+     * BlueZ, ALSA or lifecycle callbacks.
+     */
+    device_stop_notify(dev);
+    runtime_remove_char_route(dev);
+
+    if (dev->runtime_started)
+        mb_duplex_runtime_drop_pending(&dev->runtime);
+
+    g_mutex_lock(&dev->dataplane_lock);
+    dev->dataplane_streaming = false;
+    dev->dataplane_closed_epoch = dev->dataplane_epoch;
+    dev->dataplane_closed_at_ns = runtime_now_ns();
+    g_mutex_unlock(&dev->dataplane_lock);
+
+    if (dev->alsa_port >= 0) {
+        int old_port = dev->alsa_port;
+
+        if (rt->device_by_alsa_port)
+            g_hash_table_remove(rt->device_by_alsa_port,
+                                GINT_TO_POINTER(dev->alsa_port));
+
+        g_mutex_lock(&rt->alsa_lock);
+
+        if (dev->session)
+            mb_session_set_alsa_port(dev->session, -1);
+
+        if (rt->seq) {
+            int r = snd_seq_delete_simple_port(rt->seq, dev->alsa_port);
+            if (r < 0) {
+                g_printerr("ForgetDevice: could not delete ALSA port for %s: %s\n",
+                           device_label(dev),
+                           snd_strerror(r));
+            } else {
+                g_print("ForgetDevice: ALSA port removed for %s: %d\n",
+                        device_label(dev),
+                        old_port);
+            }
+        }
+
+        dev->alsa_port = -1;
+
+        g_mutex_unlock(&rt->alsa_lock);
+    }
+
+    runtime_stats_export_snapshot(rt);
+}
+
+
 static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
                                        const char *id,
                                        bool remove_bluez,
@@ -3137,6 +3196,7 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
     if (dev && !dev->removed) {
         dev->removed = true;
         lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCONNECT, "dbus forget");
+        runtime_dbus_deactivate_forgotten_device(dev);
         runtime_dbus_emit_device_changed(dev);
     }
 
