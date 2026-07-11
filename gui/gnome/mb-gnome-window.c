@@ -650,10 +650,12 @@ static void daemon_observer_state_changed_cb(bool active,
 
 
 static bool bluez_can_scan_for_gui(const MbGnomeWindowState *state) {
-    return state &&
-           state->bluez_available &&
-           state->bluez_powered &&
-           !state->bluez_discovering;
+    /*
+     * The historical name remains for now, but the policy no longer comes from
+     * BlueZ.  Scan availability is daemon-owned: the GUI may scan only when the
+     * midi-ble-rtd D-Bus API is expected to be available.
+     */
+    return state && state->daemon_functional;
 }
 
 static void update_scan_button_state(MbGnomeWindowState *state) {
@@ -662,21 +664,10 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
 
     const char *label = "Adicionar instrumento";
 
-    /*
-     * Only the GUI-owned scan operation may render "Procurando instrumentos".
-     * BlueZ Adapter1.Discovering can be true because of another process
-     * or the desktop Bluetooth stack.  That is not the same as our scan.
-     */
     if (state->scan_in_flight)
         label = "Procurando instrumentos…";
-    else if (!state->bluez_available)
-        label = "Bluetooth indisponível";
-    else if (!state->bluez_powered_known)
-        label = "Verificando Bluetooth";
-    else if (!state->bluez_powered)
-        label = "Bluetooth desligado";
-    else if (state->bluez_discovering)
-        label = "Bluetooth ocupado";
+    else if (!state->daemon_functional)
+        label = "Serviço MIDI-BLE inativo";
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
@@ -1390,7 +1381,7 @@ static void scan_pair_task_done(GObject *source,
                    error && error->message ? error->message : "Erro desconhecido");
 
         if (scan && scan->refresh_main_after_done) {
-            scan_pair_dialog_set_status(dialog, "Instrumento pronto", false);
+            scan_pair_dialog_set_status(dialog, "Instrumento importado. A porta ALSA foi criada pelo serviço.", false);
             if (dialog->state)
                 mb_gnome_window_refresh(dialog->state);
         } else {
@@ -1409,7 +1400,7 @@ static void scan_pair_task_done(GObject *source,
 
     if (dialog->status_label) {
         if (scan && scan->refresh_main_after_done)
-            set_label(dialog->status_label, "Instrumento pronto");
+            set_label(dialog->status_label, "Instrumento importado. A porta ALSA foi criada pelo serviço.");
         else
             set_label(dialog->status_label, "Escolha um instrumento");
     }
@@ -1536,9 +1527,20 @@ static void import_task_done(GObject *source,
 
     g_printerr("[midi-ble-rt-gui] import: device enrolled successfully\n");
 
-    scan_pair_dialog_set_status(dialog, "Instrumento pronto", false);
+    if (dialog->snapshot)
+        mb_ui_snapshot_free(dialog->snapshot);
 
-    scan_pair_dialog_refresh_snapshot(dialog);
+    dialog->snapshot = mb_ui_facade_get_scan_snapshot(dialog->state->facade);
+
+    scan_pair_dialog_set_busy(dialog, false);
+    scan_pair_dialog_rebuild_list(dialog);
+
+    scan_pair_dialog_set_status(dialog,
+                                "Instrumento importado. A porta ALSA foi criada pelo serviço.",
+                                false);
+
+    if (dialog->state)
+        mb_gnome_window_refresh(dialog->state);
 }
 
 static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
@@ -2227,17 +2229,14 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     daemon_dbus_observer_start(state);
 
-    state->bluez_observer = mb_bluez_observer_new();
-    GError *bluez_error = NULL;
-    if (!mb_bluez_observer_start(state->bluez_observer,
-                                 bluez_observer_state_changed_cb,
-                                 state,
-                                 &bluez_error)) {
-        g_printerr("[midi-ble-rt-gui] BlueZ observer unavailable: %s\n",
-                   bluez_error && bluez_error->message ? bluez_error->message : "unknown error");
-        g_clear_error(&bluez_error);
-        bluez_observer_state_changed_cb(false, false, false, false, NULL, state);
-    }
+    /*
+     * BlueZ observer intentionally disabled.
+     *
+     * BlueZ state belongs to midi-ble-rtd.  The GUI will regain scan/import
+     * through daemon D-Bus methods, not through direct BlueZ observation.
+     */
+    state->bluez_observer = NULL;
+    bluez_observer_state_changed_cb(false, false, false, false, NULL, state);
 
     mb_gnome_window_refresh(state);
 
