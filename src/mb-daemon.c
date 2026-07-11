@@ -2877,6 +2877,170 @@ static bool runtime_dbus_bluez_remove_device(ConfigDirRuntime *rt,
     return true;
 }
 
+
+static void runtime_lifecycle_drop_device_commands(ConfigDirRuntime *rt,
+                                                   ConfigDeviceRuntime *dev) {
+    if (!rt || !dev || !rt->lifecycle_queue)
+        return;
+
+    GQueue kept = G_QUEUE_INIT;
+
+    g_mutex_lock(&rt->lifecycle_lock);
+
+    while (!g_queue_is_empty(rt->lifecycle_queue)) {
+        MbLifecycleCommand *cmd = g_queue_pop_head(rt->lifecycle_queue);
+
+        if (cmd && cmd->dev == dev) {
+            lifecycle_command_free(cmd);
+            continue;
+        }
+
+        g_queue_push_tail(&kept, cmd);
+    }
+
+    while (!g_queue_is_empty(&kept))
+        g_queue_push_tail(rt->lifecycle_queue, g_queue_pop_head(&kept));
+
+    g_mutex_unlock(&rt->lifecycle_lock);
+}
+
+static void runtime_device_remove_alsa_port(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner)
+        return;
+
+    ConfigDirRuntime *rt = dev->owner;
+
+    if (dev->alsa_port < 0)
+        return;
+
+    if (rt->device_by_alsa_port)
+        g_hash_table_remove(rt->device_by_alsa_port,
+                            GINT_TO_POINTER(dev->alsa_port));
+
+    g_mutex_lock(&rt->alsa_lock);
+
+    if (dev->session)
+        mb_session_set_alsa_port(dev->session, -1);
+
+    if (rt->seq) {
+        int r = snd_seq_delete_simple_port(rt->seq, dev->alsa_port);
+        if (r < 0) {
+            g_printerr("Could not delete ALSA port for %s: %s\n",
+                       device_label(dev),
+                       snd_strerror(r));
+        } else {
+            g_print("ALSA port removed for %s: %d\n",
+                    device_label(dev),
+                    dev->alsa_port);
+        }
+    }
+
+    g_mutex_unlock(&rt->alsa_lock);
+
+    dev->alsa_port = -1;
+}
+
+static void runtime_device_disconnect_best_effort(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner || !dev->owner->bus)
+        return;
+
+    char *device_path = device_dup_device_path(dev);
+
+    if (device_path &&
+        *device_path &&
+        !g_str_has_prefix(device_path, "config:")) {
+        if (!mb_bluez_disconnect_device(dev->owner->bus, device_path)) {
+            g_printerr("ForgetDevice: best-effort disconnect failed for %s\n",
+                       device_label(dev));
+        }
+    }
+
+    g_free(device_path);
+}
+
+static bool runtime_remove_device_from_memory(ConfigDirRuntime *rt,
+                                              ConfigDeviceRuntime *dev,
+                                              GError **error) {
+    if (!rt || !dev) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid runtime device removal");
+        return false;
+    }
+
+    guint dev_index = 0;
+    bool found_dev = false;
+
+    for (guint i = 0; rt->devices && i < rt->devices->len; i++) {
+        if (g_ptr_array_index(rt->devices, i) == dev) {
+            dev_index = i;
+            found_dev = true;
+            break;
+        }
+    }
+
+    if (!found_dev) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_FOUND,
+                    "runtime device not found in device array");
+        return false;
+    }
+
+    const MbDeviceConfig *config = dev->config;
+    guint cfg_index = 0;
+    bool found_cfg = false;
+
+    for (guint i = 0; rt->cfg.devices && i < rt->cfg.devices->len; i++) {
+        if (g_ptr_array_index(rt->cfg.devices, i) == config) {
+            cfg_index = i;
+            found_cfg = true;
+            break;
+        }
+    }
+
+    /*
+     * Stop new work for this device before freeing the object.
+     */
+    runtime_lifecycle_drop_device_commands(rt, dev);
+
+    /*
+     * Prevent future RX/TX callbacks from accepting data.  The normal session
+     * transition path also drops pending flow items; do the same here because
+     * removal is administrative, not a radio state transition.
+     */
+    g_mutex_lock(&dev->dataplane_lock);
+    dev->dataplane_streaming = false;
+    dev->dataplane_closed_epoch = dev->dataplane_epoch;
+    dev->dataplane_closed_at_ns = runtime_now_ns();
+    g_mutex_unlock(&dev->dataplane_lock);
+
+    if (dev->runtime_started)
+        mb_duplex_runtime_drop_pending(&dev->runtime);
+
+    device_stop_notify(dev);
+    runtime_remove_char_route(dev);
+    runtime_device_disconnect_best_effort(dev);
+    runtime_device_remove_alsa_port(dev);
+
+    /*
+     * g_ptr_array_remove_index() calls device_runtime_free() for rt->devices.
+     * That frees runtime-owned resources but not dev->config.
+     */
+    g_ptr_array_remove_index(rt->devices, dev_index);
+
+    /*
+     * Now it is safe to remove the config object.  rt->cfg.devices owns it.
+     */
+    if (found_cfg)
+        g_ptr_array_remove_index(rt->cfg.devices, cfg_index);
+
+    runtime_stats_export_snapshot(rt);
+    return true;
+}
+
+
 static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
                                        const char *id,
                                        bool remove_bluez,
@@ -2890,19 +3054,19 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
     }
 
     ConfigDeviceRuntime *dev = runtime_find_device_by_id(rt, id);
-    const char *resolved_id = dev && dev->config ? dev->config->id : id;
-    const char *resolved_address = dev && dev->config ? dev->config->address : NULL;
 
-    if (dev) {
-        /*
-         * Do not free the runtime object in this first D-Bus removal patch.
-         * Stop/disconnect it and remove the persistent config.  Full in-memory
-         * deletion is a separate, riskier patch because ALSA/routing callbacks
-         * may still reference the device object.
-         */
-        lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCONNECT, "dbus forget");
-    }
+    char *resolved_id = dev && dev->config
+        ? g_strdup(printable_string(dev->config->id, id))
+        : g_strdup(id);
 
+    char *resolved_address = dev && dev->config && dev->config->address
+        ? g_strdup(dev->config->address)
+        : NULL;
+
+    /*
+     * Remove the persistent config first.  If unlink fails, keep runtime state
+     * intact to avoid an in-memory/ondisk split-brain.
+     */
     char *config_path = runtime_dbus_find_device_config_path(rt,
                                                             id,
                                                             resolved_address);
@@ -2915,6 +3079,8 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
                         config_path,
                         g_strerror(errno));
             g_free(config_path);
+            g_free(resolved_address);
+            g_free(resolved_id);
             return false;
         }
 
@@ -2922,6 +3088,22 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
         g_free(config_path);
     } else {
         g_print("D-Bus ForgetDevice: no config file found for %s\n", id);
+    }
+
+    if (dev) {
+        GError *remove_error = NULL;
+
+        if (!runtime_remove_device_from_memory(rt, dev, &remove_error)) {
+            g_printerr("D-Bus ForgetDevice: runtime removal failed for %s: %s\n",
+                       id,
+                       remove_error && remove_error->message
+                           ? remove_error->message
+                           : "unknown error");
+            g_clear_error(&remove_error);
+        } else {
+            g_print("D-Bus ForgetDevice: removed runtime device %s\n",
+                    printable_string(resolved_id, id));
+        }
     }
 
     if (remove_bluez) {
@@ -2952,8 +3134,13 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
     }
 
     runtime_dbus_emit_device_removed(rt, resolved_id);
+
+    g_free(resolved_address);
+    g_free(resolved_id);
     return true;
 }
+
+
 
 
 static void runtime_dbus_handle_method_call(GDBusConnection *connection,
