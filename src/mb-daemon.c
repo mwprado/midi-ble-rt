@@ -3169,22 +3169,6 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
         g_print("D-Bus ForgetDevice: no config file found for %s\n", id);
     }
 
-    if (dev) {
-        GError *remove_error = NULL;
-
-        if (!runtime_remove_device_from_memory(rt, dev, &remove_error)) {
-            g_printerr("D-Bus ForgetDevice: runtime removal failed for %s: %s\n",
-                       id,
-                       remove_error && remove_error->message
-                           ? remove_error->message
-                           : "unknown error");
-            g_clear_error(&remove_error);
-        } else {
-            g_print("D-Bus ForgetDevice: removed runtime device %s\n",
-                    printable_string(resolved_id, id));
-        }
-    }
-
     if (remove_bluez) {
         char *device_path = NULL;
 
@@ -3214,6 +3198,16 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
 
     if (dev && !dev->removed) {
         dev->removed = true;
+
+        /*
+         * Do not free ConfigDeviceRuntime here.
+         *
+         * GLib/BlueZ/ALSA/lifecycle callbacks may still hold references to this
+         * object.  Administrative removal only hides it from D-Bus inventory,
+         * drops queued work, disables routing, removes the ALSA port and emits
+         * DeviceRemoved.
+         */
+        runtime_lifecycle_drop_device_commands(rt, dev);
         lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCONNECT, "dbus forget");
         runtime_dbus_deactivate_forgotten_device(dev);
         runtime_dbus_emit_device_changed(dev);
