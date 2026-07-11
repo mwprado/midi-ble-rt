@@ -711,7 +711,6 @@ static void daemon_dbus_signal_cb(GDBusConnection *connection,
     (void)sender_name;
     (void)object_path;
     (void)interface_name;
-    (void)parameters;
 
     MbGnomeWindowState *state = user_data;
     if (!state)
@@ -719,6 +718,18 @@ static void daemon_dbus_signal_cb(GDBusConnection *connection,
 
     g_printerr("[midi-ble-rt-gui] daemon D-Bus signal: %s\n",
                signal_name && *signal_name ? signal_name : "-");
+
+    if (g_strcmp0(signal_name, "DeviceRemoved") == 0 && parameters) {
+        const char *removed_id = NULL;
+        g_variant_get(parameters, "(&s)", &removed_id);
+
+        if (removed_id &&
+            state->selected_id &&
+            g_strcmp0(state->selected_id, removed_id) == 0) {
+            g_clear_pointer(&state->selected_id, g_free);
+            update_action_sensitivity(state, NULL);
+        }
+    }
 
     /*
      * Event-driven update:
