@@ -1,5 +1,5 @@
 Name:           midi-ble-rt
-Version:        0.9.4
+Version:        0.9.5
 Release:        1%{?dist}
 Summary:        BLE-MIDI/GATT to ALSA Sequencer bridge
 
@@ -67,6 +67,14 @@ for bin in \
 %{_userunitdir}/midi-ble-rtd.service
 
 %changelog
+* Sat Jul 11 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.5-1
+- Add daemon D-Bus API for GUI clients.
+- Add GUI support for scanning, pairing/importing and forgetting BLE-MIDI instruments through the daemon.
+- Make the GUI event-driven from daemon D-Bus signals instead of periodic refresh.
+- Treat manually launched D-Bus daemons as functional for development.
+- Make daemon status in the GUI observational and show service state with an indicator dot.
+- Harden ForgetDevice by hiding forgotten devices, removing ALSA ports and avoiding runtime use-after-free.
+
 * Fri Jul 03 2026 Moacyr Prado <mwprado@users.noreply.github.com> - 0.9.4-1
 - Remove legacy buffer/session cleanup code in preparation for v1.0.0.
 - Expose RTKit state, priority and RX/TX flags in daemon-status.

@@ -20,10 +20,12 @@ typedef struct {
     GtkWidget *service_label;
     GtkWidget *daemon_switch;
     GtkWidget *daemon_switch_label;
+    GtkWidget *daemon_status_dot;
     GtkWidget *daemon_spinner;
     bool daemon_transition_in_flight;
     bool daemon_requested_active;
     bool daemon_functional;
+    bool daemon_service_active;
     bool bluez_available;
     bool bluez_powered_known;
     bool bluez_powered;
@@ -436,45 +438,34 @@ static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
 
 
 static void update_daemon_switch_state(MbGnomeWindowState *state) {
-    if (!state || !state->daemon_switch)
+    if (!state)
         return;
 
-    bool visual_active = state->daemon_transition_in_flight
-                             ? state->daemon_requested_active
-                             : state->daemon_functional;
-
-    g_signal_handlers_block_by_func(state->daemon_switch,
-                                    G_CALLBACK(daemon_switch_notify_active_cb),
-                                    state);
-
-    gtk_switch_set_active(GTK_SWITCH(state->daemon_switch), visual_active);
-    gtk_widget_set_sensitive(state->daemon_switch, !state->daemon_transition_in_flight);
-
-    g_signal_handlers_unblock_by_func(state->daemon_switch,
-                                      G_CALLBACK(daemon_switch_notify_active_cb),
-                                      state);
-
+    /*
+     * Observational status only.
+     *
+     * The main musician-facing GUI does not own the daemon lifecycle.  The
+     * daemon may be managed by systemd, launched manually during development,
+     * or started by session/package infrastructure.
+     */
     if (state->daemon_spinner) {
-        gtk_widget_set_visible(state->daemon_spinner, state->daemon_transition_in_flight);
+        gtk_widget_set_visible(state->daemon_spinner, FALSE);
+        gtk_spinner_stop(GTK_SPINNER(state->daemon_spinner));
+    }
 
-        if (state->daemon_transition_in_flight)
-            gtk_spinner_start(GTK_SPINNER(state->daemon_spinner));
-        else
-            gtk_spinner_stop(GTK_SPINNER(state->daemon_spinner));
+    if (state->daemon_status_dot) {
+        set_label(state->daemon_status_dot, "●");
+        gtk_widget_remove_css_class(state->daemon_status_dot, "ok-text");
+        gtk_widget_remove_css_class(state->daemon_status_dot, "err-text");
+        gtk_widget_add_css_class(state->daemon_status_dot,
+                                 state->daemon_service_active ? "ok-text" : "err-text");
     }
 
     if (state->daemon_switch_label) {
-        if (state->daemon_transition_in_flight) {
-            set_label(state->daemon_switch_label,
-                      state->daemon_requested_active
-                          ? "Iniciando Serviço MIDI-BLE…"
-                          : "Desligando Serviço MIDI-BLE…");
-        } else {
-            set_label(state->daemon_switch_label,
-                      state->daemon_functional
-                          ? "Serviço MIDI-BLE ativado"
-                          : "Serviço MIDI-BLE desativado");
-        }
+        set_label(state->daemon_switch_label,
+                  state->daemon_service_active
+                      ? "Serviço MIDI-BLE ativo"
+                      : "Serviço MIDI-BLE inativo");
     }
 }
 
@@ -646,6 +637,8 @@ static void daemon_observer_state_changed_cb(bool active,
                active,
                safe(active_state, "unknown"),
                safe(sub_state, "unknown"));
+
+    state->daemon_service_active = active;
 
     bool functional = daemon_effective_functional(state, active);
 
@@ -1177,6 +1170,8 @@ static void refresh_task_done(GObject *source_object,
                previous_functional,
                daemon_online,
                state->daemon_functional);
+
+    update_daemon_switch_state(state);
 
     set_label(state->last_scan_label, "Catálogo atualizado agora");
     rebuild_sidebar(state);
@@ -1973,17 +1968,14 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
     gtk_widget_set_valign(state->daemon_spinner, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(daemon_box), state->daemon_spinner);
 
-    state->daemon_switch_label = label_new("Serviço MIDI-BLE desativado", "muted-text");
+    state->daemon_status_dot = label_new("●", "err-text");
+    gtk_widget_set_valign(state->daemon_status_dot, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(daemon_box), state->daemon_status_dot);
+
+    state->daemon_switch_label = label_new("Serviço MIDI-BLE inativo", "muted-text");
     gtk_box_append(GTK_BOX(daemon_box), state->daemon_switch_label);
 
-    state->daemon_switch = gtk_switch_new();
-    gtk_widget_set_valign(state->daemon_switch, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(daemon_box), state->daemon_switch);
-
-    g_signal_connect(state->daemon_switch,
-                     "notify::active",
-                     G_CALLBACK(daemon_switch_notify_active_cb),
-                     state);
+    state->daemon_switch = NULL;
 
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), daemon_box);
 
