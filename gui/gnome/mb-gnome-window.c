@@ -27,6 +27,7 @@ typedef struct {
     bool daemon_requested_active;
     bool daemon_functional;
     bool daemon_service_active;
+    bool daemon_dbus_ready;
     bool bluez_available;
     bool bluez_powered_known;
     bool bluez_powered;
@@ -76,13 +77,13 @@ typedef struct {
     guint daemon_dbus_device_removed_sub_id;
     guint daemon_dbus_catalog_changed_sub_id;
     guint daemon_dbus_bluetooth_state_sub_id;
+    guint daemon_dbus_name_owner_sub_id;
 } MbGnomeWindowState;
 static void show_scan_pair_dialog(MbGnomeWindowState *state);
 static void update_daemon_switch_state(MbGnomeWindowState *state);
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
-static void forget_clicked_cb(GtkButton *button, gpointer user_data);
 static void forget_clicked_cb(GtkButton *button, gpointer user_data);
 static void daemon_root_observer_apply(MbGnomeWindowState *state);
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
@@ -498,8 +499,12 @@ static void daemon_observer_state_changed_cb(bool active,
 
 
 static bool bluez_can_scan_for_gui(const MbGnomeWindowState *state) {
+    /*
+     * Scan/import depende da API D-Bus real do daemon, não do estado do unit
+     * systemd nem de um snapshot assíncrono potencialmente atrasado.
+     */
     return state &&
-           state->daemon_functional &&
+           state->daemon_dbus_ready &&
            state->bluez_available &&
            state->bluez_powered_known &&
            state->bluez_powered;
@@ -513,7 +518,7 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
 
     if (state->scan_in_flight)
         label = "Procurando instrumentos…";
-    else if (!state->daemon_functional)
+    else if (!state->daemon_dbus_ready)
         label = "Serviço MIDI-BLE inativo";
     else if (!state->bluez_available ||
              !state->bluez_powered_known ||
@@ -522,10 +527,22 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
-    gtk_widget_set_sensitive(state->scan_button,
-                             bluez_can_scan_for_gui(state) &&
-                             !state->scan_in_flight &&
-                             !state->command_in_flight);
+    bool sensitive =
+        bluez_can_scan_for_gui(state) &&
+        !state->scan_in_flight &&
+        !state->command_in_flight;
+
+    g_printerr("[midi-ble-rt-gui] scan gate: sensitive=%d dbus_ready=%d daemon=%d available=%d powered_known=%d powered=%d scan_busy=%d command_busy=%d\n",
+               sensitive,
+               state->daemon_dbus_ready,
+               state->daemon_functional,
+               state->bluez_available,
+               state->bluez_powered_known,
+               state->bluez_powered,
+               state->scan_in_flight,
+               state->command_in_flight);
+
+    gtk_widget_set_sensitive(state->scan_button, sensitive);
 }
 
 static void daemon_dbus_apply_bluetooth_state(
@@ -576,16 +593,84 @@ static void daemon_dbus_read_initial_bluetooth_state(
                                     NULL,
                                     &error);
     if (!reply) {
+        state->daemon_dbus_ready = false;
+        state->bluez_available = false;
+        state->bluez_powered_known = false;
+        state->bluez_powered = false;
+        state->bluez_discovering = false;
+
         g_printerr("[midi-ble-rt-gui] GetBluetoothState failed: %s\n",
                    error && error->message ? error->message : "unknown error");
         g_clear_error(&error);
+        update_scan_button_state(state);
         return;
     }
+
+    /*
+     * A resposta bem-sucedida de GetBluetoothState() prova que a API D-Bus
+     * do daemon está funcional. Não espere o snapshot assíncrono ou o estado
+     * do unit systemd para liberar as ações dependentes do daemon.
+     */
+    daemon_root_observer_set_functional(state, true);
+
+    state->daemon_dbus_ready = true;
+    daemon_root_observer_set_functional(state, true);
 
     GVariant *dict = g_variant_get_child_value(reply, 0);
     daemon_dbus_apply_bluetooth_state(state, dict);
     g_variant_unref(dict);
     g_variant_unref(reply);
+}
+
+
+
+static void daemon_dbus_name_owner_changed_cb(
+    GDBusConnection *connection,
+    const char *sender_name,
+    const char *object_path,
+    const char *interface_name,
+    const char *signal_name,
+    GVariant *parameters,
+    gpointer user_data) {
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+
+    MbGnomeWindowState *state = user_data;
+    if (!state || !parameters)
+        return;
+
+    const char *name = NULL;
+    const char *old_owner = NULL;
+    const char *new_owner = NULL;
+    g_variant_get(parameters, "(&s&s&s)",
+                  &name,
+                  &old_owner,
+                  &new_owner);
+
+    if (g_strcmp0(name, "org.midi_ble_rt.Daemon") != 0)
+        return;
+
+    g_printerr("[midi-ble-rt-gui] daemon D-Bus owner: old=%s new=%s\n",
+               old_owner && *old_owner ? old_owner : "-",
+               new_owner && *new_owner ? new_owner : "-");
+
+    if (new_owner && *new_owner) {
+        daemon_dbus_read_initial_bluetooth_state(state);
+        mb_gnome_window_refresh(state);
+        return;
+    }
+
+    state->daemon_dbus_ready = false;
+    state->bluez_available = false;
+    state->bluez_powered_known = false;
+    state->bluez_powered = false;
+    state->bluez_discovering = false;
+
+    daemon_root_observer_set_functional(state, false);
+    update_scan_button_state(state);
 }
 
 
@@ -651,6 +736,19 @@ static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
         g_clear_error(&error);
         return;
     }
+
+    state->daemon_dbus_name_owner_sub_id =
+        g_dbus_connection_signal_subscribe(
+            state->daemon_dbus_bus,
+            "org.freedesktop.DBus",
+            "org.freedesktop.DBus",
+            "NameOwnerChanged",
+            "/org/freedesktop/DBus",
+            "org.midi_ble_rt.Daemon",
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            daemon_dbus_name_owner_changed_cb,
+            state,
+            NULL);
 
     state->daemon_dbus_device_changed_sub_id =
         g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
@@ -1880,6 +1978,9 @@ static void state_free(MbGnomeWindowState *state) {
         if (state->daemon_dbus_bluetooth_state_sub_id)
             g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
                                                  state->daemon_dbus_bluetooth_state_sub_id);
+        if (state->daemon_dbus_name_owner_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_name_owner_sub_id);
         g_clear_object(&state->daemon_dbus_bus);
     }
 
@@ -2170,7 +2271,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
      * scan/list enablement in the next step.
      */
     state->daemon_functional = false;
-    gtk_switch_set_active(GTK_SWITCH(state->daemon_switch), FALSE);
     set_label(state->daemon_switch_label, "Verificando Serviço MIDI-BLE");
     update_action_sensitivity(state, NULL);
 

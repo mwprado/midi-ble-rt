@@ -1052,64 +1052,6 @@ bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
 }
 
 
-static bool try_bluez_forget_selector(MbUiFacade *facade,
-                                      const char *selector,
-                                      GError **last_error) {
-    if (!selector || !*selector)
-        return false;
-
-    g_printerr("[midi-ble-rt-gui] forget: trying BlueZ RemoveDevice selector: %s\n",
-               selector);
-
-    GError *error = NULL;
-    char *ignored = run_ctl(facade, "forget", selector, "--yes", &error);
-    g_free(ignored);
-
-    if (!error)
-        return true;
-
-    g_printerr("[midi-ble-rt-gui] forget: selector failed: %s: %s\n",
-               selector,
-               error->message ? error->message : "unknown error");
-
-    if (last_error) {
-        g_clear_error(last_error);
-        *last_error = error;
-    } else {
-        g_clear_error(&error);
-    }
-
-    return false;
-}
-
-static bool key_file_matches_device(const char *path, const MbUiDevice *device) {
-    if (!path || !device)
-        return false;
-
-    GKeyFile *key_file = g_key_file_new();
-    GError *error = NULL;
-
-    if (!g_key_file_load_from_file(key_file, path, G_KEY_FILE_NONE, &error)) {
-        g_clear_error(&error);
-        g_key_file_unref(key_file);
-        return false;
-    }
-
-    char *id = g_key_file_get_string(key_file, "device", "id", NULL);
-    char *address = g_key_file_get_string(key_file, "device", "address", NULL);
-
-    bool match = false;
-    if (id && device->id && g_ascii_strcasecmp(id, device->id) == 0)
-        match = true;
-    if (address && device->address && g_ascii_strcasecmp(address, device->address) == 0)
-        match = true;
-
-    g_free(id);
-    g_free(address);
-    g_key_file_unref(key_file);
-    return match;
-}
-
 bool mb_ui_facade_forget_device(MbUiFacade *facade,
                                  const char *device_id,
                                  GError **error) {
