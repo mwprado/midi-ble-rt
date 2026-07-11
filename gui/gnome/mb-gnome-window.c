@@ -85,6 +85,7 @@ static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
                               const char *message);
 static void forget_clicked_cb(GtkButton *button, gpointer user_data);
+static bool gui_runtime_available(const MbGnomeWindowState *state);
 static void daemon_root_observer_apply(MbGnomeWindowState *state);
 static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
                                                 bool daemon_functional);
@@ -841,9 +842,9 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
     /*
      * Observer rule:
      *
-     * - Main list availability comes from the persisted catalog.
-     * - Basic panel and local actions come from list selection.
-     * - Runtime connect/disconnect additionally requires daemon_functional.
+     * - Main list and runtime actions share gui_runtime_available().
+     * - Connect/Disconnect additionally requires a selected instrument.
+     * - Daemon-side serialization handles concurrent mutable operations.
      */
     if (state->connect_button) {
         button_set_icon_text(state->connect_button,
