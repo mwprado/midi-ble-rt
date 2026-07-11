@@ -438,7 +438,8 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
     update_scan_button_state(state);
 
     if (state->sidebar_list)
-        gtk_widget_set_sensitive(state->sidebar_list, TRUE);
+        gtk_widget_set_sensitive(state->sidebar_list,
+                                 gui_runtime_available(state));
 
     update_daemon_switch_state(state);
 
@@ -498,7 +499,7 @@ static void daemon_observer_state_changed_cb(bool active,
 }
 
 
-static bool bluez_can_scan_for_gui(const MbGnomeWindowState *state) {
+static bool gui_runtime_available(const MbGnomeWindowState *state) {
     /*
      * Scan/import depende da API D-Bus real do daemon, não do estado do unit
      * systemd nem de um snapshot assíncrono potencialmente atrasado.
@@ -527,10 +528,7 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
-    bool sensitive =
-        bluez_can_scan_for_gui(state) &&
-        !state->scan_in_flight &&
-        !state->command_in_flight;
+    bool sensitive = gui_runtime_available(state);
 
     g_printerr("[midi-ble-rt-gui] scan gate: sensitive=%d dbus_ready=%d daemon=%d available=%d powered_known=%d powered=%d scan_busy=%d command_busy=%d\n",
                sensitive,
@@ -543,6 +541,20 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
                state->command_in_flight);
 
     gtk_widget_set_sensitive(state->scan_button, sensitive);
+
+    /*
+     * One availability gate for the musician-facing main window.
+     * Operation serialization belongs to the daemon; local busy flags must
+     * not make the main controls look unavailable.
+     */
+    if (state->sidebar_list)
+        gtk_widget_set_sensitive(state->sidebar_list, sensitive);
+
+    if (state->connect_button) {
+        const MbUiDevice *device = selected_device(state);
+        gtk_widget_set_sensitive(state->connect_button,
+                                 sensitive && device != NULL);
+    }
 }
 
 static void daemon_dbus_apply_bluetooth_state(
@@ -839,9 +851,8 @@ static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevic
                              streaming ? "Desconectar" : "Conectar");
 
         gtk_widget_set_sensitive(state->connect_button,
-                                 state->daemon_functional &&
-                                 has_selection &&
-                                 !busy);
+                                 gui_runtime_available(state) &&
+                                 has_selection);
     }
 
     if (state->disconnect_button)
@@ -1691,7 +1702,7 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
      * adapter power, discovery state and BlueZ errors are daemon-owned concerns
      * and must be reported by ScanDevices() through the D-Bus facade.
      */
-    if (!state->daemon_functional) {
+    if (!state->daemon_dbus_ready) {
         show_error_dialog(state,
                           "Serviço MIDI-BLE inativo",
                           "Inicie o serviço MIDI-BLE antes de buscar instrumentos.");
@@ -1706,9 +1717,6 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
                           "Ligue o Bluetooth antes de buscar instrumentos BLE-MIDI.");
         return;
     }
-
-    if (state->scan_in_flight)
-        return;
 
     show_scan_pair_dialog(state);
 }
