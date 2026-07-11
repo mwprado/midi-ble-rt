@@ -7,8 +7,6 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define REFRESH_INTERVAL_SECONDS 2
-
 typedef struct {
     AdwApplicationWindow *window;
     MbUiFacade *facade;
@@ -62,7 +60,16 @@ typedef struct {
     GtkWidget *timeout_combo;
 
     char *selected_id;
-    guint refresh_source_id;
+
+    /*
+     * Daemon D-Bus runtime notifications.
+     *
+     * No periodic polling: the GUI performs one initial ListDevices() read and
+     * then updates from daemon-emitted signals.
+     */
+    GDBusConnection *daemon_dbus_bus;
+    guint daemon_dbus_device_changed_sub_id;
+    guint daemon_dbus_state_changed_sub_id;
 } MbGnomeWindowState;
 static void show_scan_pair_dialog(MbGnomeWindowState *state);
 static void daemon_switch_notify_active_cb(GObject *object,
@@ -126,6 +133,7 @@ static void bluez_observer_state_changed_cb(bool available,
                                            bool discovering,
                                            const char *adapter_path,
                                            void *user_data);
+static void daemon_dbus_observer_start(MbGnomeWindowState *state);
 
 static const char *safe(const char *s, const char *fallback) {
     return s && *s ? s : fallback;
@@ -581,9 +589,8 @@ static void daemon_root_observer_apply(MbGnomeWindowState *state) {
     /*
      * Root observer rule:
      *
-     * The daemon controls runtime actions only.  It must never create, hide,
-     * clear or unselect catalog rows.  The main list is the persisted catalog
-     * loaded from devices.d .ini files.
+     * systemd only tells whether the daemon process is available.
+     * Device/catalog/runtime state comes from the daemon D-Bus API.
      */
     update_scan_button_state(state);
 
@@ -704,6 +711,78 @@ static void bluez_observer_state_changed_cb(bool available,
 
     update_scan_button_state(state);
 }
+
+
+static void daemon_dbus_signal_cb(GDBusConnection *connection,
+                                  const char *sender_name,
+                                  const char *object_path,
+                                  const char *interface_name,
+                                  const char *signal_name,
+                                  GVariant *parameters,
+                                  gpointer user_data) {
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)parameters;
+
+    MbGnomeWindowState *state = user_data;
+    if (!state)
+        return;
+
+    g_printerr("[midi-ble-rt-gui] daemon D-Bus signal: %s\n",
+               signal_name && *signal_name ? signal_name : "-");
+
+    /*
+     * Event-driven update:
+     * The daemon is the state authority.  On every device signal we perform a
+     * single fresh ListDevices() read.  There is no periodic refresh loop.
+     */
+    mb_gnome_window_refresh(state);
+}
+
+static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
+    if (!state || state->daemon_dbus_bus)
+        return;
+
+    GError *error = NULL;
+    state->daemon_dbus_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+    if (!state->daemon_dbus_bus) {
+        g_printerr("[midi-ble-rt-gui] daemon D-Bus observer unavailable: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return;
+    }
+
+    state->daemon_dbus_device_changed_sub_id =
+        g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
+                                           "org.midi_ble_rt.Daemon",
+                                           "org.midi_ble_rt.Daemon1",
+                                           "DeviceChanged",
+                                           "/org/midi_ble_rt/Daemon",
+                                           NULL,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           daemon_dbus_signal_cb,
+                                           state,
+                                           NULL);
+
+    state->daemon_dbus_state_changed_sub_id =
+        g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
+                                           "org.midi_ble_rt.Daemon",
+                                           "org.midi_ble_rt.Daemon1",
+                                           "DeviceStateChanged",
+                                           "/org/midi_ble_rt/Daemon",
+                                           NULL,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           daemon_dbus_signal_cb,
+                                           state,
+                                           NULL);
+
+    g_printerr("[midi-ble-rt-gui] daemon D-Bus observer started: DeviceChanged=%u DeviceStateChanged=%u\n",
+               state->daemon_dbus_device_changed_sub_id,
+               state->daemon_dbus_state_changed_sub_id);
+}
+
 
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device) {
     if (!state)
@@ -1829,8 +1908,6 @@ static void state_free(MbGnomeWindowState *state) {
     if (!state)
         return;
 
-    if (state->refresh_source_id)
-        g_source_remove(state->refresh_source_id);
 
     if (state->daemon_transition_source_id)
         g_source_remove(state->daemon_transition_source_id);
@@ -2147,6 +2224,8 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
         g_clear_error(&observer_error);
         set_label(state->daemon_switch_label, "Serviço MIDI-BLE indisponível");
     }
+
+    daemon_dbus_observer_start(state);
 
     state->bluez_observer = mb_bluez_observer_new();
     GError *bluez_error = NULL;
