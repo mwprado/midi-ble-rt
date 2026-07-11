@@ -94,6 +94,8 @@ typedef struct {
     MbBleMidiDecoderState ble_midi_decoder;
 } ConfigDeviceRuntime;
 
+static void runtime_dbus_emit_device_changed(ConfigDeviceRuntime *dev);
+
 typedef enum {
     MB_LIFECYCLE_CMD_DISCOVER,
     MB_LIFECYCLE_CMD_CONNECT,
@@ -116,6 +118,18 @@ struct _ConfigDirRuntime {
 
     GDBusConnection *bus;
     GMainLoop *loop;
+
+    /*
+     * User-session D-Bus API for GUI clients.
+     *
+     * BlueZ remains on the system bus through rt->bus.  This connection is a
+     * user-session control/status API owned by midi-ble-rtd, so the GUI can be
+     * a thin client instead of duplicating daemon/catalog/runtime logic.
+     */
+    GDBusConnection *dbus_bus;
+    GDBusNodeInfo *dbus_introspection;
+    guint dbus_name_id;
+    guint dbus_object_id;
 
     /*
      * Shared ALSA Sequencer client for the whole daemon process.
@@ -1727,6 +1741,8 @@ static gboolean lifecycle_process_next_cb(gpointer user_data) {
         break;
     }
 
+    runtime_dbus_emit_device_changed(cmd->dev);
+
     lifecycle_command_free(cmd);
 
     g_mutex_lock(&rt->lifecycle_lock);
@@ -1842,6 +1858,315 @@ static bool runtime_control_enqueue_lifecycle(ConfigDirRuntime *rt,
     g_free(reply);
     return true;
 }
+
+
+static const char runtime_dbus_introspection_xml[] =
+    "<node>"
+    "  <interface name='org.midi_ble_rt.Daemon1'>"
+    "    <method name='ListDevices'>"
+    "      <arg name='devices' type='aa{sv}' direction='out'/>"
+    "    </method>"
+    "    <method name='ConnectDevice'>"
+    "      <arg name='id' type='s' direction='in'/>"
+    "    </method>"
+    "    <method name='DisconnectDevice'>"
+    "      <arg name='id' type='s' direction='in'/>"
+    "    </method>"
+    "    <method name='RecheckDevice'>"
+    "      <arg name='id' type='s' direction='in'/>"
+    "    </method>"
+    "    <signal name='DeviceChanged'>"
+    "      <arg name='device' type='a{sv}'/>"
+    "    </signal>"
+    "    <signal name='DeviceStateChanged'>"
+    "      <arg name='id' type='s'/>"
+    "      <arg name='state' type='s'/>"
+    "    </signal>"
+    "  </interface>"
+    "</node>";
+
+static void runtime_dbus_dict_add_string(GVariantBuilder *dict,
+                                         const char *key,
+                                         const char *value) {
+    g_variant_builder_add(dict,
+                          "{sv}",
+                          key,
+                          g_variant_new_string(printable_string(value, "")));
+}
+
+static void runtime_dbus_dict_add_bool(GVariantBuilder *dict,
+                                       const char *key,
+                                       bool value) {
+    g_variant_builder_add(dict, "{sv}", key, g_variant_new_boolean(value));
+}
+
+static void runtime_dbus_dict_add_int(GVariantBuilder *dict,
+                                      const char *key,
+                                      int value) {
+    g_variant_builder_add(dict, "{sv}", key, g_variant_new_int32(value));
+}
+
+static GVariant *runtime_dbus_device_to_variant(ConfigDeviceRuntime *dev) {
+    GVariantBuilder dict;
+    g_variant_builder_init(&dict, G_VARIANT_TYPE("a{sv}"));
+
+    if (!dev || !dev->config) {
+        return g_variant_builder_end(&dict);
+    }
+
+    MbSessionState state = device_session_state(dev);
+
+    runtime_dbus_dict_add_string(&dict, "Id", dev->config->id);
+    runtime_dbus_dict_add_string(&dict, "Address", dev->config->address);
+    runtime_dbus_dict_add_string(&dict, "Name", dev->config->name);
+    runtime_dbus_dict_add_string(&dict,
+                                 "Profile",
+                                 printable_string(dev->config->profile,
+                                                  "standard_ble_midi"));
+    runtime_dbus_dict_add_bool(&dict, "Enabled", dev->config->enabled);
+    runtime_dbus_dict_add_bool(&dict, "ConnectOnStart", dev->config->connect_on_start);
+    runtime_dbus_dict_add_bool(&dict,
+                               "ReconnectOnLinkLoss",
+                               dev->config->reconnect_on_link_loss);
+    runtime_dbus_dict_add_bool(&dict, "EnableTx", dev->config->enable_tx);
+    runtime_dbus_dict_add_string(&dict, "AlsaPortName", dev->config->alsa_port_name);
+    runtime_dbus_dict_add_string(&dict, "RuntimeState", mb_session_state_name(state));
+    runtime_dbus_dict_add_bool(&dict, "Streaming", state == MB_SESSION_STREAMING);
+    runtime_dbus_dict_add_int(&dict, "AlsaPort", dev->alsa_port);
+
+    return g_variant_builder_end(&dict);
+}
+
+static void runtime_dbus_emit_device_changed(ConfigDeviceRuntime *dev) {
+    if (!dev || !dev->owner || !dev->owner->dbus_bus || !dev->config)
+        return;
+
+    ConfigDirRuntime *rt = dev->owner;
+    const char *id = printable_string(dev->config->id, "");
+    const char *state = mb_session_state_name(device_session_state(dev));
+
+    g_dbus_connection_emit_signal(rt->dbus_bus,
+                                  NULL,
+                                  "/org/midi_ble_rt/Daemon",
+                                  "org.midi_ble_rt.Daemon1",
+                                  "DeviceChanged",
+                                  g_variant_new("(@a{sv})",
+                                                runtime_dbus_device_to_variant(dev)),
+                                  NULL);
+
+    g_dbus_connection_emit_signal(rt->dbus_bus,
+                                  NULL,
+                                  "/org/midi_ble_rt/Daemon",
+                                  "org.midi_ble_rt.Daemon1",
+                                  "DeviceStateChanged",
+                                  g_variant_new("(ss)", id, state),
+                                  NULL);
+}
+
+static void runtime_dbus_return_device_not_found(GDBusMethodInvocation *invocation,
+                                                 const char *id) {
+    g_dbus_method_invocation_return_error(invocation,
+                                          G_IO_ERROR,
+                                          G_IO_ERROR_NOT_FOUND,
+                                          "device not found: %s",
+                                          id && *id ? id : "-");
+}
+
+static bool runtime_dbus_enqueue_device_command(ConfigDirRuntime *rt,
+                                                GDBusMethodInvocation *invocation,
+                                                const char *id,
+                                                MbLifecycleCommandType type,
+                                                const char *reason) {
+    ConfigDeviceRuntime *dev = runtime_find_device_by_id(rt, id);
+
+    if (!dev) {
+        runtime_dbus_return_device_not_found(invocation, id);
+        return false;
+    }
+
+    lifecycle_enqueue(rt, dev, type, reason);
+    g_dbus_method_invocation_return_value(invocation, NULL);
+    return true;
+}
+
+static void runtime_dbus_handle_method_call(GDBusConnection *connection,
+                                            const char *sender,
+                                            const char *object_path,
+                                            const char *interface_name,
+                                            const char *method_name,
+                                            GVariant *parameters,
+                                            GDBusMethodInvocation *invocation,
+                                            gpointer user_data) {
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+
+    ConfigDirRuntime *rt = user_data;
+
+    if (!rt) {
+        g_dbus_method_invocation_return_error(invocation,
+                                              G_IO_ERROR,
+                                              G_IO_ERROR_FAILED,
+                                              "daemon runtime is unavailable");
+        return;
+    }
+
+    if (g_strcmp0(method_name, "ListDevices") == 0) {
+        GVariantBuilder devices;
+        g_variant_builder_init(&devices, G_VARIANT_TYPE("aa{sv}"));
+
+        for (unsigned i = 0; rt->devices && i < rt->devices->len; i++) {
+            ConfigDeviceRuntime *dev = g_ptr_array_index(rt->devices, i);
+            g_variant_builder_add_value(&devices,
+                                        runtime_dbus_device_to_variant(dev));
+        }
+
+        g_dbus_method_invocation_return_value(invocation,
+                                              g_variant_new("(@aa{sv})",
+                                                            g_variant_builder_end(&devices)));
+        return;
+    }
+
+    if (g_strcmp0(method_name, "ConnectDevice") == 0) {
+        const char *id = NULL;
+        g_variant_get(parameters, "(&s)", &id);
+        runtime_dbus_enqueue_device_command(rt,
+                                            invocation,
+                                            id,
+                                            MB_LIFECYCLE_CMD_CONNECT,
+                                            "dbus connect");
+        return;
+    }
+
+    if (g_strcmp0(method_name, "DisconnectDevice") == 0) {
+        const char *id = NULL;
+        g_variant_get(parameters, "(&s)", &id);
+        runtime_dbus_enqueue_device_command(rt,
+                                            invocation,
+                                            id,
+                                            MB_LIFECYCLE_CMD_DISCONNECT,
+                                            "dbus disconnect");
+        return;
+    }
+
+    if (g_strcmp0(method_name, "RecheckDevice") == 0) {
+        const char *id = NULL;
+        g_variant_get(parameters, "(&s)", &id);
+        runtime_dbus_enqueue_device_command(rt,
+                                            invocation,
+                                            id,
+                                            MB_LIFECYCLE_CMD_RECHECK,
+                                            "dbus recheck");
+        return;
+    }
+
+    g_dbus_method_invocation_return_error(invocation,
+                                          G_DBUS_ERROR,
+                                          G_DBUS_ERROR_UNKNOWN_METHOD,
+                                          "unknown method: %s",
+                                          method_name ? method_name : "-");
+}
+
+static const GDBusInterfaceVTable runtime_dbus_vtable = {
+    .method_call = runtime_dbus_handle_method_call,
+};
+
+static void runtime_dbus_name_acquired(GDBusConnection *connection,
+                                       const char *name,
+                                       gpointer user_data) {
+    (void)connection;
+    (void)user_data;
+
+    g_print("D-Bus API name acquired: %s\n", printable_string(name, "-"));
+}
+
+static void runtime_dbus_name_lost(GDBusConnection *connection,
+                                   const char *name,
+                                   gpointer user_data) {
+    (void)connection;
+    (void)user_data;
+
+    g_printerr("D-Bus API name lost: %s\n", printable_string(name, "-"));
+}
+
+static bool runtime_start_dbus_service(ConfigDirRuntime *rt) {
+    if (!rt)
+        return false;
+
+    GError *error = NULL;
+
+    rt->dbus_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+    if (!rt->dbus_bus) {
+        g_printerr("D-Bus API unavailable: could not connect to session bus: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    rt->dbus_introspection =
+        g_dbus_node_info_new_for_xml(runtime_dbus_introspection_xml, &error);
+    if (!rt->dbus_introspection) {
+        g_printerr("D-Bus API unavailable: invalid introspection XML: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    rt->dbus_object_id =
+        g_dbus_connection_register_object(rt->dbus_bus,
+                                          "/org/midi_ble_rt/Daemon",
+                                          rt->dbus_introspection->interfaces[0],
+                                          &runtime_dbus_vtable,
+                                          rt,
+                                          NULL,
+                                          &error);
+
+    if (!rt->dbus_object_id) {
+        g_printerr("D-Bus API unavailable: could not register object: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return false;
+    }
+
+    rt->dbus_name_id =
+        g_bus_own_name_on_connection(rt->dbus_bus,
+                                     "org.midi_ble_rt.Daemon",
+                                     G_BUS_NAME_OWNER_FLAGS_NONE,
+                                     runtime_dbus_name_acquired,
+                                     runtime_dbus_name_lost,
+                                     rt,
+                                     NULL);
+
+    g_print("D-Bus API object: /org/midi_ble_rt/Daemon\n");
+    return true;
+}
+
+static void runtime_stop_dbus_service(ConfigDirRuntime *rt) {
+    if (!rt)
+        return;
+
+    if (rt->dbus_name_id) {
+        g_bus_unown_name(rt->dbus_name_id);
+        rt->dbus_name_id = 0;
+    }
+
+    if (rt->dbus_object_id && rt->dbus_bus) {
+        g_dbus_connection_unregister_object(rt->dbus_bus, rt->dbus_object_id);
+        rt->dbus_object_id = 0;
+    }
+
+    if (rt->dbus_introspection) {
+        g_dbus_node_info_unref(rt->dbus_introspection);
+        rt->dbus_introspection = NULL;
+    }
+
+    if (rt->dbus_bus) {
+        g_object_unref(rt->dbus_bus);
+        rt->dbus_bus = NULL;
+    }
+}
+
 
 static void runtime_control_handle_request(ConfigDirRuntime *rt,
                                            int client_fd,
@@ -2350,6 +2675,8 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         rt->stats_source_id = 0;
     }
 
+    runtime_stop_dbus_service(rt);
+
     if (rt->sigint_source_id)
         g_source_remove(rt->sigint_source_id);
     if (rt->sigterm_source_id)
@@ -2450,6 +2777,9 @@ static int run_config_directory_mode(const char *config_dir) {
                                            runtime_stats_export_cb,
                                            &rt);
     runtime_start_control_socket(&rt);
+
+    if (!runtime_start_dbus_service(&rt))
+        g_printerr("D-Bus API disabled; continuing with legacy control socket.\n");
 
     print_config_dir_devices(&rt, config_dir);
     runtime_start_configured_devices(&rt);
