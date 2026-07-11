@@ -34,6 +34,7 @@ add_library(midi-ble-rt-core STATIC
     src/mb-alsa.c
     src/mb-alsa-port.c
     src/mb-bluez.c
+    src/mb-bluez-agent.c
     src/mb-gatt-midi.c
     src/mb-ble-midi.c
     src/mb-config.c

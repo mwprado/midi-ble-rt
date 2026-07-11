@@ -74,13 +74,10 @@ typedef struct {
     guint daemon_dbus_device_changed_sub_id;
     guint daemon_dbus_state_changed_sub_id;
     guint daemon_dbus_device_removed_sub_id;
+    guint daemon_dbus_catalog_changed_sub_id;
+    guint daemon_dbus_bluetooth_state_sub_id;
 } MbGnomeWindowState;
 static void show_scan_pair_dialog(MbGnomeWindowState *state);
-static void daemon_switch_notify_active_cb(GObject *object,
-                                           GParamSpec *pspec,
-                                           gpointer user_data);
-static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error);
-static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error);
 static void update_daemon_switch_state(MbGnomeWindowState *state);
 static void show_error_dialog(MbGnomeWindowState *state,
                               const char *title,
@@ -119,11 +116,6 @@ typedef struct {
 
 typedef struct {
     MbGnomeWindowState *state;
-    bool requested_active;
-} DaemonCommandTask;
-
-typedef struct {
-    MbGnomeWindowState *state;
     unsigned timeout_seconds;
 } ScanTask;
 
@@ -131,13 +123,9 @@ static void mb_gnome_window_refresh(MbGnomeWindowState *state);
 static void update_scan_button_state(MbGnomeWindowState *state);
 static void update_action_sensitivity(MbGnomeWindowState *state, const MbUiDevice *device);
 static void update_main_panel(MbGnomeWindowState *state);
-static void bluez_observer_state_changed_cb(bool available,
-                                           bool powered_known,
-                                           bool powered,
-                                           bool discovering,
-                                           const char *adapter_path,
-                                           void *user_data);
 static void daemon_dbus_observer_start(MbGnomeWindowState *state);
+static void daemon_dbus_read_initial_bluetooth_state(
+    MbGnomeWindowState *state);
 
 static const char *safe(const char *s, const char *fallback) {
     return s && *s ? s : fallback;
@@ -392,52 +380,6 @@ static const MbUiDevice *selected_device(MbGnomeWindowState *state) {
 }
 
 
-static bool start_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
-    (void)state;
-
-    g_printerr("[midi-ble-rt-gui] service start: systemctl --user start midi-ble-rtd.service\n");
-
-    GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                         G_SUBPROCESS_FLAGS_STDERR_MERGE,
-                                         error,
-                                         "systemctl",
-                                         "--user",
-                                         "start",
-                                         "midi-ble-rtd.service",
-                                         NULL);
-
-    if (!proc)
-        return false;
-
-    bool ok = g_subprocess_wait_check(proc, NULL, error);
-    g_object_unref(proc);
-    return ok;
-}
-
-
-static bool stop_daemon_from_gui(MbGnomeWindowState *state, GError **error) {
-    (void)state;
-
-    g_printerr("[midi-ble-rt-gui] service stop: systemctl --user stop midi-ble-rtd.service\n");
-
-    GSubprocess *proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                         G_SUBPROCESS_FLAGS_STDERR_MERGE,
-                                         error,
-                                         "systemctl",
-                                         "--user",
-                                         "stop",
-                                         "midi-ble-rtd.service",
-                                         NULL);
-
-    if (!proc)
-        return false;
-
-    bool ok = g_subprocess_wait_check(proc, NULL, error);
-    g_object_unref(proc);
-    return ok;
-}
-
-
 static void update_daemon_switch_state(MbGnomeWindowState *state) {
     if (!state)
         return;
@@ -470,104 +412,6 @@ static void update_daemon_switch_state(MbGnomeWindowState *state) {
     }
 }
 
-
-static void daemon_command_task_thread(GTask *task,
-                                       gpointer source_object,
-                                       gpointer task_data,
-                                       GCancellable *cancellable) {
-    (void)source_object;
-    (void)cancellable;
-
-    DaemonCommandTask *cmd = task_data;
-    GError *error = NULL;
-    bool ok = false;
-
-    if (cmd->requested_active)
-        ok = start_daemon_from_gui(cmd->state, &error);
-    else
-        ok = stop_daemon_from_gui(cmd->state, &error);
-
-    if (!ok)
-        g_task_return_error(task,
-                            error ? error
-                                  : g_error_new(G_IO_ERROR,
-                                                G_IO_ERROR_FAILED,
-                                                "falha ao alterar estado do daemon"));
-    else
-        g_task_return_boolean(task, TRUE);
-}
-
-static void daemon_command_task_done(GObject *source_object,
-                                     GAsyncResult *result,
-                                     gpointer user_data) {
-    (void)source_object;
-
-    MbGnomeWindowState *state = user_data;
-    GError *error = NULL;
-
-    if (!state)
-        return;
-
-    if (!g_task_propagate_boolean(G_TASK(result), &error)) {
-        state->daemon_transition_in_flight = false;
-        state->daemon_requested_active = state->daemon_functional;
-        update_daemon_switch_state(state);
-
-        show_error_dialog(state,
-                          "Falha no Serviço MIDI-BLE",
-                          error && error->message ? error->message : "Erro desconhecido");
-        g_clear_error(&error);
-        return;
-    }
-
-    if (state->daemon_observer) {
-        GError *observer_error = NULL;
-
-        if (!mb_daemon_observer_refresh(state->daemon_observer, &observer_error)) {
-            g_printerr("[midi-ble-rt-gui] daemon observer refresh failed: %s\n",
-                       observer_error && observer_error->message ? observer_error->message : "unknown error");
-            g_clear_error(&observer_error);
-        }
-    }
-
-    state->daemon_transition_in_flight = false;
-    update_daemon_switch_state(state);
-    mb_gnome_window_refresh(state);
-}
-
-static void daemon_switch_notify_active_cb(GObject *object,
-                                           GParamSpec *pspec,
-                                           gpointer user_data) {
-    (void)pspec;
-
-    MbGnomeWindowState *state = user_data;
-
-    if (!state)
-        return;
-
-    if (state->daemon_transition_in_flight)
-        return;
-
-    bool requested_active = gtk_switch_get_active(GTK_SWITCH(object));
-    if (requested_active == state->daemon_functional)
-        return;
-
-    state->daemon_transition_in_flight = true;
-    state->daemon_requested_active = requested_active;
-    update_daemon_switch_state(state);
-
-    DaemonCommandTask *cmd = g_new0(DaemonCommandTask, 1);
-    cmd->state = state;
-    cmd->requested_active = requested_active;
-
-    GTask *task = g_task_new(G_OBJECT(state->window),
-                             NULL,
-                             daemon_command_task_done,
-                             state);
-    g_task_set_task_data(task, cmd, g_free);
-    g_task_run_in_thread(task, daemon_command_task_thread);
-    g_object_unref(task);
-}
 
 
 
@@ -646,18 +490,19 @@ static void daemon_observer_state_changed_cb(bool active,
     daemon_root_observer_set_functional(state, functional);
     update_daemon_switch_state(state);
 
-    if (functional && !state->daemon_transition_in_flight)
+    if (functional && !state->daemon_transition_in_flight) {
+        daemon_dbus_read_initial_bluetooth_state(state);
         mb_gnome_window_refresh(state);
+    }
 }
 
 
 static bool bluez_can_scan_for_gui(const MbGnomeWindowState *state) {
-    /*
-     * The historical name remains for now, but the policy no longer comes from
-     * BlueZ.  Scan availability is daemon-owned: the GUI may scan only when the
-     * midi-ble-rtd D-Bus API is expected to be available.
-     */
-    return state && state->daemon_functional;
+    return state &&
+           state->daemon_functional &&
+           state->bluez_available &&
+           state->bluez_powered_known &&
+           state->bluez_powered;
 }
 
 static void update_scan_button_state(MbGnomeWindowState *state) {
@@ -670,6 +515,10 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
         label = "Procurando instrumentos…";
     else if (!state->daemon_functional)
         label = "Serviço MIDI-BLE inativo";
+    else if (!state->bluez_available ||
+             !state->bluez_powered_known ||
+             !state->bluez_powered)
+        label = "Bluetooth desligado";
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
@@ -679,30 +528,64 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
                              !state->command_in_flight);
 }
 
-static void bluez_observer_state_changed_cb(bool available,
-                                           bool powered_known,
-                                           bool powered,
-                                           bool discovering,
-                                           const char *adapter_path,
-                                           void *user_data) {
-    MbGnomeWindowState *state = user_data;
-
-    if (!state)
+static void daemon_dbus_apply_bluetooth_state(
+    MbGnomeWindowState *state,
+    GVariant *dict) {
+    if (!state || !dict)
         return;
+
+    gboolean available = FALSE;
+    gboolean powered_known = FALSE;
+    gboolean powered = FALSE;
+    gboolean discovering = FALSE;
+
+    g_variant_lookup(dict, "Available", "b", &available);
+    g_variant_lookup(dict, "PoweredKnown", "b", &powered_known);
+    g_variant_lookup(dict, "Powered", "b", &powered);
+    g_variant_lookup(dict, "Discovering", "b", &discovering);
 
     state->bluez_available = available;
     state->bluez_powered_known = powered_known;
     state->bluez_powered = powered;
     state->bluez_discovering = discovering;
 
-    g_printerr("[midi-ble-rt-gui] BlueZ observer: available=%d powered_known=%d powered=%d discovering=%d adapter=%s\n",
-               available,
-               powered_known,
-               powered,
-               discovering,
-               adapter_path && *adapter_path ? adapter_path : "-");
-
+    g_printerr("[midi-ble-rt-gui] daemon Bluetooth state: available=%d powered_known=%d powered=%d discovering=%d\n",
+               state->bluez_available,
+               state->bluez_powered_known,
+               state->bluez_powered,
+               state->bluez_discovering);
     update_scan_button_state(state);
+}
+
+static void daemon_dbus_read_initial_bluetooth_state(
+    MbGnomeWindowState *state) {
+    if (!state || !state->daemon_dbus_bus)
+        return;
+
+    GError *error = NULL;
+    GVariant *reply =
+        g_dbus_connection_call_sync(state->daemon_dbus_bus,
+                                    "org.midi_ble_rt.Daemon",
+                                    "/org/midi_ble_rt/Daemon",
+                                    "org.midi_ble_rt.Daemon1",
+                                    "GetBluetoothState",
+                                    NULL,
+                                    G_VARIANT_TYPE("(a{sv})"),
+                                    G_DBUS_CALL_FLAGS_NONE,
+                                    5000,
+                                    NULL,
+                                    &error);
+    if (!reply) {
+        g_printerr("[midi-ble-rt-gui] GetBluetoothState failed: %s\n",
+                   error && error->message ? error->message : "unknown error");
+        g_clear_error(&error);
+        return;
+    }
+
+    GVariant *dict = g_variant_get_child_value(reply, 0);
+    daemon_dbus_apply_bluetooth_state(state, dict);
+    g_variant_unref(dict);
+    g_variant_unref(reply);
 }
 
 
@@ -725,10 +608,23 @@ static void daemon_dbus_signal_cb(GDBusConnection *connection,
     g_printerr("[midi-ble-rt-gui] daemon D-Bus signal: %s\n",
                signal_name && *signal_name ? signal_name : "-");
 
+    if (g_strcmp0(signal_name, "BluetoothStateChanged") == 0) {
+        if (parameters && g_variant_n_children(parameters) > 0) {
+            GVariant *dict = g_variant_get_child_value(parameters, 0);
+            daemon_dbus_apply_bluetooth_state(state, dict);
+            g_variant_unref(dict);
+        }
+        return;
+    }
+
+    if (g_strcmp0(signal_name, "CatalogChanged") == 0) {
+        mb_gnome_window_refresh(state);
+        return;
+    }
+
     if (g_strcmp0(signal_name, "DeviceRemoved") == 0 && parameters) {
         const char *removed_id = NULL;
         g_variant_get(parameters, "(&s)", &removed_id);
-
         if (removed_id &&
             state->selected_id &&
             g_strcmp0(state->selected_id, removed_id) == 0) {
@@ -737,12 +633,10 @@ static void daemon_dbus_signal_cb(GDBusConnection *connection,
         }
     }
 
-    /*
-     * Event-driven update:
-     * The daemon is the state authority.  On every device signal we perform a
-     * single fresh ListDevices() read.  There is no periodic refresh loop.
-     */
-    mb_gnome_window_refresh(state);
+    if (g_strcmp0(signal_name, "DeviceChanged") == 0 ||
+        g_strcmp0(signal_name, "DeviceStateChanged") == 0 ||
+        g_strcmp0(signal_name, "DeviceRemoved") == 0)
+        mb_gnome_window_refresh(state);
 }
 
 static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
@@ -793,6 +687,32 @@ static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
                                            daemon_dbus_signal_cb,
                                            state,
                                            NULL);
+
+    state->daemon_dbus_catalog_changed_sub_id =
+        g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
+                                           "org.midi_ble_rt.Daemon",
+                                           "org.midi_ble_rt.Daemon1",
+                                           "CatalogChanged",
+                                           "/org/midi_ble_rt/Daemon",
+                                           NULL,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           daemon_dbus_signal_cb,
+                                           state,
+                                           NULL);
+
+    state->daemon_dbus_bluetooth_state_sub_id =
+        g_dbus_connection_signal_subscribe(state->daemon_dbus_bus,
+                                           "org.midi_ble_rt.Daemon",
+                                           "org.midi_ble_rt.Daemon1",
+                                           "BluetoothStateChanged",
+                                           "/org/midi_ble_rt/Daemon",
+                                           NULL,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           daemon_dbus_signal_cb,
+                                           state,
+                                           NULL);
+
+    daemon_dbus_read_initial_bluetooth_state(state);
 
     g_printerr("[midi-ble-rt-gui] daemon D-Bus observer started: DeviceChanged=%u DeviceStateChanged=%u\n",
                state->daemon_dbus_device_changed_sub_id,
@@ -1422,9 +1342,7 @@ static void scan_pair_task_done(GObject *source,
                    error && error->message ? error->message : "Erro desconhecido");
 
         if (scan && scan->refresh_main_after_done) {
-            scan_pair_dialog_set_status(dialog, "Instrumento importado. A porta ALSA foi criada pelo serviço.", false);
-            if (dialog->state)
-                mb_gnome_window_refresh(dialog->state);
+            scan_pair_dialog_set_status(dialog, "Instrumento importado pelo serviço.", false);
         } else {
             scan_pair_dialog_set_status(dialog, "Não foi possível procurar instrumentos", true);
         }
@@ -1441,7 +1359,7 @@ static void scan_pair_task_done(GObject *source,
 
     if (dialog->status_label) {
         if (scan && scan->refresh_main_after_done)
-            set_label(dialog->status_label, "Instrumento importado. A porta ALSA foi criada pelo serviço.");
+            set_label(dialog->status_label, "Instrumento importado pelo serviço.");
         else
             set_label(dialog->status_label, "Escolha um instrumento");
     }
@@ -1449,8 +1367,6 @@ static void scan_pair_task_done(GObject *source,
     scan_pair_dialog_set_busy(dialog, false);
     scan_pair_dialog_rebuild_list(dialog);
 
-    if (scan && scan->refresh_main_after_done && dialog->state)
-        mb_gnome_window_refresh(dialog->state);
 }
 
 
@@ -1559,11 +1475,9 @@ static void import_task_done(GObject *source,
     scan_pair_dialog_rebuild_list(dialog);
 
     scan_pair_dialog_set_status(dialog,
-                                "Instrumento importado. A porta ALSA foi criada pelo serviço.",
+                                "Instrumento importado pelo serviço.",
                                 false);
 
-    if (dialog->state)
-        mb_gnome_window_refresh(dialog->state);
 }
 
 static void scan_pair_dialog_row_pair_import_clicked(GtkButton *button,
@@ -1597,9 +1511,6 @@ static void scan_pair_dialog_destroy_cb(GtkWidget *widget,
     (void)widget;
 
     ScanPairDialog *dialog = user_data;
-    if (dialog && dialog->state)
-        mb_gnome_window_refresh(dialog->state);
-
     scan_pair_dialog_free(dialog);
 }
 
@@ -1686,6 +1597,15 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
         show_error_dialog(state,
                           "Serviço MIDI-BLE inativo",
                           "Inicie o serviço MIDI-BLE antes de buscar instrumentos.");
+        return;
+    }
+
+    if (!state->bluez_available ||
+        !state->bluez_powered_known ||
+        !state->bluez_powered) {
+        show_error_dialog(state,
+                          "Bluetooth desligado",
+                          "Ligue o Bluetooth antes de buscar instrumentos BLE-MIDI.");
         return;
     }
 
@@ -1943,6 +1863,25 @@ static void state_free(MbGnomeWindowState *state) {
 
     if (state->daemon_transition_source_id)
         g_source_remove(state->daemon_transition_source_id);
+
+    if (state->daemon_dbus_bus) {
+        if (state->daemon_dbus_device_changed_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_device_changed_sub_id);
+        if (state->daemon_dbus_state_changed_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_state_changed_sub_id);
+        if (state->daemon_dbus_device_removed_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_device_removed_sub_id);
+        if (state->daemon_dbus_catalog_changed_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_catalog_changed_sub_id);
+        if (state->daemon_dbus_bluetooth_state_sub_id)
+            g_dbus_connection_signal_unsubscribe(state->daemon_dbus_bus,
+                                                 state->daemon_dbus_bluetooth_state_sub_id);
+        g_clear_object(&state->daemon_dbus_bus);
+    }
 
     mb_daemon_observer_free(state->daemon_observer);
 
@@ -2263,7 +2202,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
      * through daemon D-Bus methods, not through direct BlueZ observation.
      */
     state->bluez_observer = NULL;
-    bluez_observer_state_changed_cb(false, false, false, false, NULL, state);
 
     mb_gnome_window_refresh(state);
 

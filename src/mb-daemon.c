@@ -26,6 +26,7 @@
 #include "mb-alsa-port.h"
 #include "mb-ble-midi.h"
 #include "mb-bluez.h"
+#include "mb-bluez-agent.h"
 #include "mb-config.h"
 #include "mb-duplex-runtime.h"
 #include "mb-gatt-midi.h"
@@ -135,6 +136,15 @@ struct _ConfigDirRuntime {
     GDBusNodeInfo *dbus_introspection;
     guint dbus_name_id;
     guint dbus_object_id;
+
+    MbBluezAgent bluez_agent;
+    guint bluez_adapter_sub_id;
+    guint bluez_object_manager_sub_id;
+    char *bluez_adapter_path;
+    bool bluez_available;
+    bool bluez_powered_known;
+    bool bluez_powered;
+    bool bluez_discovering;
 
     /*
      * Shared ALSA Sequencer client for the whole daemon process.
@@ -1878,6 +1888,9 @@ static const char runtime_dbus_introspection_xml[] =
     "    <method name='ListDevices'>"
     "      <arg name='devices' type='aa{sv}' direction='out'/>"
     "    </method>"
+    "    <method name='GetBluetoothState'>"
+    "      <arg name='state' type='a{sv}' direction='out'/>"
+    "    </method>"
     "    <method name='ScanDevices'>"
     "      <arg name='timeout_seconds' type='u' direction='in'/>"
     "      <arg name='devices' type='aa{sv}' direction='out'/>"
@@ -1908,6 +1921,10 @@ static const char runtime_dbus_introspection_xml[] =
     "    </signal>"
     "    <signal name='DeviceRemoved'>"
     "      <arg name='id' type='s'/>"
+    "    </signal>"
+    "    <signal name='CatalogChanged'/>"
+    "    <signal name='BluetoothStateChanged'>"
+    "      <arg name='state' type='a{sv}'/>"
     "    </signal>"
     "  </interface>"
     "</node>";
@@ -2125,38 +2142,6 @@ static bool runtime_dbus_address_is_imported(ConfigDirRuntime *rt,
     return false;
 }
 
-static char *runtime_dbus_first_bluez_adapter_path(ConfigDirRuntime *rt) {
-    if (!rt || !rt->bus)
-        return NULL;
-
-    GVariant *objects = mb_bluez_get_managed_objects(rt->bus);
-    if (!objects)
-        return NULL;
-
-    GVariantIter iter;
-    const char *path = NULL;
-    GVariant *ifaces = NULL;
-    char *adapter_path = NULL;
-
-    g_variant_iter_init(&iter, objects);
-    while (g_variant_iter_next(&iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
-        GVariant *props = g_variant_lookup_value(ifaces,
-                                                  RUNTIME_DBUS_ADAPTER_IFACE,
-                                                  G_VARIANT_TYPE("a{sv}"));
-        if (props) {
-            adapter_path = g_strdup(path);
-            g_variant_unref(props);
-        }
-
-        g_variant_unref(ifaces);
-
-        if (adapter_path)
-            break;
-    }
-
-    g_variant_unref(objects);
-    return adapter_path;
-}
 
 static bool runtime_dbus_call_bluez_adapter_void(ConfigDirRuntime *rt,
                                                  const char *adapter_path,
@@ -2187,6 +2172,257 @@ static bool runtime_dbus_call_bluez_adapter_void(ConfigDirRuntime *rt,
     g_variant_unref(reply);
     return true;
 }
+
+
+static GVariant *runtime_dbus_bluetooth_state_to_variant(ConfigDirRuntime *rt) {
+    GVariantBuilder dict;
+    g_variant_builder_init(&dict, G_VARIANT_TYPE("a{sv}"));
+
+    runtime_dbus_dict_add_bool(&dict, "Available", rt && rt->bluez_available);
+    runtime_dbus_dict_add_bool(&dict, "PoweredKnown", rt && rt->bluez_powered_known);
+    runtime_dbus_dict_add_bool(&dict, "Powered", rt && rt->bluez_powered);
+    runtime_dbus_dict_add_bool(&dict, "Discovering", rt && rt->bluez_discovering);
+    runtime_dbus_dict_add_string(&dict,
+                                 "AdapterPath",
+                                 rt ? rt->bluez_adapter_path : "");
+    return g_variant_builder_end(&dict);
+}
+
+static void runtime_dbus_emit_catalog_changed(ConfigDirRuntime *rt) {
+    if (!rt || !rt->dbus_bus)
+        return;
+
+    g_dbus_connection_emit_signal(rt->dbus_bus,
+                                  NULL,
+                                  "/org/midi_ble_rt/Daemon",
+                                  "org.midi_ble_rt.Daemon1",
+                                  "CatalogChanged",
+                                  NULL,
+                                  NULL);
+}
+
+static void runtime_dbus_emit_bluetooth_state(ConfigDirRuntime *rt) {
+    if (!rt || !rt->dbus_bus)
+        return;
+
+    g_dbus_connection_emit_signal(
+        rt->dbus_bus,
+        NULL,
+        "/org/midi_ble_rt/Daemon",
+        "org.midi_ble_rt.Daemon1",
+        "BluetoothStateChanged",
+        g_variant_new("(@a{sv})", runtime_dbus_bluetooth_state_to_variant(rt)),
+        NULL);
+}
+
+static void runtime_bluez_adapter_properties_changed(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data);
+
+static void runtime_bluez_object_manager_changed(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data);
+
+static void runtime_bluez_unsubscribe_adapter(ConfigDirRuntime *rt) {
+    if (!rt)
+        return;
+
+    if (rt->bluez_adapter_sub_id && rt->bus) {
+        g_dbus_connection_signal_unsubscribe(rt->bus, rt->bluez_adapter_sub_id);
+        rt->bluez_adapter_sub_id = 0;
+    }
+}
+
+static void runtime_bluez_subscribe_adapter(ConfigDirRuntime *rt) {
+    if (!rt || !rt->bus || !rt->bluez_adapter_path)
+        return;
+
+    rt->bluez_adapter_sub_id =
+        g_dbus_connection_signal_subscribe(rt->bus,
+                                           BLUEZ_BUS,
+                                           PROPERTIES_IFACE,
+                                           "PropertiesChanged",
+                                           rt->bluez_adapter_path,
+                                           RUNTIME_DBUS_ADAPTER_IFACE,
+                                           G_DBUS_SIGNAL_FLAGS_NONE,
+                                           runtime_bluez_adapter_properties_changed,
+                                           rt,
+                                           NULL);
+}
+
+static bool runtime_bluez_state_refresh(ConfigDirRuntime *rt,
+                                        bool emit_change) {
+    if (!rt || !rt->bus)
+        return false;
+
+    GVariant *objects = mb_bluez_get_managed_objects(rt->bus);
+    char *adapter_path = NULL;
+    bool powered_known = false;
+    bool powered = false;
+    bool discovering = false;
+
+    if (objects) {
+        GVariantIter iter;
+        const char *path = NULL;
+        GVariant *ifaces = NULL;
+
+        g_variant_iter_init(&iter, objects);
+        while (g_variant_iter_next(&iter,
+                                   "{&o@a{sa{sv}}}",
+                                   &path,
+                                   &ifaces)) {
+            GVariant *props =
+                g_variant_lookup_value(ifaces,
+                                       RUNTIME_DBUS_ADAPTER_IFACE,
+                                       G_VARIANT_TYPE("a{sv}"));
+            if (props) {
+                adapter_path = g_strdup(path);
+
+                GVariant *v_powered =
+                    g_variant_lookup_value(props,
+                                           "Powered",
+                                           G_VARIANT_TYPE_BOOLEAN);
+                if (v_powered) {
+                    powered_known = true;
+                    powered = g_variant_get_boolean(v_powered);
+                    g_variant_unref(v_powered);
+                }
+
+                GVariant *v_discovering =
+                    g_variant_lookup_value(props,
+                                           "Discovering",
+                                           G_VARIANT_TYPE_BOOLEAN);
+                if (v_discovering) {
+                    discovering = g_variant_get_boolean(v_discovering);
+                    g_variant_unref(v_discovering);
+                }
+
+                g_variant_unref(props);
+                g_variant_unref(ifaces);
+                break;
+            }
+            g_variant_unref(ifaces);
+        }
+        g_variant_unref(objects);
+    }
+
+    bool available = adapter_path != NULL;
+    bool changed =
+        rt->bluez_available != available ||
+        rt->bluez_powered_known != powered_known ||
+        rt->bluez_powered != powered ||
+        rt->bluez_discovering != discovering ||
+        g_strcmp0(rt->bluez_adapter_path, adapter_path) != 0;
+
+    if (g_strcmp0(rt->bluez_adapter_path, adapter_path) != 0) {
+        runtime_bluez_unsubscribe_adapter(rt);
+        g_free(rt->bluez_adapter_path);
+        rt->bluez_adapter_path = g_strdup(adapter_path);
+        runtime_bluez_subscribe_adapter(rt);
+    }
+
+    rt->bluez_available = available;
+    rt->bluez_powered_known = powered_known;
+    rt->bluez_powered = powered;
+    rt->bluez_discovering = discovering;
+    g_free(adapter_path);
+
+    if (changed) {
+        g_print("BlueZ adapter state: available=%d powered_known=%d powered=%d discovering=%d path=%s\n",
+                rt->bluez_available,
+                rt->bluez_powered_known,
+                rt->bluez_powered,
+                rt->bluez_discovering,
+                printable_string(rt->bluez_adapter_path, "-"));
+        if (emit_change)
+            runtime_dbus_emit_bluetooth_state(rt);
+    }
+
+    return available;
+}
+
+static void runtime_bluez_adapter_properties_changed(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data) {
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    (void)parameters;
+    runtime_bluez_state_refresh(user_data, true);
+}
+
+static void runtime_bluez_object_manager_changed(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data) {
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    (void)parameters;
+    runtime_bluez_state_refresh(user_data, true);
+}
+
+static void runtime_bluez_state_start(ConfigDirRuntime *rt) {
+    if (!rt || !rt->bus)
+        return;
+
+    if (!rt->bluez_object_manager_sub_id) {
+        rt->bluez_object_manager_sub_id =
+            g_dbus_connection_signal_subscribe(rt->bus,
+                                               BLUEZ_BUS,
+                                               OBJECT_MANAGER_IFACE,
+                                               NULL,
+                                               "/",
+                                               NULL,
+                                               G_DBUS_SIGNAL_FLAGS_NONE,
+                                               runtime_bluez_object_manager_changed,
+                                               rt,
+                                               NULL);
+    }
+    runtime_bluez_state_refresh(rt, true);
+}
+
+static void runtime_bluez_state_stop(ConfigDirRuntime *rt) {
+    if (!rt)
+        return;
+
+    runtime_bluez_unsubscribe_adapter(rt);
+    if (rt->bluez_object_manager_sub_id && rt->bus) {
+        g_dbus_connection_signal_unsubscribe(rt->bus,
+                                             rt->bluez_object_manager_sub_id);
+        rt->bluez_object_manager_sub_id = 0;
+    }
+
+    g_clear_pointer(&rt->bluez_adapter_path, g_free);
+    rt->bluez_available = false;
+    rt->bluez_powered_known = false;
+    rt->bluez_powered = false;
+    rt->bluez_discovering = false;
+}
+
 
 static GVariant *runtime_dbus_scan_candidate_to_variant(ConfigDirRuntime *rt,
                                                         const char *path,
@@ -2253,14 +2489,25 @@ static GVariant *runtime_dbus_scan_devices(ConfigDirRuntime *rt,
     if (timeout_seconds > 30)
         timeout_seconds = 30;
 
-    char *adapter_path = runtime_dbus_first_bluez_adapter_path(rt);
-    if (!adapter_path) {
+    runtime_bluez_state_refresh(rt, true);
+
+    if (!rt->bluez_available || !rt->bluez_adapter_path) {
         g_set_error(error,
                     G_IO_ERROR,
                     G_IO_ERROR_NOT_FOUND,
                     "no BlueZ adapter found");
         return NULL;
     }
+
+    if (!rt->bluez_powered_known || !rt->bluez_powered) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_NOT_CONNECTED,
+                    "Bluetooth adapter is powered off");
+        return NULL;
+    }
+
+    char *adapter_path = g_strdup(rt->bluez_adapter_path);
 
     g_print("D-Bus ScanDevices: StartDiscovery adapter=%s timeout=%u\n",
             adapter_path,
@@ -2270,10 +2517,13 @@ static GVariant *runtime_dbus_scan_devices(ConfigDirRuntime *rt,
                                               adapter_path,
                                               "StartDiscovery",
                                               error)) {
+        runtime_bluez_state_refresh(rt, true);
         g_free(adapter_path);
         return NULL;
     }
 
+    rt->bluez_discovering = true;
+    runtime_dbus_emit_bluetooth_state(rt);
     g_usleep((gulong)timeout_seconds * G_USEC_PER_SEC);
 
     GError *stop_error = NULL;
@@ -2287,6 +2537,7 @@ static GVariant *runtime_dbus_scan_devices(ConfigDirRuntime *rt,
     }
 
     g_free(adapter_path);
+    runtime_bluez_state_refresh(rt, true);
 
     GVariant *objects = mb_bluez_get_managed_objects(rt->bus);
     if (!objects) {
@@ -2513,6 +2764,125 @@ static bool runtime_dbus_write_import_config(ConfigDirRuntime *rt,
     return ok;
 }
 
+
+static ConfigDeviceRuntime *runtime_dbus_activate_imported_device(
+    ConfigDirRuntime *rt,
+    GVariant *device,
+    GError **error) {
+    if (!rt || !device) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid imported device activation");
+        return NULL;
+    }
+
+    char *id = runtime_dbus_bluez_dup_string(device, "Id");
+    char *address = runtime_dbus_bluez_dup_string(device, "Address");
+    char *name = runtime_dbus_bluez_dup_string(device, "Name");
+    char *profile = runtime_dbus_bluez_dup_string(device, "Profile");
+    char *bluez_path = runtime_dbus_bluez_dup_string(device, "BluezPath");
+
+    ConfigDeviceRuntime *existing =
+        runtime_find_device_by_id(rt, printable_string(address, id));
+    if (existing) {
+        g_free(bluez_path);
+        g_free(profile);
+        g_free(name);
+        g_free(address);
+        g_free(id);
+        return existing;
+    }
+
+    if (!rt->cfg.devices) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "daemon device catalog is unavailable");
+        g_free(bluez_path);
+        g_free(profile);
+        g_free(name);
+        g_free(address);
+        g_free(id);
+        return NULL;
+    }
+
+    MbDeviceConfig *config = g_new0(MbDeviceConfig, 1);
+    config->id = g_strdup(printable_string(id, "ble-midi-device"));
+    config->address = g_strdup(printable_string(address, ""));
+    config->name = g_strdup(printable_string(name, config->id));
+    config->profile = g_strdup(printable_string(profile, "standard_ble_midi"));
+    config->alsa_port_name = g_strdup(printable_string(name, config->id));
+    config->enabled = true;
+    config->connect_on_start = true;
+    config->pair = false;
+    config->trust = true;
+    config->reconnect_on_link_loss = true;
+    config->enable_tx = true;
+
+    const char *session_path = bluez_path && *bluez_path ? bluez_path : NULL;
+    char *fallback_path = NULL;
+    if (!session_path) {
+        fallback_path = config_device_path(config);
+        session_path = fallback_path;
+    }
+
+    MbSession *session =
+        mb_daemon_ensure_session(&rt->daemon,
+                                 session_path,
+                                 config->address,
+                                 config->name);
+    g_free(fallback_path);
+
+    if (!session) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "could not create runtime session for imported device");
+        g_free(config->alsa_port_name);
+        g_free(config->profile);
+        g_free(config->name);
+        g_free(config->address);
+        g_free(config->id);
+        g_free(config);
+        g_free(bluez_path);
+        g_free(profile);
+        g_free(name);
+        g_free(address);
+        g_free(id);
+        return NULL;
+    }
+
+    session->auto_reconnect = config->reconnect_on_link_loss;
+    g_ptr_array_add(rt->cfg.devices, config);
+
+    ConfigDeviceRuntime *dev = g_new0(ConfigDeviceRuntime, 1);
+    dev->owner = rt;
+    dev->config = config;
+    dev->session = session;
+    dev->alsa_port = -1;
+    dev->stats.window_started_ns = runtime_now_ns();
+    g_mutex_init(&dev->session_lock);
+    g_mutex_init(&dev->dataplane_lock);
+    g_mutex_init(&dev->gatt_write_lock);
+    g_ptr_array_add(rt->devices, dev);
+
+    if (!device_ensure_alsa_port(dev))
+        g_printerr("Imported device %s entered the catalog, but its ALSA port could not be created yet.\n",
+                   device_label(dev));
+
+    lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_DISCOVER, "dbus import");
+    lifecycle_enqueue(rt, dev, MB_LIFECYCLE_CMD_CONNECT, "dbus import");
+
+    g_free(bluez_path);
+    g_free(profile);
+    g_free(name);
+    g_free(address);
+    g_free(id);
+    return dev;
+}
+
+
 static GVariant *runtime_dbus_pair_import_result_to_variant(const char *id,
                                                             const char *address,
                                                             const char *name,
@@ -2615,53 +2985,18 @@ static GVariant *runtime_dbus_pair_and_import_device(ConfigDirRuntime *rt,
     }
 
     if (!paired) {
-        g_print("D-Bus PairAndImportDevice: pairing %s\n", address);
-        if (!mb_bluez_pair_device(rt->bus, device_path)) {
-            /*
-             * Pair() is not always a reliable final-state signal for BLE-MIDI
-             * devices.  BlueZ may fail the method while the device state has
-             * already changed, or while the device is otherwise usable.
-             *
-             * Re-read Device1.Paired before failing.  The GUI import path must
-             * be idempotent: only abort if the authoritative post-Pair state is
-             * still unpaired.
-             */
-            GError *refresh_error = NULL;
-            GVariant *fresh_props = runtime_dbus_get_bluez_device_props(rt,
-                                                                         device_path,
-                                                                         &refresh_error);
-            if (fresh_props) {
-                paired = runtime_dbus_bluez_get_bool(fresh_props, "Paired", false);
-                trusted = runtime_dbus_bluez_get_bool(fresh_props, "Trusted", trusted);
-                connected = runtime_dbus_bluez_get_bool(fresh_props, "Connected", connected);
-                g_variant_unref(fresh_props);
-            } else {
-                g_printerr("D-Bus PairAndImportDevice: failed to refresh BlueZ state after Pair() failure for %s: %s\n",
-                           address,
-                           refresh_error && refresh_error->message ? refresh_error->message : "unknown error");
-                g_clear_error(&refresh_error);
-            }
-
-            if (!paired) {
-                g_set_error(error,
-                            G_IO_ERROR,
-                            G_IO_ERROR_FAILED,
-                            "BlueZ Pair() failed for %s",
-                            address);
-                if (uuids)
-                    g_variant_unref(uuids);
-                g_free(alias);
-                g_free(name);
-                g_variant_unref(props);
-                g_free(device_path);
-                return NULL;
-            }
-
-            g_print("D-Bus PairAndImportDevice: Pair() failed but BlueZ now reports Paired=true for %s; continuing\n",
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "BlueZ Pair() completed but Device1.Paired is still false for %s",
                     address);
-        } else {
-            paired = true;
-        }
+        if (uuids)
+            g_variant_unref(uuids);
+        g_free(alias);
+        g_free(name);
+        g_variant_unref(props);
+        g_free(device_path);
+        return NULL;
     }
 
     if (!trusted) {
@@ -2716,20 +3051,7 @@ static GVariant *runtime_dbus_pair_and_import_device(ConfigDirRuntime *rt,
                                                    trusted,
                                                    connected,
                                                    config_path,
-                                                   "imported_restart_required");
-
-    /*
-     * Full dynamic runtime insertion will come in a later patch.  For now the
-     * daemon tells clients that the config exists but this running process has
-     * not created the ALSA/session runtime for it yet.
-     */
-    g_dbus_connection_emit_signal(rt->dbus_bus,
-                                  NULL,
-                                  "/org/midi_ble_rt/Daemon",
-                                  "org.midi_ble_rt.Daemon1",
-                                  "DeviceChanged",
-                                  g_variant_new("(@a{sv})", g_variant_ref(result)),
-                                  NULL);
+                                                   "imported");
 
     if (uuids)
         g_variant_unref(uuids);
@@ -3009,89 +3331,6 @@ static void runtime_device_disconnect_best_effort(ConfigDeviceRuntime *dev) {
     g_free(device_path);
 }
 
-static bool runtime_remove_device_from_memory(ConfigDirRuntime *rt,
-                                              ConfigDeviceRuntime *dev,
-                                              GError **error) {
-    if (!rt || !dev) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid runtime device removal");
-        return false;
-    }
-
-    guint dev_index = 0;
-    bool found_dev = false;
-
-    for (guint i = 0; rt->devices && i < rt->devices->len; i++) {
-        if (g_ptr_array_index(rt->devices, i) == dev) {
-            dev_index = i;
-            found_dev = true;
-            break;
-        }
-    }
-
-    if (!found_dev) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_FOUND,
-                    "runtime device not found in device array");
-        return false;
-    }
-
-    const MbDeviceConfig *config = dev->config;
-    guint cfg_index = 0;
-    bool found_cfg = false;
-
-    for (guint i = 0; rt->cfg.devices && i < rt->cfg.devices->len; i++) {
-        if (g_ptr_array_index(rt->cfg.devices, i) == config) {
-            cfg_index = i;
-            found_cfg = true;
-            break;
-        }
-    }
-
-    /*
-     * Stop new work for this device before freeing the object.
-     */
-    runtime_lifecycle_drop_device_commands(rt, dev);
-
-    /*
-     * Prevent future RX/TX callbacks from accepting data.  The normal session
-     * transition path also drops pending flow items; do the same here because
-     * removal is administrative, not a radio state transition.
-     */
-    g_mutex_lock(&dev->dataplane_lock);
-    dev->dataplane_streaming = false;
-    dev->dataplane_closed_epoch = dev->dataplane_epoch;
-    dev->dataplane_closed_at_ns = runtime_now_ns();
-    g_mutex_unlock(&dev->dataplane_lock);
-
-    if (dev->runtime_started)
-        mb_duplex_runtime_drop_pending(&dev->runtime);
-
-    device_stop_notify(dev);
-    runtime_remove_char_route(dev);
-    runtime_device_disconnect_best_effort(dev);
-    runtime_device_remove_alsa_port(dev);
-
-    /*
-     * g_ptr_array_remove_index() calls device_runtime_free() for rt->devices.
-     * That frees runtime-owned resources but not dev->config.
-     */
-    g_ptr_array_remove_index(rt->devices, dev_index);
-
-    /*
-     * Now it is safe to remove the config object.  rt->cfg.devices owns it.
-     */
-    if (found_cfg)
-        g_ptr_array_remove_index(rt->cfg.devices, cfg_index);
-
-    runtime_stats_export_snapshot(rt);
-    return true;
-}
-
-
 
 static void runtime_dbus_deactivate_forgotten_device(ConfigDeviceRuntime *dev) {
     if (!dev || !dev->owner)
@@ -3245,6 +3484,7 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
     }
 
     runtime_dbus_emit_device_removed(rt, resolved_id);
+    runtime_dbus_emit_catalog_changed(rt);
 
     g_free(resolved_address);
     g_free(resolved_id);
@@ -3252,6 +3492,135 @@ static bool runtime_dbus_forget_device(ConfigDirRuntime *rt,
 }
 
 
+
+
+
+typedef struct {
+    ConfigDirRuntime *rt;
+    GDBusMethodInvocation *invocation;
+    char *address;
+} RuntimePairImportTask;
+
+static void runtime_pair_import_task_free(RuntimePairImportTask *task) {
+    if (!task)
+        return;
+    g_clear_object(&task->invocation);
+    g_free(task->address);
+    g_free(task);
+}
+
+static void runtime_pair_import_task_thread(GTask *task,
+                                            gpointer source_object,
+                                            gpointer task_data,
+                                            GCancellable *cancellable) {
+    (void)source_object;
+    (void)cancellable;
+
+    RuntimePairImportTask *pair = task_data;
+    GError *error = NULL;
+    char *device_path =
+        mb_bluez_find_device_path_by_address(pair->rt->bus, pair->address);
+    if (!device_path) {
+        g_task_return_new_error(task,
+                                G_IO_ERROR,
+                                G_IO_ERROR_NOT_FOUND,
+                                "BlueZ device not found for address: %s",
+                                pair->address);
+        return;
+    }
+
+    bool ok = mb_bluez_pair_device_full(pair->rt->bus,
+                                        device_path,
+                                        &error);
+    g_free(device_path);
+
+    if (!ok) {
+        if (error)
+            g_task_return_error(task, error);
+        else
+            g_task_return_new_error(task,
+                                    G_IO_ERROR,
+                                    G_IO_ERROR_FAILED,
+                                    "BlueZ Pair() failed for %s",
+                                    pair->address);
+        return;
+    }
+
+    g_task_return_boolean(task, TRUE);
+}
+
+static void runtime_pair_import_task_done(GObject *source_object,
+                                          GAsyncResult *result,
+                                          gpointer user_data) {
+    (void)source_object;
+    (void)user_data;
+
+    GTask *task = G_TASK(result);
+    RuntimePairImportTask *pair = g_task_get_task_data(task);
+    GError *error = NULL;
+
+    if (!g_task_propagate_boolean(task, &error)) {
+        g_dbus_method_invocation_return_gerror(pair->invocation, error);
+        g_clear_error(&error);
+        return;
+    }
+
+    GVariant *device =
+        runtime_dbus_pair_and_import_device(pair->rt,
+                                            pair->address,
+                                            &error);
+    if (!device) {
+        if (error)
+            g_dbus_method_invocation_return_gerror(pair->invocation, error);
+        else
+            g_dbus_method_invocation_return_error(pair->invocation,
+                                                  G_IO_ERROR,
+                                                  G_IO_ERROR_FAILED,
+                                                  "PairAndImportDevice failed");
+        g_clear_error(&error);
+        return;
+    }
+
+    ConfigDeviceRuntime *dev =
+        runtime_dbus_activate_imported_device(pair->rt, device, &error);
+    if (!dev) {
+        if (error)
+            g_dbus_method_invocation_return_gerror(pair->invocation, error);
+        else
+            g_dbus_method_invocation_return_error(pair->invocation,
+                                                  G_IO_ERROR,
+                                                  G_IO_ERROR_FAILED,
+                                                  "imported device runtime activation failed");
+        g_clear_error(&error);
+        g_variant_unref(device);
+        return;
+    }
+
+    runtime_dbus_emit_device_changed(dev);
+    runtime_dbus_emit_catalog_changed(pair->rt);
+    g_dbus_method_invocation_return_value(pair->invocation,
+                                          g_variant_new("(@a{sv})", device));
+}
+
+static void runtime_dbus_start_pair_and_import(
+    ConfigDirRuntime *rt,
+    const char *address,
+    GDBusMethodInvocation *invocation) {
+    RuntimePairImportTask *pair = g_new0(RuntimePairImportTask, 1);
+    pair->rt = rt;
+    pair->address = g_strdup(address);
+    pair->invocation = g_object_ref(invocation);
+
+    GTask *task = g_task_new(NULL,
+                             NULL,
+                             runtime_pair_import_task_done,
+                             NULL);
+    g_task_set_task_data(task,
+                         pair,
+                         (GDestroyNotify)runtime_pair_import_task_free);
+    g_task_run_in_thread(task, runtime_pair_import_task_thread);
+    g_object_unref(task);
+}
 
 
 static void runtime_dbus_handle_method_call(GDBusConnection *connection,
@@ -3296,6 +3665,15 @@ static void runtime_dbus_handle_method_call(GDBusConnection *connection,
         return;
     }
 
+    if (g_strcmp0(method_name, "GetBluetoothState") == 0) {
+        runtime_bluez_state_refresh(rt, false);
+        g_dbus_method_invocation_return_value(
+            invocation,
+            g_variant_new("(@a{sv})",
+                          runtime_dbus_bluetooth_state_to_variant(rt)));
+        return;
+    }
+
     if (g_strcmp0(method_name, "ScanDevices") == 0) {
         guint timeout_seconds = 0;
         g_variant_get(parameters, "(u)", &timeout_seconds);
@@ -3323,22 +3701,15 @@ static void runtime_dbus_handle_method_call(GDBusConnection *connection,
         const char *address = NULL;
         g_variant_get(parameters, "(&s)", &address);
 
-        GError *error = NULL;
-        GVariant *device = runtime_dbus_pair_and_import_device(rt, address, &error);
-        if (!device) {
+        if (!address || !*address) {
             g_dbus_method_invocation_return_error(invocation,
-                                                  error ? error->domain : G_IO_ERROR,
-                                                  error ? error->code : G_IO_ERROR_FAILED,
-                                                  "%s",
-                                                  error && error->message
-                                                      ? error->message
-                                                      : "PairAndImportDevice failed");
-            g_clear_error(&error);
+                                                  G_IO_ERROR,
+                                                  G_IO_ERROR_INVALID_ARGUMENT,
+                                                  "device address is required");
             return;
         }
 
-        g_dbus_method_invocation_return_value(invocation,
-                                              g_variant_new("(@a{sv})", device));
+        runtime_dbus_start_pair_and_import(rt, address, invocation);
         return;
     }
 
@@ -4016,6 +4387,8 @@ static void runtime_cleanup(ConfigDirRuntime *rt) {
         rt->stats_source_id = 0;
     }
 
+    runtime_bluez_state_stop(rt);
+    mb_bluez_agent_stop(&rt->bluez_agent);
     runtime_stop_dbus_service(rt);
 
     if (rt->sigint_source_id)
@@ -4111,6 +4484,17 @@ static int run_config_directory_mode(const char *config_dir) {
     runtime_stats_export_snapshot(&rt);
 
     rt.loop = g_main_loop_new(NULL, FALSE);
+
+    GError *agent_error = NULL;
+    if (!mb_bluez_agent_start(&rt.bluez_agent,
+                              rt.bus,
+                              &agent_error)) {
+        g_printerr("BlueZ Agent1 unavailable: %s\n",
+                   agent_error && agent_error->message
+                       ? agent_error->message
+                       : "unknown error");
+        g_clear_error(&agent_error);
+    }
     rt.sigint_source_id = g_unix_signal_add(SIGINT, quit_main_loop, &rt);
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
     rt.reconnect_source_id = g_timeout_add(MB_RECONNECT_INTERVAL_MS, runtime_reconnect_cb, &rt);
@@ -4121,8 +4505,11 @@ static int run_config_directory_mode(const char *config_dir) {
                                            &rt);
     runtime_start_control_socket(&rt);
 
-    if (!runtime_start_dbus_service(&rt))
+    if (!runtime_start_dbus_service(&rt)) {
         g_printerr("D-Bus API disabled; continuing with legacy control socket.\n");
+    } else {
+        runtime_bluez_state_start(&rt);
+    }
 
     print_config_dir_devices(&rt, config_dir);
     runtime_start_configured_devices(&rt);

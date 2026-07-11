@@ -105,32 +105,111 @@ bool mb_bluez_set_device_trusted(GDBusConnection *bus, const char *device_path) 
     return true;
 }
 
-bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
+bool mb_bluez_pair_device_full(GDBusConnection *bus,
+                               const char *device_path,
+                               GError **error) {
+    if (!bus || !device_path || !*device_path) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid BlueZ Pair() request");
+        return false;
+    }
+
     bool paired = false;
-    if (mb_bluez_get_device_bool_property(bus, device_path, "Paired", &paired) && paired) {
+    if (mb_bluez_get_device_bool_property(bus,
+                                          device_path,
+                                          "Paired",
+                                          &paired) &&
+        paired) {
         g_print("Device already paired.\n");
         return true;
     }
 
-    GError *error = NULL;
-    GVariant *ret = g_dbus_connection_call_sync(
-        bus, BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_PAIR_TIMEOUT_MS, NULL, &error);
+    for (unsigned attempt = 1; attempt <= 2; attempt++) {
+        GError *call_error = NULL;
+        GVariant *ret =
+            g_dbus_connection_call_sync(bus,
+                                        BLUEZ_BUS,
+                                        device_path,
+                                        DEVICE_IFACE,
+                                        "Pair",
+                                        NULL,
+                                        NULL,
+                                        G_DBUS_CALL_FLAGS_NONE,
+                                        MB_BLUEZ_PAIR_TIMEOUT_MS,
+                                        NULL,
+                                        &call_error);
 
-    if (!ret) {
-        const char *remote = g_dbus_error_get_remote_error(error);
+        if (ret) {
+            g_variant_unref(ret);
+            g_print("Device Pair() ok.\n");
+            return true;
+        }
+
+        const char *remote =
+            call_error ? g_dbus_error_get_remote_error(call_error) : NULL;
+
+        if (remote &&
+            g_strcmp0(remote, "org.bluez.Error.AlreadyExists") == 0) {
+            g_clear_error(&call_error);
+            g_print("Device already paired according to BlueZ.\n");
+            return true;
+        }
+
+        paired = false;
+        if (mb_bluez_get_device_bool_property(bus,
+                                              device_path,
+                                              "Paired",
+                                              &paired) &&
+            paired) {
+            g_clear_error(&call_error);
+            g_print("Device Pair() returned an error but Paired=true.\n");
+            return true;
+        }
+
+        bool retryable =
+            remote &&
+            (g_strcmp0(remote, "org.bluez.Error.AuthenticationCanceled") == 0 ||
+             g_strcmp0(remote, "org.bluez.Error.InProgress") == 0);
+
+        if (retryable && attempt < 2) {
+            g_printerr("Device Pair() transient failure: remote=%s message=%s\n",
+                       remote,
+                       call_error && call_error->message
+                           ? call_error->message
+                           : "unknown error");
+            g_clear_error(&call_error);
+            g_usleep(1200 * G_TIME_SPAN_MILLISECOND);
+            continue;
+        }
 
         g_printerr("Device Pair() failed: remote=%s message=%s\n",
                    remote && *remote ? remote : "-",
-                   error && error->message ? error->message : "unknown error");
+                   call_error && call_error->message
+                       ? call_error->message
+                       : "unknown error");
 
-        g_clear_error(&error);
+        if (error)
+            g_propagate_error(error, call_error);
+        else
+            g_clear_error(&call_error);
+
         return false;
     }
 
-    g_variant_unref(ret);
-    g_print("Device Pair() ok.\n");
-    return true;
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_FAILED,
+                "BlueZ Pair() failed");
+    return false;
+}
+
+bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
+    GError *error = NULL;
+    bool ok = mb_bluez_pair_device_full(bus, device_path, &error);
+    g_clear_error(&error);
+    return ok;
 }
 
 static bool bluez_device_is_connected(GDBusConnection *bus, const char *device_path) {
