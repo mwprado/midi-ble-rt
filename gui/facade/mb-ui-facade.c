@@ -1097,91 +1097,16 @@ void mb_ui_facade_free(MbUiFacade *facade) {
 bool mb_ui_facade_scan_devices(MbUiFacade *facade,
                                unsigned timeout_seconds,
                                GError **error) {
-    if (!facade) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid UI facade");
-        return false;
-    }
+    (void)facade;
+    (void)timeout_seconds;
 
-    if (timeout_seconds < 1)
-        timeout_seconds = 1;
-    if (timeout_seconds > 60)
-        timeout_seconds = 60;
-
-    char timeout_buf[16];
-    g_snprintf(timeout_buf, sizeof(timeout_buf), "%u", timeout_seconds);
-
-    g_printerr("[midi-ble-rt-gui] scan: %s scan --timeout %s --midi-only\n",
-               facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-               timeout_buf);
-
-    char *argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "scan",
-        "--timeout",
-        timeout_buf,
-        "--midi-only",
-        NULL,
-    };
-
-    char *stdout_text = NULL;
-    char *stderr_text = NULL;
-    int wait_status = 0;
-
-    gboolean ok = g_spawn_sync(NULL,
-                               argv,
-                               NULL,
-                               G_SPAWN_SEARCH_PATH,
-                               NULL,
-                               NULL,
-                               &stdout_text,
-                               &stderr_text,
-                               &wait_status,
-                               error);
-
-    if (!ok) {
-        if (error && *error)
-            ui_log_backend_error("scan", *error);
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return false;
-    }
-
-    if (!g_spawn_check_wait_status(wait_status, error)) {
-        if (stderr_text && *stderr_text) {
-            g_strchomp(stderr_text);
-            g_printerr("[midi-ble-rt-gui] scan stderr: %s\n", stderr_text);
-
-            if (error && *error) {
-                g_prefix_error(error, "%s: ", stderr_text);
-            }
-        }
-
-        if (error && *error)
-            ui_log_backend_error("scan", *error);
-
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return false;
-    }
-
-    if (stdout_text && *stdout_text) {
-        g_strchomp(stdout_text);
-        g_printerr("[midi-ble-rt-gui] scan output:\n%s\n", stdout_text);
-        parse_scan_output_into_cache(facade, stdout_text);
-    }
-
-    if (stderr_text && *stderr_text) {
-        g_strchomp(stderr_text);
-        g_printerr("[midi-ble-rt-gui] scan stderr:\n%s\n", stderr_text);
-    }
-
-    g_free(stdout_text);
-    g_free(stderr_text);
-    return true;
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_NOT_SUPPORTED,
+                "scan via GUI requires daemon D-Bus ScanDevices support");
+    return false;
 }
+
 
 
 MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
@@ -1344,9 +1269,10 @@ bool mb_ui_facade_scan(MbUiFacade *facade, GError **error) {
     g_set_error(error,
                 G_IO_ERROR,
                 G_IO_ERROR_NOT_SUPPORTED,
-                "scan/import via GUI requires daemon D-Bus ScanDevices/ImportDevice support");
+                "scan via GUI requires daemon D-Bus ScanDevices support");
     return false;
 }
+
 
 bool mb_ui_facade_save_device_config(MbUiFacade *facade,
                                      const MbUiDevice *device,
@@ -1873,134 +1799,30 @@ bool mb_ui_facade_remove_imported_device(MbUiFacade *facade,
 bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
                                         const char *device_id,
                                         GError **error) {
-    PairEnrollDevice device = {0};
+    (void)facade;
+    (void)device_id;
 
-    if (!capture_pair_enroll_device(facade, device_id, &device, error))
-        return false;
-
-    /*
-     * Import means: BlueZ already knows/pairs the device.
-     * Do not Pair() here. Only trust + configure when no local config exists.
-     */
-    char *trust_argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "trust",
-        device.address,
-        NULL,
-    };
-
-    if (!run_ctl_argv_checked(facade, "trust imported device", trust_argv, error)) {
-        pair_enroll_device_clear(&device);
-        return false;
-    }
-
-    if (!imported_config_exists_for_address(device.address)) {
-        char *configure_argv[] = {
-            facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-            "configure",
-            device.address,
-            "--profile",
-            device.profile,
-            NULL,
-        };
-
-        if (!run_ctl_argv_checked(facade, "configure imported device", configure_argv, error)) {
-            pair_enroll_device_clear(&device);
-            return false;
-        }
-    } else {
-        g_printerr("[midi-ble-rt-gui] import: local config already exists for %s; not rewriting\n",
-                   device.address ? device.address : "-");
-    }
-
-    GError *recheck_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-recheck", device.address, NULL, &recheck_error);
-    g_free(ignored);
-
-    if (recheck_error) {
-        g_printerr("[midi-ble-rt-gui] import: daemon-recheck skipped/failed: %s\n",
-                   recheck_error->message ? recheck_error->message : "unknown error");
-        g_clear_error(&recheck_error);
-    }
-
-    g_printerr("[midi-ble-rt-gui] import: enrolled %s address=%s profile=%s\n",
-               device.name ? device.name : "-",
-               device.address ? device.address : "-",
-               device.profile ? device.profile : "-");
-
-    pair_enroll_device_clear(&device);
-    return true;
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_NOT_SUPPORTED,
+                "import via GUI requires daemon D-Bus ImportDevice support");
+    return false;
 }
+
 
 
 bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,
                                       GError **error) {
-    PairEnrollDevice device = {0};
+    (void)facade;
+    (void)device_id;
 
-    if (!capture_pair_enroll_device(facade, device_id, &device, error))
-        return false;
-
-    char *pair_argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "pair",
-        device.address,
-        NULL,
-    };
-
-    if (!run_ctl_argv_checked(facade, "pair scanned device", pair_argv, error)) {
-        pair_enroll_device_clear(&device);
-        return false;
-    }
-
-    char *trust_argv[] = {
-        facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-        "trust",
-        device.address,
-        NULL,
-    };
-
-    if (!run_ctl_argv_checked(facade, "trust paired device", trust_argv, error)) {
-        pair_enroll_device_clear(&device);
-        return false;
-    }
-
-    if (!imported_config_exists_for_address(device.address)) {
-        char *configure_argv[] = {
-            facade->ctl_path ? facade->ctl_path : "midi-ble-rtctl",
-            "configure",
-            device.address,
-            "--profile",
-            device.profile,
-            NULL,
-        };
-
-        if (!run_ctl_argv_checked(facade, "configure paired device", configure_argv, error)) {
-            pair_enroll_device_clear(&device);
-            return false;
-        }
-    } else {
-        g_printerr("[midi-ble-rt-gui] pair: local config already exists for %s; not rewriting\n",
-                   device.address ? device.address : "-");
-    }
-
-    GError *recheck_error = NULL;
-    char *ignored = run_ctl(facade, "daemon-recheck", device.address, NULL, &recheck_error);
-    g_free(ignored);
-
-    if (recheck_error) {
-        g_printerr("[midi-ble-rt-gui] pair: daemon-recheck skipped/failed: %s\n",
-                   recheck_error->message ? recheck_error->message : "unknown error");
-        g_clear_error(&recheck_error);
-    }
-
-    g_printerr("[midi-ble-rt-gui] pair: enrolled %s address=%s profile=%s\n",
-               device.name ? device.name : "-",
-               device.address ? device.address : "-",
-               device.profile ? device.profile : "-");
-
-    pair_enroll_device_clear(&device);
-    return true;
+    g_set_error(error,
+                G_IO_ERROR,
+                G_IO_ERROR_NOT_SUPPORTED,
+                "pair/import via GUI requires daemon D-Bus PairAndImportDevice support");
+    return false;
 }
+
 
 
