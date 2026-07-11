@@ -118,7 +118,12 @@ bool mb_bluez_pair_device(GDBusConnection *bus, const char *device_path) {
         NULL, NULL, G_DBUS_CALL_FLAGS_NONE, MB_BLUEZ_PAIR_TIMEOUT_MS, NULL, &error);
 
     if (!ret) {
-        g_printerr("Device Pair() failed: %s\n", error->message);
+        const char *remote = g_dbus_error_get_remote_error(error);
+
+        g_printerr("Device Pair() failed: remote=%s message=%s\n",
+                   remote && *remote ? remote : "-",
+                   error && error->message ? error->message : "unknown error");
+
         g_clear_error(&error);
         return false;
     }

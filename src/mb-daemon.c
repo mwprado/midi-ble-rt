@@ -2617,20 +2617,51 @@ static GVariant *runtime_dbus_pair_and_import_device(ConfigDirRuntime *rt,
     if (!paired) {
         g_print("D-Bus PairAndImportDevice: pairing %s\n", address);
         if (!mb_bluez_pair_device(rt->bus, device_path)) {
-            g_set_error(error,
-                        G_IO_ERROR,
-                        G_IO_ERROR_FAILED,
-                        "BlueZ Pair() failed for %s",
-                        address);
-            if (uuids)
-                g_variant_unref(uuids);
-            g_free(alias);
-            g_free(name);
-            g_variant_unref(props);
-            g_free(device_path);
-            return NULL;
+            /*
+             * Pair() is not always a reliable final-state signal for BLE-MIDI
+             * devices.  BlueZ may fail the method while the device state has
+             * already changed, or while the device is otherwise usable.
+             *
+             * Re-read Device1.Paired before failing.  The GUI import path must
+             * be idempotent: only abort if the authoritative post-Pair state is
+             * still unpaired.
+             */
+            GError *refresh_error = NULL;
+            GVariant *fresh_props = runtime_dbus_get_bluez_device_props(rt,
+                                                                         device_path,
+                                                                         &refresh_error);
+            if (fresh_props) {
+                paired = runtime_dbus_bluez_get_bool(fresh_props, "Paired", false);
+                trusted = runtime_dbus_bluez_get_bool(fresh_props, "Trusted", trusted);
+                connected = runtime_dbus_bluez_get_bool(fresh_props, "Connected", connected);
+                g_variant_unref(fresh_props);
+            } else {
+                g_printerr("D-Bus PairAndImportDevice: failed to refresh BlueZ state after Pair() failure for %s: %s\n",
+                           address,
+                           refresh_error && refresh_error->message ? refresh_error->message : "unknown error");
+                g_clear_error(&refresh_error);
+            }
+
+            if (!paired) {
+                g_set_error(error,
+                            G_IO_ERROR,
+                            G_IO_ERROR_FAILED,
+                            "BlueZ Pair() failed for %s",
+                            address);
+                if (uuids)
+                    g_variant_unref(uuids);
+                g_free(alias);
+                g_free(name);
+                g_variant_unref(props);
+                g_free(device_path);
+                return NULL;
+            }
+
+            g_print("D-Bus PairAndImportDevice: Pair() failed but BlueZ now reports Paired=true for %s; continuing\n",
+                    address);
+        } else {
+            paired = true;
         }
-        paired = true;
     }
 
     if (!trusted) {

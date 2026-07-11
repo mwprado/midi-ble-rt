@@ -13,6 +13,7 @@ typedef struct {
     MbUiSnapshot *snapshot;
 
     bool refresh_in_flight;
+    bool refresh_pending;
     bool scan_in_flight;
     bool command_in_flight;
 
@@ -1175,13 +1176,24 @@ static void refresh_task_done(GObject *source_object,
 
     set_label(state->last_scan_label, "Catálogo atualizado agora");
     rebuild_sidebar(state);
+
+    if (state->refresh_pending) {
+        state->refresh_pending = false;
+        mb_gnome_window_refresh(state);
+    }
 }
 
 
 static void mb_gnome_window_refresh(MbGnomeWindowState *state) {
-    if (!state || state->refresh_in_flight)
+    if (!state)
         return;
 
+    if (state->refresh_in_flight) {
+        state->refresh_pending = true;
+        return;
+    }
+
+    state->refresh_pending = false;
     state->refresh_in_flight = true;
 
     GTask *task = g_task_new(G_OBJECT(state->window), NULL, refresh_task_done, state);
@@ -1663,14 +1675,21 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
     if (!state)
         return;
 
-    if (!state->bluez_available || !state->bluez_powered) {
+    /*
+     * The GUI is a daemon client.
+     *
+     * Do not gate scan on the GUI-side BlueZ observer.  Bluetooth availability,
+     * adapter power, discovery state and BlueZ errors are daemon-owned concerns
+     * and must be reported by ScanDevices() through the D-Bus facade.
+     */
+    if (!state->daemon_functional) {
         show_error_dialog(state,
-                          "Bluetooth indisponível",
-                          "Ligue o Bluetooth antes de buscar instrumentos BLE-MIDI.");
+                          "Serviço MIDI-BLE inativo",
+                          "Inicie o serviço MIDI-BLE antes de buscar instrumentos.");
         return;
     }
 
-    if (state->bluez_discovering)
+    if (state->scan_in_flight)
         return;
 
     show_scan_pair_dialog(state);
