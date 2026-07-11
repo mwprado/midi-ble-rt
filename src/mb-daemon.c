@@ -3313,25 +3313,6 @@ static void runtime_device_remove_alsa_port(ConfigDeviceRuntime *dev) {
     dev->alsa_port = -1;
 }
 
-static void runtime_device_disconnect_best_effort(ConfigDeviceRuntime *dev) {
-    if (!dev || !dev->owner || !dev->owner->bus)
-        return;
-
-    char *device_path = device_dup_device_path(dev);
-
-    if (device_path &&
-        *device_path &&
-        !g_str_has_prefix(device_path, "config:")) {
-        if (!mb_bluez_disconnect_device(dev->owner->bus, device_path)) {
-            g_printerr("ForgetDevice: best-effort disconnect failed for %s\n",
-                       device_label(dev));
-        }
-    }
-
-    g_free(device_path);
-}
-
-
 static void runtime_dbus_deactivate_forgotten_device(ConfigDeviceRuntime *dev) {
     if (!dev || !dev->owner)
         return;
@@ -3356,36 +3337,7 @@ static void runtime_dbus_deactivate_forgotten_device(ConfigDeviceRuntime *dev) {
     dev->dataplane_closed_at_ns = runtime_now_ns();
     g_mutex_unlock(&dev->dataplane_lock);
 
-    if (dev->alsa_port >= 0) {
-        int old_port = dev->alsa_port;
-
-        if (rt->device_by_alsa_port)
-            g_hash_table_remove(rt->device_by_alsa_port,
-                                GINT_TO_POINTER(dev->alsa_port));
-
-        g_mutex_lock(&rt->alsa_lock);
-
-        if (dev->session)
-            mb_session_set_alsa_port(dev->session, -1);
-
-        if (rt->seq) {
-            int r = snd_seq_delete_simple_port(rt->seq, dev->alsa_port);
-            if (r < 0) {
-                g_printerr("ForgetDevice: could not delete ALSA port for %s: %s\n",
-                           device_label(dev),
-                           snd_strerror(r));
-            } else {
-                g_print("ForgetDevice: ALSA port removed for %s: %d\n",
-                        device_label(dev),
-                        old_port);
-            }
-        }
-
-        dev->alsa_port = -1;
-
-        g_mutex_unlock(&rt->alsa_lock);
-    }
-
+    runtime_device_remove_alsa_port(dev);
     runtime_stats_export_snapshot(rt);
 }
 

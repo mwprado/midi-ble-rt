@@ -9,7 +9,6 @@
 #include <string.h>
 
 struct _MbUiFacade {
-    char *ctl_path;
     GPtrArray *scan_devices;
 };
 
@@ -177,63 +176,6 @@ static char *key_file_get_first_optional_string(GKeyFile *key,
     return key_file_get_optional_string(key, group2, name2);
 }
 
-
-static char *run_ctl(MbUiFacade *facade,
-                     const char *arg1,
-                     const char *arg2,
-                     const char *arg3,
-                     GError **error) {
-    if (!facade || !facade->ctl_path || !arg1) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid UI façade command");
-        return NULL;
-    }
-
-    GPtrArray *argv = g_ptr_array_new();
-    g_ptr_array_add(argv, facade->ctl_path);
-    g_ptr_array_add(argv, (char *)arg1);
-    if (arg2)
-        g_ptr_array_add(argv, (char *)arg2);
-    if (arg3)
-        g_ptr_array_add(argv, (char *)arg3);
-    g_ptr_array_add(argv, NULL);
-
-    char *stdout_text = NULL;
-    char *stderr_text = NULL;
-    int wait_status = 0;
-
-    gboolean ok = g_spawn_sync(NULL,
-                               (char **)argv->pdata,
-                               NULL,
-                               G_SPAWN_SEARCH_PATH,
-                               NULL,
-                               NULL,
-                               &stdout_text,
-                               &stderr_text,
-                               &wait_status,
-                               error);
-
-    g_ptr_array_free(argv, TRUE);
-
-    if (!ok) {
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return NULL;
-    }
-
-    if (!g_spawn_check_wait_status(wait_status, error)) {
-        if (stderr_text && *stderr_text)
-            g_prefix_error(error, "%s: ", g_strstrip(stderr_text));
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return NULL;
-    }
-
-    g_free(stderr_text);
-    return stdout_text;
-}
 
 static char *sanitize_device_id(const char *device_id) {
     if (!device_id || !*device_id)
@@ -732,7 +674,6 @@ static char *device_config_path(const MbUiDevice *device, GError **error) {
 
 MbUiFacade *mb_ui_facade_new(void) {
     MbUiFacade *facade = g_new0(MbUiFacade, 1);
-    facade->ctl_path = g_strdup("midi-ble-rtctl");
     facade->scan_devices = g_ptr_array_new_with_free_func((GDestroyNotify)mb_ui_device_free);
     return facade;
 }
@@ -741,7 +682,6 @@ void mb_ui_facade_free(MbUiFacade *facade) {
     if (!facade)
         return;
 
-    g_free(facade->ctl_path);
     if (facade->scan_devices)
         g_ptr_array_unref(facade->scan_devices);
     g_free(facade);
