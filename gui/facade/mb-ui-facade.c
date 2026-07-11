@@ -25,7 +25,6 @@ void mb_ui_device_config_defaults(MbUiDeviceConfig *config) {
 }
 
 
-
 static void ui_log_backend_error(const char *context, const GError *error) {
     g_printerr("[midi-ble-rt-gui] %s failed: %s\n",
                context ? context : "backend command",
@@ -40,46 +39,10 @@ static const char *safe_str(const char *s, const char *fallback) {
     return s && *s ? s : fallback;
 }
 
+static bool facade_load_scan_devices_from_daemon_dbus(MbUiFacade *facade,
+                                                      unsigned timeout_seconds,
+                                                      GError **error);
 
-static char *scan_field_dup(const char *line, size_t start, size_t end) {
-    size_t len = strlen(line);
-    if (start >= len)
-        return g_strdup("");
-
-    if (end > len)
-        end = len;
-
-    while (start < end && g_ascii_isspace(line[start]))
-        start++;
-    while (end > start && g_ascii_isspace(line[end - 1]))
-        end--;
-
-    return g_strndup(line + start, end - start);
-}
-
-
-static bool scan_bool_value(const char *value) {
-    return value &&
-           (g_ascii_strcasecmp(value, "yes") == 0 ||
-            g_ascii_strcasecmp(value, "true") == 0 ||
-            g_ascii_strcasecmp(value, "1") == 0);
-}
-
-static bool looks_like_bt_address(const char *s) {
-    if (!s || strlen(s) < 17)
-        return false;
-
-    for (int i = 0; i < 17; i++) {
-        if ((i + 1) % 3 == 0) {
-            if (s[i] != ':')
-                return false;
-        } else if (!g_ascii_isxdigit(s[i])) {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 static char *scan_device_id_from_name_address(const char *name, const char *address) {
     const char *base = name && *name ? name : address;
@@ -144,113 +107,6 @@ static bool snapshot_has_device_address_or_id(MbUiSnapshot *snapshot,
     }
 
     return false;
-}
-
-static void parse_scan_output_into_cache(MbUiFacade *facade, const char *text) {
-    if (!facade || !facade->scan_devices)
-        return;
-
-    g_ptr_array_set_size(facade->scan_devices, 0);
-
-    if (!text || !*text)
-        return;
-
-    char **lines = g_strsplit(text, "\n", -1);
-
-    size_t name_start = 0;
-    size_t alias_start = 0;
-    size_t paired_start = 0;
-    size_t trusted_start = 0;
-    size_t connected_start = 0;
-    size_t gatt_start = 0;
-    size_t uuid_start = 0;
-    size_t profile_start = 0;
-    bool have_header = false;
-
-    for (guint i = 0; lines && lines[i]; i++) {
-        const char *line = lines[i];
-
-        if (g_str_has_prefix(line, "ADDRESS")) {
-            const char *p_name = strstr(line, "NAME");
-            const char *p_alias = strstr(line, "ALIAS");
-            const char *p_paired = strstr(line, "PAIRED");
-            const char *p_trusted = strstr(line, "TRUSTED");
-            const char *p_connected = strstr(line, "CONNECTED");
-            const char *p_gatt = strstr(line, "GATT");
-            const char *p_uuid = strstr(line, "UUID-HINT");
-            const char *p_profile = strstr(line, "PROFILE");
-
-            if (p_name && p_alias && p_paired && p_trusted &&
-                p_connected && p_gatt && p_uuid && p_profile) {
-                name_start = (size_t)(p_name - line);
-                alias_start = (size_t)(p_alias - line);
-                paired_start = (size_t)(p_paired - line);
-                trusted_start = (size_t)(p_trusted - line);
-                connected_start = (size_t)(p_connected - line);
-                gatt_start = (size_t)(p_gatt - line);
-                uuid_start = (size_t)(p_uuid - line);
-                profile_start = (size_t)(p_profile - line);
-                have_header = true;
-            }
-
-            continue;
-        }
-
-        if (!have_header)
-            continue;
-
-        if (!looks_like_bt_address(line))
-            continue;
-
-        char *address = g_strndup(line, 17);
-        char *name = scan_field_dup(line, name_start, alias_start);
-        char *paired = scan_field_dup(line, paired_start, trusted_start);
-        char *trusted = scan_field_dup(line, trusted_start, connected_start);
-        char *connected = scan_field_dup(line, connected_start, gatt_start);
-        char *gatt = scan_field_dup(line, gatt_start, uuid_start);
-        char *uuid_hint = scan_field_dup(line, uuid_start, profile_start);
-        char *profile = scan_field_dup(line, profile_start, strlen(line));
-
-        if (!name || !*name) {
-            g_free(name);
-            name = g_strdup(address);
-        }
-
-        bool is_midi = false;
-        if (uuid_hint && g_strrstr(uuid_hint, "ble-midi"))
-            is_midi = true;
-        if (profile && g_strcmp0(profile, "-") != 0 && *profile)
-            is_midi = true;
-
-        if (is_midi) {
-            char *id = scan_device_id_from_name_address(name, address);
-            MbUiDevice *device = mb_ui_device_new(id,
-                                                  address,
-                                                  name,
-                                                  "IDLE",
-                                                  -1);
-            device->paired = scan_bool_value(paired);
-            device->trusted = scan_bool_value(trusted);
-            device->connected = scan_bool_value(connected);
-            device->gatt_resolved = scan_bool_value(gatt);
-            device->profile = g_strdup(profile && g_strcmp0(profile, "-") != 0
-                                       ? profile
-                                       : "standard_ble_midi");
-            g_ptr_array_add(facade->scan_devices, device);
-            g_free(id);
-        }
-
-        g_free(profile);
-        g_free(uuid_hint);
-        g_free(gatt);
-        g_free(connected);
-        g_free(trusted);
-        g_free(paired);
-        g_free(name);
-        g_free(address);
-    }
-
-    g_strfreev(lines);
 }
 
 static void merge_scan_cache_into_snapshot(MbUiFacade *facade, MbUiSnapshot *snapshot) {
@@ -322,90 +178,6 @@ static char *key_file_get_first_optional_string(GKeyFile *key,
     return key_file_get_optional_string(key, group2, name2);
 }
 
-
-
-static bool run_ctl_argv_checked(MbUiFacade *facade,
-                                 const char *context,
-                                 char **argv,
-                                 GError **error) {
-    (void)facade;
-
-    char *stdout_text = NULL;
-    char *stderr_text = NULL;
-    int wait_status = 0;
-
-    if (!argv || !argv[0]) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "invalid ctl argv");
-        return false;
-    }
-
-    g_printerr("[midi-ble-rt-gui] %s:", context ? context : "midi-ble-rtctl");
-    for (guint i = 0; argv[i]; i++)
-        g_printerr(" %s", argv[i]);
-    g_printerr("\n");
-
-    gboolean ok = g_spawn_sync(NULL,
-                               argv,
-                               NULL,
-                               G_SPAWN_SEARCH_PATH,
-                               NULL,
-                               NULL,
-                               &stdout_text,
-                               &stderr_text,
-                               &wait_status,
-                               error);
-
-    if (!ok) {
-        if (error && *error)
-            ui_log_backend_error(context ? context : "midi-ble-rtctl", *error);
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return false;
-    }
-
-    if (!g_spawn_check_wait_status(wait_status, error)) {
-        if (stderr_text && *stderr_text) {
-            g_strchomp(stderr_text);
-            g_printerr("[midi-ble-rt-gui] %s stderr: %s\n",
-                       context ? context : "midi-ble-rtctl",
-                       stderr_text);
-            if (error && *error)
-                g_prefix_error(error, "%s: ", stderr_text);
-        }
-
-        if (stdout_text && *stdout_text) {
-            g_strchomp(stdout_text);
-            g_printerr("[midi-ble-rt-gui] %s output:\n%s\n",
-                       context ? context : "midi-ble-rtctl",
-                       stdout_text);
-        }
-
-        if (error && *error)
-            ui_log_backend_error(context ? context : "midi-ble-rtctl", *error);
-
-        g_free(stdout_text);
-        g_free(stderr_text);
-        return false;
-    }
-
-    if (stdout_text && *stdout_text) {
-        g_strchomp(stdout_text);
-        g_printerr("[midi-ble-rt-gui] %s output:\n%s\n",
-                   context ? context : "midi-ble-rtctl",
-                   stdout_text);
-    }
-
-    if (stderr_text && *stderr_text) {
-        g_strchomp(stderr_text);
-        g_printerr("[midi-ble-rt-gui] %s stderr:\n%s\n",
-                   context ? context : "midi-ble-rtctl",
-                   stderr_text);
-    }
-
-    g_free(stdout_text);
-    g_free(stderr_text);
-    return true;
-}
 
 static char *run_ctl(MbUiFacade *facade,
                      const char *arg1,
@@ -496,7 +268,6 @@ static char *sanitize_device_id(const char *device_id) {
 
     return g_string_free(out, FALSE);
 }
-
 
 
 static bool facade_variant_dict_lookup_bool(GVariant *dict,
@@ -723,122 +494,6 @@ static bool facade_load_snapshot_from_daemon_dbus(MbUiSnapshot *snapshot,
     }
 
     return true;
-}
-
-
-static void overlay_bluez_pairing_state(MbUiSnapshot *catalog) {
-    if (!catalog || !catalog->devices || catalog->devices->len == 0)
-        return;
-
-    GError *error = NULL;
-    GDBusConnection *connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-    if (!connection) {
-        g_printerr("[midi-ble-rt-gui] BlueZ catalog overlay skipped: %s\n",
-                   error && error->message ? error->message : "unknown error");
-        g_clear_error(&error);
-        return;
-    }
-
-    GVariant *reply = g_dbus_connection_call_sync(connection,
-                                                  "org.bluez",
-                                                  "/",
-                                                  "org.freedesktop.DBus.ObjectManager",
-                                                  "GetManagedObjects",
-                                                  NULL,
-                                                  G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-                                                  G_DBUS_CALL_FLAGS_NONE,
-                                                  -1,
-                                                  NULL,
-                                                  &error);
-    if (!reply) {
-        g_printerr("[midi-ble-rt-gui] BlueZ catalog overlay skipped: %s\n",
-                   error && error->message ? error->message : "unknown error");
-        g_clear_error(&error);
-        g_object_unref(connection);
-        return;
-    }
-
-    GVariant *objects = NULL;
-    g_variant_get(reply, "(@a{oa{sa{sv}}})", &objects);
-
-    GVariantIter object_iter;
-    const char *path = NULL;
-    GVariant *ifaces = NULL;
-
-    g_variant_iter_init(&object_iter, objects);
-    while (g_variant_iter_next(&object_iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
-        GVariant *props = g_variant_lookup_value(ifaces,
-                                                  "org.bluez.Device1",
-                                                  G_VARIANT_TYPE("a{sv}"));
-        if (!props) {
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        char *address = facade_variant_dict_dup_string(props, "Address");
-        if (!address || !*address) {
-            g_free(address);
-            g_variant_unref(props);
-            g_variant_unref(ifaces);
-            continue;
-        }
-
-        bool paired = false;
-        bool connected = false;
-        bool trusted = false;
-
-        bool have_paired = facade_variant_dict_lookup_bool(props, "Paired", &paired);
-        bool have_connected = facade_variant_dict_lookup_bool(props, "Connected", &connected);
-        bool have_trusted = facade_variant_dict_lookup_bool(props, "Trusted", &trusted);
-
-        for (guint i = 0; i < catalog->devices->len; i++) {
-            MbUiDevice *device = g_ptr_array_index(catalog->devices, i);
-            if (!device || !device->address)
-                continue;
-
-            if (g_ascii_strcasecmp(device->address, address) != 0)
-                continue;
-
-            if (have_paired)
-                device->paired = paired;
-            if (have_connected)
-                device->connected = connected;
-            if (have_trusted)
-                device->trusted = trusted;
-
-            /*
-             * BlueZ overlay only expresses external Bluetooth state.
-             * Daemon overlay may later replace this with STREAMING/ERROR/etc.
-             */
-            if (have_connected && connected) {
-                g_free(device->state);
-                device->state = g_strdup("CONNECTED");
-            } else if (have_paired && !paired) {
-                g_free(device->state);
-                device->state = g_strdup("UNPAIRED");
-                device->alsa_port = -1;
-            } else if (have_paired && paired) {
-                g_free(device->state);
-                device->state = g_strdup("DISCONNECTED");
-            }
-
-            g_printerr("[midi-ble-rt-gui] catalog BlueZ overlay: address=%s paired=%d connected=%d trusted=%d path=%s\n",
-                       address,
-                       device->paired,
-                       device->connected,
-                       device->trusted,
-                       path ? path : "-");
-            break;
-        }
-
-        g_free(address);
-        g_variant_unref(props);
-        g_variant_unref(ifaces);
-    }
-
-    g_variant_unref(objects);
-    g_variant_unref(reply);
-    g_object_unref(connection);
 }
 
 
@@ -1097,16 +752,10 @@ void mb_ui_facade_free(MbUiFacade *facade) {
 bool mb_ui_facade_scan_devices(MbUiFacade *facade,
                                unsigned timeout_seconds,
                                GError **error) {
-    (void)facade;
-    (void)timeout_seconds;
-
-    g_set_error(error,
-                G_IO_ERROR,
-                G_IO_ERROR_NOT_SUPPORTED,
-                "scan via GUI requires daemon D-Bus ScanDevices support");
-    return false;
+    return facade_load_scan_devices_from_daemon_dbus(facade,
+                                                     timeout_seconds,
+                                                     error);
 }
-
 
 
 MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
@@ -1134,7 +783,6 @@ MbUiSnapshot *mb_ui_facade_get_snapshot(MbUiFacade *facade) {
 
     return snapshot;
 }
-
 
 
 static void mark_scan_devices_imported_from_catalog(MbUiSnapshot *scan_snapshot) {
@@ -1173,71 +821,100 @@ static void mark_scan_devices_imported_from_catalog(MbUiSnapshot *scan_snapshot)
 }
 
 
+static MbUiDevice *facade_scan_device_from_daemon_dbus_dict(GVariant *dict) {
+    if (!dict)
+        return NULL;
 
-static bool config_file_mentions_address(const char *path, const char *address) {
-    if (!path || !*path || !address || !*address)
-        return false;
+    char *id = facade_variant_dict_dup_string(dict, "Id");
+    char *address = facade_variant_dict_dup_string(dict, "Address");
+    char *name = facade_variant_dict_dup_string(dict, "Name");
+    char *state = facade_variant_dict_dup_string(dict, "RuntimeState");
+    char *profile = facade_variant_dict_dup_string(dict, "Profile");
 
-    char *contents = NULL;
-    gsize len = 0;
+    bool imported = false;
+    bool paired = false;
+    bool trusted = false;
+    bool connected = false;
 
-    if (!g_file_get_contents(path, &contents, &len, NULL))
-        return false;
+    facade_variant_dict_lookup_bool(dict, "Imported", &imported);
+    facade_variant_dict_lookup_bool(dict, "Paired", &paired);
+    facade_variant_dict_lookup_bool(dict, "Trusted", &trusted);
+    facade_variant_dict_lookup_bool(dict, "Connected", &connected);
 
-    char *contents_down = g_ascii_strdown(contents, -1);
-    char *address_down = g_ascii_strdown(address, -1);
+    int rssi = facade_variant_dict_get_int32(dict, "RSSI", 0);
 
-    bool found = contents_down && address_down && strstr(contents_down, address_down) != NULL;
+    MbUiDevice *device = mb_ui_device_new(id,
+                                          address,
+                                          name,
+                                          state && *state ? state : "DISCOVERED",
+                                          -1);
 
-    g_free(address_down);
-    g_free(contents_down);
-    g_free(contents);
+    device->imported = imported;
+    device->paired = paired;
+    device->trusted = trusted;
+    device->connected = connected;
+    device->profile = g_strdup(profile && *profile ? profile : "standard_ble_midi");
 
-    return found;
+    /*
+     * Reuse config_file as a diagnostic carrier for scan RSSI until the UI model
+     * gets a dedicated discovery metadata struct.
+     */
+    device->config_file = g_strdup_printf("RSSI=%d", rssi);
+
+    g_free(profile);
+    g_free(state);
+    g_free(name);
+    g_free(address);
+    g_free(id);
+
+    return device;
 }
 
-static bool config_dir_has_imported_address(const char *dir_path, const char *address) {
-    if (!dir_path || !*dir_path || !address || !*address)
+static bool facade_load_scan_devices_from_daemon_dbus(MbUiFacade *facade,
+                                                      unsigned timeout_seconds,
+                                                      GError **error) {
+    if (!facade) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_INVALID_ARGUMENT,
+                    "invalid UI facade");
         return false;
-
-    GDir *dir = g_dir_open(dir_path, 0, NULL);
-    if (!dir)
-        return false;
-
-    bool found = false;
-    const char *name = NULL;
-
-    while (!found && (name = g_dir_read_name(dir)) != NULL) {
-        if (!g_str_has_suffix(name, ".ini"))
-            continue;
-
-        char *path = g_build_filename(dir_path, name, NULL);
-        found = config_file_mentions_address(path, address);
-        g_free(path);
     }
 
-    g_dir_close(dir);
-    return found;
-}
+    if (timeout_seconds < 1)
+        timeout_seconds = 1;
+    if (timeout_seconds > 30)
+        timeout_seconds = 30;
 
-static bool imported_config_exists_for_address(const char *address) {
-    if (!address || !*address)
+    GVariant *reply = facade_daemon_dbus_call_sync("ScanDevices",
+                                                   g_variant_new("(u)", (guint)timeout_seconds),
+                                                   G_VARIANT_TYPE("(aa{sv})"),
+                                                   error);
+    if (!reply)
         return false;
 
-    const char *base = g_get_user_config_dir();
+    if (!facade->scan_devices)
+        facade->scan_devices = g_ptr_array_new_with_free_func((GDestroyNotify)mb_ui_device_free);
+    else
+        g_ptr_array_set_size(facade->scan_devices, 0);
 
-    char *devices_dir = g_build_filename(base, "midi-ble-rt", "devices.d", NULL);
-    bool found = config_dir_has_imported_address(devices_dir, address);
-    g_free(devices_dir);
+    GVariant *devices = NULL;
+    g_variant_get(reply, "(@aa{sv})", &devices);
 
-    if (found)
-        return true;
+    GVariantIter iter;
+    GVariant *dict = NULL;
 
-    char *legacy_dir = g_build_filename(base, "midi-ble-rt", NULL);
-    found = config_dir_has_imported_address(legacy_dir, address);
-    g_free(legacy_dir);
+    g_variant_iter_init(&iter, devices);
+    while (g_variant_iter_next(&iter, "@a{sv}", &dict)) {
+        MbUiDevice *device = facade_scan_device_from_daemon_dbus_dict(dict);
+        if (device)
+            g_ptr_array_add(facade->scan_devices, device);
+        g_variant_unref(dict);
+    }
 
-    return found;
+    g_variant_unref(devices);
+    g_variant_unref(reply);
+    return true;
 }
 
 MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
@@ -1260,17 +937,8 @@ MbUiSnapshot *mb_ui_facade_get_scan_snapshot(MbUiFacade *facade) {
 }
 
 
-
-
-
 bool mb_ui_facade_scan(MbUiFacade *facade, GError **error) {
-    (void)facade;
-
-    g_set_error(error,
-                G_IO_ERROR,
-                G_IO_ERROR_NOT_SUPPORTED,
-                "scan via GUI requires daemon D-Bus ScanDevices support");
-    return false;
+    return mb_ui_facade_scan_devices(facade, 8, error);
 }
 
 
@@ -1370,175 +1038,6 @@ bool mb_ui_facade_refresh_device(MbUiFacade *facade,
     return run_device_command(facade, "daemon-recheck", device_id, error);
 }
 
-static bool save_device_config_with_options(MbUiFacade *facade,
-                                            const MbUiDevice *device,
-                                            const MbUiDeviceConfig *options,
-                                            GError **error) {
-    (void)facade;
-
-    if (!device || !device->id || !device->address) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid device for persistence");
-        return false;
-    }
-
-    MbUiDeviceConfig defaults;
-    mb_ui_device_config_defaults(&defaults);
-    const MbUiDeviceConfig *config = options ? options : &defaults;
-
-    char *path = device_config_path(device, error);
-    if (!path)
-        return false;
-
-    char *safe_id = sanitize_device_id(device->id);
-    char *alsa_name = g_strdup_printf("%s BLE-MIDI", safe_str(device->name, safe_id));
-
-    char *content = g_strdup_printf(
-        "[device]\n"
-        "id = %s\n"
-        "enabled = yes\n"
-        "address = %s\n"
-        "name = %s\n"
-        "profile = standard_ble_midi\n"
-        "connect_on_start = %s\n"
-        "alsa_port_name = %s\n"
-        "\n"
-        "[policy]\n"
-        "pair = %s\n"
-        "trust = %s\n"
-        "reconnect_on_link_loss = %s\n"
-        "\n"
-        "[midi]\n"
-        "enable_tx = %s\n",
-        safe_id,
-        safe_str(device->address, ""),
-        safe_str(device->name, safe_id),
-        config->connect_on_start ? "yes" : "no",
-        alsa_name,
-        config->pair ? "yes" : "no",
-        config->trust ? "yes" : "no",
-        config->reconnect_on_link_loss ? "yes" : "no",
-        config->enable_tx ? "yes" : "no");
-
-    bool ok = g_file_set_contents(path, content, -1, error);
-
-    g_free(content);
-    g_free(alsa_name);
-    g_free(safe_id);
-    g_free(path);
-
-    return ok;
-}
-
-
-static bool mb_ui_device_is_daemon_session_for_gui(const MbUiDevice *device) {
-    /*
-     * Dispositivos vindos apenas do scan cache entram com alsa_port = -1.
-     * Sessões reais do daemon têm porta ALSA >= 0.
-     */
-    return device && device->alsa_port >= 0;
-}
-
-static const char *mb_ui_profile_for_device_for_gui(const MbUiDevice *device) {
-    const char *name = device && device->name ? device->name : "";
-
-    if (g_strrstr(name, "GO:KEYS") ||
-        g_strrstr(name, "GO KEYS") ||
-        g_strrstr(name, "GOKEYS"))
-        return "roland_gokeys";
-
-    return "standard_ble_midi";
-}
-
-static char *mb_ui_find_daemon_session_id_by_address_for_gui(MbUiSnapshot *snapshot,
-                                                             const char *address) {
-    if (!snapshot || !snapshot->devices || !address || !*address)
-        return NULL;
-
-    for (guint i = 0; i < snapshot->devices->len; i++) {
-        const MbUiDevice *device = g_ptr_array_index(snapshot->devices, i);
-
-        if (!device || !device->address || !device->id)
-            continue;
-
-        if (g_ascii_strcasecmp(device->address, address) != 0)
-            continue;
-
-        if (!mb_ui_device_is_daemon_session_for_gui(device))
-            continue;
-
-        return g_strdup(device->id);
-    }
-
-    return NULL;
-}
-
-
-typedef struct {
-    char *id;
-    char *address;
-    char *name;
-    char *profile;
-} PairEnrollDevice;
-
-static void pair_enroll_device_clear(PairEnrollDevice *device) {
-    if (!device)
-        return;
-
-    g_clear_pointer(&device->id, g_free);
-    g_clear_pointer(&device->address, g_free);
-    g_clear_pointer(&device->name, g_free);
-    g_clear_pointer(&device->profile, g_free);
-}
-
-static const char *pair_profile_for_device_name(const char *name) {
-    if (name &&
-        (g_strrstr(name, "GO:KEYS") ||
-         g_strrstr(name, "GO KEYS") ||
-         g_strrstr(name, "GOKEYS")))
-        return "roland_gokeys";
-
-    return "standard_ble_midi";
-}
-
-static bool capture_pair_enroll_device(MbUiFacade *facade,
-                                       const char *device_id,
-                                       PairEnrollDevice *out,
-                                       GError **error) {
-    if (!facade || !device_id || !*device_id || !out) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_INVALID_ARGUMENT,
-                    "invalid discovery enrollment request");
-        return false;
-    }
-
-    MbUiSnapshot *snapshot = mb_ui_facade_get_scan_snapshot(facade);
-    const MbUiDevice *device = mb_ui_snapshot_find_device(snapshot, device_id);
-
-    if (!device) {
-        mb_ui_snapshot_free(snapshot);
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_NOT_FOUND,
-                    "device is not visible in current discovery result");
-        return false;
-    }
-
-    out->id = g_strdup(device->id);
-    out->address = g_strdup(device->address && *device->address ? device->address : device->id);
-    out->name = g_strdup(device->name ? device->name : "");
-    out->profile = g_strdup(device->profile && *device->profile
-                            ? device->profile
-                            : pair_profile_for_device_name(device->name));
-
-    mb_ui_snapshot_free(snapshot);
-    return true;
-}
-
-
 bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
                                       const char *device_id,
                                       const MbUiDeviceConfig *config,
@@ -1552,8 +1051,6 @@ bool mb_ui_facade_connect_with_config(MbUiFacade *facade,
      */
     return run_device_command(facade, "daemon-connect", device_id, error);
 }
-
-
 
 
 static bool try_bluez_forget_selector(MbUiFacade *facade,
@@ -1772,10 +1269,6 @@ bool mb_ui_facade_forget_device(MbUiFacade *facade,
 }
 
 
-
-
-
-
 bool mb_ui_facade_remove_imported_device(MbUiFacade *facade,
                                         const char *device_id,
                                         GError **error) {
@@ -1810,7 +1303,6 @@ bool mb_ui_facade_import_scanned_device(MbUiFacade *facade,
 }
 
 
-
 bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                                       const char *device_id,
                                       GError **error) {
@@ -1823,6 +1315,5 @@ bool mb_ui_facade_pair_scanned_device(MbUiFacade *facade,
                 "pair/import via GUI requires daemon D-Bus PairAndImportDevice support");
     return false;
 }
-
 
 
