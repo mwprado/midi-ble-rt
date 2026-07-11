@@ -578,6 +578,16 @@ static void daemon_switch_notify_active_cb(GObject *object,
 }
 
 
+
+static bool daemon_effective_functional(MbGnomeWindowState *state,
+                                        bool systemd_active) {
+    bool dbus_online = state &&
+                       state->snapshot &&
+                       state->snapshot->status.online;
+
+    return dbus_online || systemd_active;
+}
+
 static void daemon_root_observer_apply(MbGnomeWindowState *state) {
     if (!state)
         return;
@@ -637,10 +647,12 @@ static void daemon_observer_state_changed_cb(bool active,
                safe(active_state, "unknown"),
                safe(sub_state, "unknown"));
 
-    daemon_root_observer_set_functional(state, active);
+    bool functional = daemon_effective_functional(state, active);
+
+    daemon_root_observer_set_functional(state, functional);
     update_daemon_switch_state(state);
 
-    if (active && !state->daemon_transition_in_flight)
+    if (functional && !state->daemon_transition_in_flight)
         mb_gnome_window_refresh(state);
 }
 
@@ -1156,10 +1168,15 @@ static void refresh_task_done(GObject *source_object,
     }
 
     bool daemon_online = state->snapshot && state->snapshot->status.online;
+    bool previous_functional = state->daemon_functional;
 
-    g_printerr("[midi-ble-rt-gui] daemon snapshot: systemd_active=%d daemon_online=%d\n",
-               state->daemon_functional,
-               daemon_online);
+    if (!state->daemon_transition_in_flight)
+        state->daemon_functional = daemon_online;
+
+    g_printerr("[midi-ble-rt-gui] daemon snapshot: previous_functional=%d daemon_online=%d effective=%d\n",
+               previous_functional,
+               daemon_online,
+               state->daemon_functional);
 
     set_label(state->last_scan_label, "Catálogo atualizado agora");
     rebuild_sidebar(state);
