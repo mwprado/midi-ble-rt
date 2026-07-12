@@ -1,7 +1,6 @@
 #include "mb-gnome-window.h"
 #include "mb-ui-facade.h"
 #include "mb-daemon-observer.h"
-#include "mb-bluez-observer.h"
 
 #include <gio/gio.h>
 #include <stdbool.h>
@@ -34,7 +33,6 @@ typedef struct {
     bool bluez_discovering;
     guint daemon_transition_source_id;
     MbDaemonObserver *daemon_observer;
-    MbBluezObserver *bluez_observer;
     GtkWidget *footer_devices_label;
     GtkWidget *footer_connection_label;
     GtkWidget *last_scan_label;
@@ -479,7 +477,7 @@ static void daemon_root_observer_set_functional(MbGnomeWindowState *state,
      * even if the value did not change, propagate it because widgets may have
      * been created before the first daemon-status result.
      */
-    g_printerr("[midi-ble-rt-gui] daemon observer signal: functional=%d changed=%d\n",
+    g_debug("[midi-ble-rt-gui] daemon observer signal: functional=%d changed=%d\n",
                state->daemon_functional,
                changed);
 
@@ -496,7 +494,7 @@ static void daemon_observer_state_changed_cb(bool active,
     if (!state)
         return;
 
-    g_printerr("[midi-ble-rt-gui] daemon observer signal: active=%d active_state=%s sub_state=%s\n",
+    g_debug("[midi-ble-rt-gui] daemon observer signal: active=%d active_state=%s sub_state=%s\n",
                active,
                safe(active_state, "unknown"),
                safe(sub_state, "unknown"));
@@ -531,22 +529,27 @@ static void update_scan_button_state(MbGnomeWindowState *state) {
     if (!state || !state->scan_button)
         return;
 
+    /*
+     * Estado desconhecido não significa que o BlueZ não possa escanear.
+     * Somente um estado atual, recebido do daemon, pode bloquear o botão.
+     */
+    const bool bluez_known_unavailable =
+        state->daemon_dbus_ready &&
+        (!state->bluez_available ||
+         (state->bluez_powered_known && !state->bluez_powered));
+
     const char *label = "Adicionar instrumento";
 
     if (state->scan_in_flight)
         label = "Procurando instrumentos…";
-    else if (!state->daemon_dbus_ready)
-        label = "Serviço MIDI-BLE inativo";
-    else if (!state->bluez_available ||
-             !state->bluez_powered_known ||
-             !state->bluez_powered)
+    else if (bluez_known_unavailable)
         label = "Bluetooth desligado";
 
     button_set_icon_text(state->scan_button, "edit-find-symbolic", label);
 
-    bool sensitive = gui_runtime_available(state);
+    bool sensitive = !bluez_known_unavailable;
 
-    g_printerr("[midi-ble-rt-gui] scan gate: sensitive=%d dbus_ready=%d daemon=%d available=%d powered_known=%d powered=%d scan_busy=%d command_busy=%d\n",
+    g_debug("[midi-ble-rt-gui] scan gate: sensitive=%d dbus_ready=%d daemon=%d available=%d powered_known=%d powered=%d scan_busy=%d command_busy=%d\n",
                sensitive,
                state->daemon_dbus_ready,
                state->daemon_functional,
@@ -594,7 +597,7 @@ static void daemon_dbus_apply_bluetooth_state(
     state->bluez_powered = powered;
     state->bluez_discovering = discovering;
 
-    g_printerr("[midi-ble-rt-gui] daemon Bluetooth state: available=%d powered_known=%d powered=%d discovering=%d\n",
+    g_debug("[midi-ble-rt-gui] daemon Bluetooth state: available=%d powered_known=%d powered=%d discovering=%d\n",
                state->bluez_available,
                state->bluez_powered_known,
                state->bluez_powered,
@@ -639,8 +642,6 @@ static void daemon_dbus_read_initial_bluetooth_state(
      * do daemon está funcional. Não espere o snapshot assíncrono ou o estado
      * do unit systemd para liberar as ações dependentes do daemon.
      */
-    daemon_root_observer_set_functional(state, true);
-
     state->daemon_dbus_ready = true;
     daemon_root_observer_set_functional(state, true);
 
@@ -681,7 +682,7 @@ static void daemon_dbus_name_owner_changed_cb(
     if (g_strcmp0(name, "org.midi_ble_rt.Daemon") != 0)
         return;
 
-    g_printerr("[midi-ble-rt-gui] daemon D-Bus owner: old=%s new=%s\n",
+    g_debug("[midi-ble-rt-gui] daemon D-Bus owner: old=%s new=%s\n",
                old_owner && *old_owner ? old_owner : "-",
                new_owner && *new_owner ? new_owner : "-");
 
@@ -718,7 +719,7 @@ static void daemon_dbus_signal_cb(GDBusConnection *connection,
     if (!state)
         return;
 
-    g_printerr("[midi-ble-rt-gui] daemon D-Bus signal: %s\n",
+    g_debug("[midi-ble-rt-gui] daemon D-Bus signal: %s\n",
                signal_name && *signal_name ? signal_name : "-");
 
     if (g_strcmp0(signal_name, "BluetoothStateChanged") == 0) {
@@ -840,7 +841,7 @@ static void daemon_dbus_observer_start(MbGnomeWindowState *state) {
 
     daemon_dbus_read_initial_bluetooth_state(state);
 
-    g_printerr("[midi-ble-rt-gui] daemon D-Bus observer started: DeviceChanged=%u DeviceStateChanged=%u\n",
+    g_debug("[midi-ble-rt-gui] daemon D-Bus observer started: DeviceChanged=%u DeviceStateChanged=%u\n",
                state->daemon_dbus_device_changed_sub_id,
                state->daemon_dbus_state_changed_sub_id);
 }
@@ -1797,33 +1798,13 @@ static void scan_clicked_cb(GtkButton *button, gpointer user_data) {
     (void)button;
 
     MbGnomeWindowState *state = user_data;
-
     if (!state)
         return;
 
     /*
-     * The GUI is a daemon client.
-     *
-     * Do not gate scan on the GUI-side BlueZ observer.  Bluetooth availability,
-     * adapter power, discovery state and BlueZ errors are daemon-owned concerns
-     * and must be reported by ScanDevices() through the D-Bus facade.
+     * A GUI não decide se o BlueZ pode escanear.
+     * O facade chama ScanDevices() e o daemon consulta o BlueZ.
      */
-    if (!state->daemon_dbus_ready) {
-        show_error_dialog(state,
-                          "Serviço MIDI-BLE inativo",
-                          "Inicie o serviço MIDI-BLE antes de buscar instrumentos.");
-        return;
-    }
-
-    if (!state->bluez_available ||
-        !state->bluez_powered_known ||
-        !state->bluez_powered) {
-        show_error_dialog(state,
-                          "Bluetooth desligado",
-                          "Ligue o Bluetooth antes de buscar instrumentos BLE-MIDI.");
-        return;
-    }
-
     show_scan_pair_dialog(state);
 }
 
@@ -2421,13 +2402,6 @@ GtkWindow *mb_gnome_window_new(AdwApplication *application) {
 
     daemon_dbus_observer_start(state);
 
-    /*
-     * BlueZ observer intentionally disabled.
-     *
-     * BlueZ state belongs to midi-ble-rtd.  The GUI will regain scan/import
-     * through daemon D-Bus methods, not through direct BlueZ observation.
-     */
-    state->bluez_observer = NULL;
 
     mb_gnome_window_refresh(state);
 
