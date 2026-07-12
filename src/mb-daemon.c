@@ -4449,7 +4449,7 @@ static int run_config_directory_mode(const char *config_dir) {
     }
     rt.sigint_source_id = g_unix_signal_add(SIGINT, quit_main_loop, &rt);
     rt.sigterm_source_id = g_unix_signal_add(SIGTERM, quit_main_loop, &rt);
-    rt.reconnect_source_id = g_timeout_add(MB_RECONNECT_INTERVAL_MS, runtime_reconnect_cb, &rt);
+    rt.reconnect_source_id = g_timeout_add(MB_RECONNECT_POLL_INTERVAL_MS, runtime_reconnect_cb, &rt);
     rt.health_source_id = g_timeout_add(MB_DEVICE_HEALTH_INTERVAL_MS, runtime_device_health_cb, &rt);
     if (rt.cfg.stats_enabled)
         rt.stats_source_id = g_timeout_add(rt.cfg.stats_interval_ms,
