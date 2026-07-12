@@ -12,7 +12,6 @@ add_library(midi-ble-rt-ui-facade STATIC
     facade/mb-ui-facade.c
     facade/mb-ui-model.c
     facade/mb-daemon-observer.c
-    facade/mb-bluez-observer.c
 )
 
 target_include_directories(midi-ble-rt-ui-facade PUBLIC
