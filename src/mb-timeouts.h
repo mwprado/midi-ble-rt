@@ -18,7 +18,7 @@
 
 #define MB_BLUEZ_CONNECTED_WAIT_TIMEOUT_MS            15000
 #define MB_BLUEZ_CONNECTED_POLL_INTERVAL_MS             250
-#define MB_BLUEZ_AMBIGUOUS_TIMEOUT_GRACE_MS            3000
+#define MB_BLUEZ_AMBIGUOUS_TIMEOUT_GRACE_MS           15000
 #define MB_BLUEZ_RESET_AFTER_FAILURE_DELAY_MS          1000
 
 #define MB_GATT_SERVICES_RESOLVED_TIMEOUT_MS          15000
@@ -29,7 +29,17 @@
 #define MB_ALSA_RX_POLL_INTERVAL_MS                       1
 #define MB_ALSA_TX_POLL_TIMEOUT_MS                      100
 #define MB_DEVICE_HEALTH_INTERVAL_MS                   1000
-#define MB_RECONNECT_INTERVAL_MS                       10000
+
+/*
+ * Reconnect policy:
+ *
+ * - initial connection or failed fast reconnect: retry after 3 seconds;
+ * - link loss from STREAMING: make one near-immediate attempt;
+ * - polling only checks deadlines and never overlaps lifecycle attempts.
+ */
+#define MB_RECONNECT_POLL_INTERVAL_MS                    100
+#define MB_RECONNECT_INITIAL_DELAY_MS                   3000
+#define MB_RECONNECT_STREAMING_DELAY_MS                  100
 
 #define MB_STATS_DEFAULT_INTERVAL_MS                    1000
 #define MB_STATS_CTL_DEFAULT_INTERVAL_MS                1000
